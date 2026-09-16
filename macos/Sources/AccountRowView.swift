@@ -9,14 +9,19 @@ import AppKit
 final class AccountRowView: NSView {
 	private let content: RowContentView
 	private let highlight: NSVisualEffectView
+	/// The row owns what a click does. Reaching for the menu item's own action
+	/// does not work: giving an item a submenu makes AppKit replace its action
+	/// with an internal one belonging to the menu, and invoking that crashes.
+	private let onClick: (() -> Void)?
 
 	static let horizontalInset: CGFloat = 5
 	private static let lineHeight: CGFloat = 17
 	private static let titleHeight: CGFloat = 20
 
-	init(account: Account, isActive: Bool, width: CGFloat) {
+	init(account: Account, isActive: Bool, width: CGFloat, onClick: (() -> Void)? = nil) {
 		content = RowContentView(account: account, isActive: isActive)
 		highlight = NSVisualEffectView()
+		self.onClick = onClick
 		let lines = max(1, account.usage?.windows.count ?? 1)
 		let height = Self.titleHeight + CGFloat(lines) * Self.lineHeight + 10
 		super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
@@ -63,11 +68,9 @@ final class AccountRowView: NSView {
 	}
 
 	override func mouseUp(with event: NSEvent) {
-		guard let item = enclosingMenuItem, let menu = item.menu else { return }
-		menu.cancelTracking()
-		if let action = item.action, let target = item.target {
-			_ = (target as AnyObject).perform(action, with: item)
-		}
+		guard let onClick else { return }
+		enclosingMenuItem?.menu?.cancelTracking()
+		onClick()
 	}
 }
 

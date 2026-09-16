@@ -52,6 +52,15 @@ const GROUPS: Group[] = [
 		],
 	},
 	{
+		title: 'Menu bar',
+		entries: [
+			{ usage: 'menubar', what: 'open the menu bar app' },
+			{ usage: 'menubar install', what: 'and start it whenever you log in' },
+			{ usage: 'menubar stop | uninstall', what: 'close it, or stop it starting at login' },
+			{ usage: 'menubar status', what: 'is it running, is it set to start at login' },
+		],
+	},
+	{
 		title: 'Settings',
 		entries: [
 			{ usage: 'config', what: 'show every setting' },

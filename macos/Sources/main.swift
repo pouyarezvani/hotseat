@@ -226,13 +226,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	{
 		let item = NSMenuItem()
 		let isActive = account.id == entry.state.activeAccountId
+		let canSwitch = !isActive && !account.disabled
+		let provider = entry.id
+		let slot = String(account.slot)
 		item.view = AccountRowView(
-			account: account, isActive: isActive, width: Self.menuWidth)
-		item.representedObject = ["provider": entry.id, "slot": String(account.slot)]
-		if !isActive && !account.disabled {
-			item.target = self
-			item.action = #selector(seatAccount(_:))
-		}
+			account: account,
+			isActive: isActive,
+			width: Self.menuWidth,
+			onClick: canSwitch ? { [weak self] in self?.perform(["switch", provider, slot]) } : nil)
 		item.submenu = accountMenu(account, providerId: entry.id, isActive: isActive)
 		return item
 	}
@@ -443,13 +444,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	}
 
 	// MARK: - Actions
-
-	@objc private func seatAccount(_ sender: NSMenuItem) {
-		guard let payload = sender.representedObject as? [String: String],
-			let provider = payload["provider"], let slot = payload["slot"]
-		else { return }
-		perform(["switch", provider, slot])
-	}
 
 	@objc private func seatSelector(_ sender: NSMenuItem) {
 		let parts = split(sender)

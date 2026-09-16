@@ -10,6 +10,15 @@ import {
 import { readHistory, recordSwitch, type SwitchReason } from './core/history.ts';
 import { listMappings, mappingFor, removeMapping, setMapping } from './core/mappings.ts';
 import {
+	findApp,
+	installLoginItem,
+	isRunning,
+	loginItemInstalled,
+	removeLoginItem,
+	startMenuBar,
+	stopMenuBar,
+} from './core/menubar.ts';
+import {
 	accountsFor,
 	findAccount,
 	loadRegistry,
@@ -367,6 +376,47 @@ export async function main(argv: readonly string[]): Promise<number> {
 				for (const account of state.providers[providerId].accounts) {
 					process.stdout.write(`${account.email} ${headroom(account)}\n`);
 				}
+				return 0;
+			}
+			case 'menubar': {
+				const app = await findApp();
+				if (!app) {
+					problem('could not find Hotseat.app - build it with: bash macos/build.sh');
+					return 1;
+				}
+				const binary = process.execPath;
+				if (rest[0] === 'stop') {
+					await stopMenuBar();
+					success('the menu bar app is closed');
+					return 0;
+				}
+				if (rest[0] === 'install') {
+					await stopMenuBar();
+					const path = await installLoginItem(app, binary);
+					success('the menu bar app will now start when you log in');
+					note(path);
+					return 0;
+				}
+				if (rest[0] === 'uninstall') {
+					const existed = await removeLoginItem();
+					await stopMenuBar();
+					success(
+						existed ? 'it will no longer start at login' : 'it was not set to start at login',
+					);
+					return 0;
+				}
+				if (rest[0] === 'status') {
+					say(`running:  ${(await isRunning()) ? 'yes' : 'no'}`);
+					say(`at login: ${(await loginItemInstalled()) ? 'yes' : 'no'}`);
+					say(`app:      ${app}`);
+					return 0;
+				}
+				if (await isRunning()) {
+					note('the menu bar app is already running');
+					return 0;
+				}
+				await startMenuBar(app);
+				success('the menu bar app is running');
 				return 0;
 			}
 			case 'auto': {

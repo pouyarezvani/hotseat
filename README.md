@@ -208,6 +208,18 @@ Everything hotseat stores lives in `~/.hotseat`, owner-readable only:
 └── vault/            one saved login per account
 ```
 
+## Relaunching the menu bar app
+
+If you quit it:
+
+```sh
+hotseat menubar            # open it again
+hotseat menubar install    # and start it whenever you log in
+hotseat menubar status     # is it running, is it set to start at login
+hotseat menubar stop       # close it
+hotseat menubar uninstall  # stop it starting at login
+```
+
 ## Development
 
 ```sh
@@ -215,12 +227,21 @@ bun test              # the test suite
 bun run typecheck
 bun run lint
 bun run build         # the CLI binary
-bash macos/build.sh   # the menu bar app, including a render check
+bash macos/build.sh   # the menu bar app, including its own checks
 ```
 
-The menu bar build runs a rendering check that draws a highlighted account row
-off-screen and confirms its content survived. A highlight added as a subview
-paints over the row, which looks correct in code and is only visible on screen.
+Tests cover what each command does to disk, the switching policy across every
+branch, the terminal layout, and the contract between the menu and the CLI.
+That last one exists because the menu talks to the CLI by name: a test reads
+every command the menu invokes, every setting it writes and every value it
+offers, and fails if any of them is something the CLI would reject.
+
+The menu bar build runs its own checks against the real views. One renders a
+highlighted account row off-screen and confirms its content survived, because a
+highlight added as a subview paints over the row and that is only visible on
+screen. Another clicks a row and confirms the row's own handler ran: reaching
+for the menu item's action instead crashes, since giving an item a submenu makes
+AppKit replace that action with an internal one.
 
 ## License
 

@@ -67,11 +67,15 @@ struct Settings: Decodable {
 	var titleShowModelLimits = true
 	var titleShortenEmail = true
 	var autoThresholdPercent = 90.0
+	/// A limit of its own for the 5-hour window; 0 means the general one applies.
+	var autoThresholdFiveHour = 0.0
+	/// A limit of its own for the weekly window; 0 means the general one applies.
+	var autoThresholdWeekly = 0.0
 	var autoModelLimits: [String] = []
 
 	private enum Keys: String, CodingKey {
 		case titleCompact, titleShowAccount, titlePercentage, titleShowModelLimits
-		case titleShortenEmail, autoThresholdPercent, autoModelLimits
+		case titleShortenEmail, autoThresholdPercent, autoThresholdFiveHour, autoThresholdWeekly, autoModelLimits
 	}
 
 	init() {}
@@ -86,7 +90,44 @@ struct Settings: Decodable {
 		titleShortenEmail = try c.decodeIfPresent(Bool.self, forKey: .titleShortenEmail) ?? titleShortenEmail
 		autoThresholdPercent =
 			try c.decodeIfPresent(Double.self, forKey: .autoThresholdPercent) ?? autoThresholdPercent
+		autoThresholdFiveHour =
+			try c.decodeIfPresent(Double.self, forKey: .autoThresholdFiveHour) ?? autoThresholdFiveHour
+		autoThresholdWeekly =
+			try c.decodeIfPresent(Double.self, forKey: .autoThresholdWeekly) ?? autoThresholdWeekly
 		autoModelLimits = try c.decodeIfPresent([String].self, forKey: .autoModelLimits) ?? autoModelLimits
+	}
+}
+
+/// What one automatic pass did for one service, as the CLI reports it.
+struct TickReport: Decodable {
+	let provider: String
+	let outcome: String
+	let detail: String
+	let to: String?
+}
+
+/// A notification worth showing, if the pass did something a person would
+/// want to know about: a switch, or a switch that could not happen.
+struct Notice: Equatable {
+	let title: String
+	let body: String
+
+	/// The notice for a report, or nil when it is routine. The same notice
+	/// twice in a row is nil the second time, so a stuck state is said once.
+	static func from(_ report: TickReport, previous: Notice?) -> Notice? {
+		let service = Board.providerTitles[report.provider] ?? report.provider
+		let notice: Notice
+		switch report.outcome {
+		case "switched":
+			notice = Notice(title: "\(service) switched to \(report.to ?? "another account")", body: report.detail)
+		case "blocked":
+			notice = Notice(title: "\(service) could not switch", body: report.detail)
+		case "holding" where report.detail.hasPrefix("every other account is out of room"):
+			notice = Notice(title: "\(service): every account is out of room", body: "The account in use has reached a limit and no other account has room left.")
+		default:
+			return nil
+		}
+		return notice == previous ? nil : notice
 	}
 }
 

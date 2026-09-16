@@ -56,8 +56,7 @@ function describeEntrypoint(entrypoint: string | undefined): string {
  * inside an editor extension, which share this machine's credential but do not
  * look like a `claude` process.
  */
-export async function claudeSessions(): Promise<RunningProcess[]> {
-	const home = configHome();
+export async function claudeSessions(home = configHome()): Promise<RunningProcess[]> {
 	const found = new Map<number, string>();
 
 	const sessionNames = await readdir(join(home, 'sessions')).catch(() => [] as string[]);

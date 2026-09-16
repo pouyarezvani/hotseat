@@ -17,6 +17,10 @@ export interface Settings {
 	titleShortenEmail: boolean;
 	/** Switch once the account in use passes this share of any counted window. */
 	autoThresholdPercent: number;
+	/** A limit of its own for the 5-hour window, or 0 to use the general one. */
+	autoThresholdFiveHour: number;
+	/** A limit of its own for the weekly window, or 0 to use the general one. */
+	autoThresholdWeekly: number;
 	/**
 	 * Which models' own weekly limits count toward switching, by name, or
 	 * 'all'. Empty means only the 5h and weekly windows count. A named model at
@@ -42,6 +46,8 @@ export const DEFAULTS: Settings = {
 	titleShowModelLimits: true,
 	titleShortenEmail: true,
 	autoThresholdPercent: 90,
+	autoThresholdFiveHour: 0,
+	autoThresholdWeekly: 0,
 	autoModelLimits: [],
 	autoUnhealthyTicks: 3,
 	autoIntervalSeconds: 120,
@@ -63,6 +69,8 @@ interface Bound {
  */
 const BOUNDS: Partial<Record<keyof Settings, Bound>> = {
 	autoThresholdPercent: { min: 50, max: 99 },
+	autoThresholdFiveHour: { min: 0, max: 99 },
+	autoThresholdWeekly: { min: 0, max: 99 },
 	autoIntervalSeconds: { min: 30, max: 3600 },
 	autoCooldownSeconds: { min: 0, max: 86_400 },
 	autoUnhealthyTicks: { min: 1, max: 100 },
@@ -84,11 +92,12 @@ export async function loadSettings(): Promise<Settings> {
 		const bound = BOUNDS[key];
 		if (bound) {
 			const value = merged[key];
+			const clamped: number =
+				typeof value === 'number' && Number.isFinite(value)
+					? Math.min(bound.max, Math.max(bound.min, value))
+					: DEFAULTS[key];
 			Object.assign(merged, {
-				[key]:
-					typeof value === 'number' && Number.isFinite(value)
-						? Math.min(bound.max, Math.max(bound.min, value))
-						: DEFAULTS[key],
+				[key]: isPerWindowThreshold(key) && clamped > 0 && clamped < 50 ? 0 : clamped,
 			});
 			continue;
 		}
@@ -128,6 +137,11 @@ export function isSettingKey(value: string): value is keyof Settings {
 }
 
 /** Parses a command-line string into the type the key actually holds. */
+/** The two limits that may also be 0, meaning "the general limit applies". */
+function isPerWindowThreshold(key: keyof Settings): boolean {
+	return key === 'autoThresholdFiveHour' || key === 'autoThresholdWeekly';
+}
+
 export function coerce(key: keyof Settings, raw: string): Settings[keyof Settings] {
 	const current = DEFAULTS[key];
 	if (typeof current === 'number') {
@@ -136,6 +150,9 @@ export function coerce(key: keyof Settings, raw: string): Settings[keyof Setting
 		const bound = BOUNDS[key];
 		if (bound && (value < bound.min || value > bound.max)) {
 			throw new Error(`${key} must be between ${bound.min} and ${bound.max}`);
+		}
+		if (isPerWindowThreshold(key) && value > 0 && value < 50) {
+			throw new Error(`${key} is 0 for the general limit, or 50 to 99`);
 		}
 		return value;
 	}

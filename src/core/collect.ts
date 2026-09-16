@@ -1,8 +1,10 @@
 import { ClaudeProvider } from '../providers/claude/index.ts';
 import { CodexProvider } from '../providers/codex/index.ts';
-import { readJson, writeJsonAtomic } from './fs.ts';
-import { usageCachePath } from './paths.ts';
+import { classify, ServiceError } from './errors.ts';
+import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
+import { hotseatHome, usageCachePath } from './paths.ts';
 import { accountsFor, loadRegistry } from './registry.ts';
+import { sessionLogin, sessionRunning } from './session.ts';
 import { loadSettings } from './settings.ts';
 import type {
 	AccountRecord,
@@ -70,7 +72,12 @@ interface CacheEntry {
 	/** When a read was last tried, successful or not. Cadence counts from here. */
 	attemptedAtMs: number;
 	previousPercent?: number;
+	/** A saved login the service refused to refresh, not tried again until it changes. */
+	deadLogin?: string;
 }
+
+/** How long to wait after being told to slow down, when the service does not say. */
+export const THROTTLE_BACKOFF_MS = 10 * 60_000;
 
 interface LiveIdentity {
 	fingerprint: string;
@@ -86,7 +93,7 @@ interface UsageCache {
 }
 
 async function loadCache(): Promise<UsageCache> {
-	const stored = await readJson<Partial<UsageCache>>(usageCachePath());
+	const stored = await readJsonLoose<Partial<UsageCache>>(usageCachePath());
 	if (stored?.version !== 2) return { version: 2, entries: {}, identities: {} };
 	return { version: 2, entries: stored.entries ?? {}, identities: stored.identities ?? {} };
 }
@@ -140,6 +147,12 @@ export async function liveIdentity(
 	};
 }
 
+/** What one read attempt came back with, or why it did not. */
+interface Attempt {
+	usage: UsageSnapshot;
+	failure?: { kind: ReturnType<typeof classify>; retryAfterMs?: number; deadLogin?: string };
+}
+
 /**
  * Reads one account's usage using its own saved login. Every account is polled,
  * not just the one in use: an account with no reading cannot be compared, so
@@ -151,20 +164,62 @@ async function readUsage(
 	account: AccountRecord,
 	live: { credential: Credential; email: string } | null,
 	fetchedAt: string,
-): Promise<UsageSnapshot> {
+	deadLogin: string | undefined,
+): Promise<Attempt> {
+	const failed = (error: unknown, deadLoginNow?: string): Attempt => ({
+		usage: { fetchedAt, windows: [], error: plainError(error) },
+		failure: {
+			kind: classify(error),
+			...(error instanceof ServiceError && error.retryAfterMs !== undefined
+				? { retryAfterMs: error.retryAfterMs }
+				: {}),
+			...(deadLoginNow ? { deadLogin: deadLoginNow } : {}),
+		},
+	});
 	try {
 		// The installed credential is the freshest copy for whichever account
 		// holds it, because the agent may have rotated its token since it was saved.
 		if (live && live.email.toLowerCase() === account.email.toLowerCase()) {
-			return await provider.fetchUsage(live.credential);
+			return { usage: await provider.fetchUsage(live.credential) };
+		}
+		// An account open in another terminal is read with that terminal's own
+		// login, and never refreshed from here: the running agent owns that
+		// token now, and a refresh from a stale copy would log it out.
+		if (await sessionRunning(provider, account)) {
+			const owned = await sessionLogin(provider, account);
+			if (owned) return { usage: await provider.fetchUsage(owned) };
 		}
 		const stored = await loadCredential(account);
-		if (!stored) return { fetchedAt, windows: [], error: 'no saved login' };
-		const refreshed = await provider.refreshIfNeeded(stored);
+		if (!stored) return { usage: { fetchedAt, windows: [], error: 'no saved login' } };
+		if (deadLogin !== undefined && deadLogin === fingerprint(stored)) {
+			return {
+				usage: {
+					fetchedAt,
+					windows: [],
+					error: 'the saved login no longer works - run hotseat add to sign in again',
+				},
+				failure: { kind: 'auth', deadLogin },
+			};
+		}
+		let refreshed: Credential;
+		try {
+			refreshed = await provider.refreshIfNeeded(stored);
+		} catch (error) {
+			if (classify(error) === 'auth') {
+				return failed(
+					new ServiceError(
+						'the saved login no longer works - run hotseat add to sign in again',
+						401,
+					),
+					fingerprint(stored),
+				);
+			}
+			return failed(error);
+		}
 		if (refreshed !== stored) await storeCredential(account, refreshed);
-		return await provider.fetchUsage(refreshed);
+		return { usage: await provider.fetchUsage(refreshed) };
 	} catch (error) {
-		return { fetchedAt, windows: [], error: plainError(error) };
+		return failed(error);
 	}
 }
 
@@ -186,6 +241,31 @@ export function plainError(error: unknown): string {
 function shown(record: AccountRecord): Omit<AccountRecord, 'login'> {
 	const { login: _login, ...rest } = record;
 	return rest;
+}
+
+/** A reading with a reset time or a number above zero is evidence; all zeros with no clock is not. */
+function hasEvidence(snapshot: UsageSnapshot): boolean {
+	return snapshot.windows.some((window) => window.resetsAt !== undefined || window.percent > 0);
+}
+
+/** A new reading keeps the old reset time for a window that came without one, while that time is still ahead. */
+function carryResets(
+	fresh: UsageSnapshot,
+	cached: UsageSnapshot | undefined,
+	now: number,
+): UsageSnapshot {
+	if (!cached) return fresh;
+	return {
+		...fresh,
+		windows: fresh.windows.map((window) => {
+			if (window.resetsAt !== undefined) return window;
+			const before = cached.windows.find((old) => old.key === window.key)?.resetsAt;
+			const at = before ? Date.parse(before) : Number.NaN;
+			return before !== undefined && Number.isFinite(at) && at > now
+				? { ...window, resetsAt: before }
+				: window;
+		}),
+	};
 }
 
 /** A reading whose every window has already reset says nothing about now. */
@@ -213,10 +293,36 @@ export async function collectState(
 	const providerSet = options.providers ?? PROVIDERS;
 	const providers = {} as Record<ProviderId, ProviderState>;
 
+	const touched = new Set<string>();
+
 	for (const id of Object.keys(providerSet) as ProviderId[]) {
 		const provider = providerSet[id];
 		const records = accountsFor(registry, id);
-		const installed = await provider.readAgentCredential().catch(() => null);
+		let installed = await provider.readAgentCredential().catch(() => null);
+		let liveWaitsForAgent = false;
+		if (installed) {
+			// On an idle machine nobody refreshes the installed login, so it
+			// expires and reads as refused. With no agent running, hotseat
+			// refreshes it; with one running, that agent will on its next turn.
+			const expires = provider.expiresAt?.(installed);
+			if (expires !== undefined && expires <= now) {
+				const running = await provider.runningProcesses().catch(() => []);
+				if (running.length === 0) {
+					const refreshed = await provider.refreshIfNeeded(installed).catch(() => null);
+					if (refreshed && refreshed !== installed) {
+						await provider.writeAgentCredential(refreshed).catch(() => undefined);
+						installed = refreshed;
+						const who = await provider.identify(refreshed).catch(() => undefined);
+						const owner = who
+							? records.find((record) => record.email.toLowerCase() === who.email.toLowerCase())
+							: undefined;
+						if (owner) await storeCredential(owner, refreshed);
+					}
+				} else {
+					liveWaitsForAgent = true;
+				}
+			}
+		}
 		let live: { credential: Credential; email: string } | null = null;
 		if (installed) {
 			const identity = await liveIdentity(provider, installed, registry, cache);
@@ -241,25 +347,70 @@ export async function collectState(
 							thresholdPercent: settings.autoThresholdPercent,
 						});
 				if (cached && age < due) return { ...shown(record), usage: cached.snapshot };
+				const retryAt = cached?.snapshot.retryAt ? Date.parse(cached.snapshot.retryAt) : Number.NaN;
+				if (cached && Number.isFinite(retryAt) && retryAt > now)
+					return { ...shown(record), usage: cached.snapshot };
 
-				const usage = await readUsage(provider, record, live, fetchedAt);
-				if (usage.windows.length > 0) {
+				if (isActive && liveWaitsForAgent) {
+					// Nothing to read with: the token has expired and its owner
+					// is about to renew it. Neither a failure nor a reason to move.
+					const snapshot: UsageSnapshot = {
+						...(good ? cached.snapshot : { fetchedAt, windows: [] }),
+						error:
+							'the login in use has expired; the running agent will refresh it on its next turn',
+						errorKind: 'other',
+					};
 					cache.entries[record.id] = {
-						snapshot: usage,
+						snapshot,
+						fetchedAtMs: good ? cached.fetchedAtMs : now,
+						attemptedAtMs: now,
+						...(cached?.previousPercent !== undefined
+							? { previousPercent: cached.previousPercent }
+							: {}),
+					};
+					touched.add(record.id);
+					return { ...shown(record), usage: snapshot };
+				}
+
+				const attempt = await readUsage(provider, record, live, fetchedAt, cached?.deadLogin);
+				touched.add(record.id);
+				const usage = attempt.usage;
+				if (usage.windows.length > 0 && !attempt.failure) {
+					if (good && !hasEvidence(usage) && hasEvidence(cached.snapshot)) {
+						// All zeros with no clock is what the service sends when it
+						// has nothing to say. It does not replace numbers that said something.
+						cache.entries[record.id] = { ...cached, attemptedAtMs: now };
+						return { ...shown(record), usage: cached.snapshot };
+					}
+					const snapshot = carryResets(usage, good ? cached.snapshot : undefined, now);
+					cache.entries[record.id] = {
+						snapshot,
 						fetchedAtMs: now,
 						attemptedAtMs: now,
 						...(usedPercent !== undefined ? { previousPercent: usedPercent } : {}),
 					};
-					return { ...shown(record), usage };
+					return { ...shown(record), usage: snapshot };
 				}
 				// A failed read replaces no numbers: usage only climbs within a
 				// window, so the last good reading stays a valid floor until that
-				// window resets. The failure is still shown, and counted.
-				const failedReads = (cached?.snapshot.failedReads ?? 0) + 1;
+				// window resets. The failure is still shown, and an auth failure
+				// counted; a busy or unreachable service says nothing about the login.
+				const kind = attempt.failure?.kind ?? 'other';
+				const failedReads = kind === 'auth' ? (cached?.snapshot.failedReads ?? 0) + 1 : undefined;
 				const keep = good && !expired(cached.snapshot, now);
-				const snapshot: UsageSnapshot = keep
-					? { ...cached.snapshot, error: usage.error ?? 'could not read usage', failedReads }
-					: { ...usage, failedReads };
+				const wait =
+					kind === 'throttled'
+						? new Date(now + (attempt.failure?.retryAfterMs ?? THROTTLE_BACKOFF_MS)).toISOString()
+						: undefined;
+				const snapshot: UsageSnapshot = {
+					...(keep ? cached.snapshot : usage),
+					error: usage.error ?? 'could not read usage',
+					errorKind: kind,
+					...(failedReads !== undefined ? { failedReads } : {}),
+					...(wait ? { retryAt: wait } : {}),
+				};
+				if (failedReads === undefined) delete snapshot.failedReads;
+				if (!wait) delete snapshot.retryAt;
 				cache.entries[record.id] = {
 					snapshot,
 					fetchedAtMs: keep ? cached.fetchedAtMs : now,
@@ -267,6 +418,7 @@ export async function collectState(
 					...(cached?.previousPercent !== undefined
 						? { previousPercent: cached.previousPercent }
 						: {}),
+					...(attempt.failure?.deadLogin ? { deadLogin: attempt.failure.deadLogin } : {}),
 				};
 				return { ...shown(record), usage: snapshot };
 			}),
@@ -278,12 +430,25 @@ export async function collectState(
 		providers[id] = { accounts, ...(active ? { activeAccountId: active.id } : {}) };
 	}
 
-	// Drop cache entries for accounts that no longer exist, so the file cannot
+	// Written under a lock, over whatever another pass wrote meanwhile: two
+	// collectors may run at once, and each keeps only the accounts it read.
+	// Entries for accounts that no longer exist are dropped, so the file cannot
 	// grow without bound as accounts come and go.
-	const known = new Set(registry.accounts.map((account) => account.id));
-	for (const id of Object.keys(cache.entries)) {
-		if (!known.has(id)) delete cache.entries[id];
+	const lock = await acquireLock(hotseatHome(), 10_000, 'usage.lock');
+	try {
+		const latest = await loadCache();
+		for (const id of touched) {
+			const entry = cache.entries[id];
+			if (entry) latest.entries[id] = entry;
+		}
+		latest.identities = { ...latest.identities, ...cache.identities };
+		const known = new Set(registry.accounts.map((account) => account.id));
+		for (const id of Object.keys(latest.entries)) {
+			if (!known.has(id)) delete latest.entries[id];
+		}
+		await writeJsonAtomic(usageCachePath(), latest, 0o600);
+	} finally {
+		await lock.release();
 	}
-	await writeJsonAtomic(usageCachePath(), cache, 0o600);
 	return { version: 1, updatedAt: fetchedAt, providers };
 }

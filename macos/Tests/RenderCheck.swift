@@ -181,4 +181,24 @@ if let mark = Logo.image(for: "claude", in: logos) {
 	}
 }
 
+// MARK: - Notices
+//
+// A pass that switched, or could not, is worth a notification; a routine
+// hold is not, and the same stuck state is said once rather than every minute.
+
+print("notices")
+let switched = TickReport(provider: "claude", outcome: "switched", detail: "switched to b@example.com", to: "b@example.com")
+let first = Notice.from(switched, previous: nil)
+check("a switch is announced", first?.title == "Claude switched to b@example.com", first?.title ?? "nil")
+check("the same switch is not announced twice", Notice.from(switched, previous: first) == nil)
+let hold = TickReport(provider: "claude", outcome: "holding", detail: "at 50%, below the 90% limit", to: nil)
+check("a routine hold is not announced", Notice.from(hold, previous: nil) == nil)
+let spent = TickReport(provider: "codex", outcome: "holding", detail: "every other account is out of room too", to: nil)
+check("every account out of room is announced", Notice.from(spent, previous: nil)?.title == "Codex: every account is out of room")
+let blocked = TickReport(provider: "claude", outcome: "blocked", detail: "b@example.com: no saved login", to: nil)
+check("a switch that could not happen is announced", Notice.from(blocked, previous: nil)?.title == "Claude could not switch")
+let decoded = try? JSONDecoder().decode(
+	Settings.self, from: "{\"autoThresholdFiveHour\": 95}".data(using: .utf8)!)
+check("the per-window limits decode with defaults", decoded?.autoThresholdFiveHour == 95 && decoded?.autoThresholdWeekly == 0)
+
 exit(failures == 0 ? 0 : 1)

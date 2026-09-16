@@ -1,3 +1,4 @@
+import type { FailureKind } from './errors.ts';
 export type ProviderId = 'claude' | 'codex';
 
 export const PROVIDER_IDS: readonly ProviderId[] = ['claude', 'codex'];
@@ -38,8 +39,12 @@ export interface UsageSnapshot {
 	spendPercent?: number;
 	/** What the latest read said when it failed, with the last good numbers kept. */
 	error?: string;
-	/** Reads that have failed in a row, for deciding a login is gone. */
+	/** What kind of failure that was. Only an auth failure counts against the login. */
+	errorKind?: FailureKind;
+	/** Reads refused as a bad login, in a row, for deciding the login is gone. */
 	failedReads?: number;
+	/** When the service said to try again, after telling us to slow down. */
+	retryAt?: string;
 }
 
 export type Credential = Record<string, unknown>;
@@ -48,6 +53,8 @@ export interface Identity {
 	email: string;
 	plan?: string;
 	accountId?: string;
+	organizationId?: string;
+	organizationName?: string;
 }
 
 export interface RunningProcess {
@@ -77,6 +84,10 @@ export interface SessionSupport {
 	issuedAt(credential: Credential): number;
 	/** Anything else the folder needs before the agent will start there. */
 	seed?(dir: string): Promise<void>;
+	/** Whether an agent is running out of that folder right now. */
+	isRunning(dir: string): Promise<boolean>;
+	/** Removes whatever the folder's login left outside it, such as a keychain item. */
+	forget(dir: string): Promise<void>;
 }
 
 export interface Provider {
@@ -90,6 +101,10 @@ export interface Provider {
 	fetchUsage(credential: Credential): Promise<UsageSnapshot>;
 	refreshIfNeeded(credential: Credential): Promise<Credential>;
 	runningProcesses(): Promise<RunningProcess[]>;
+	/** When the access token stops working, if the credential says. */
+	expiresAt?(credential: Credential): number | undefined;
+	/** Tells the agent's own records who is signed in now. */
+	recordIdentity?(identity: Identity): Promise<void>;
 }
 
 /** An account as shown: everything but its login, which never leaves the file. */

@@ -97,9 +97,17 @@ Two things keep it from thrashing:
 - An account needs **at least 5% left** to be worth moving to, so a switch never
   lands somewhere that is about to run out.
 
-If the login in use stops answering for three checks in a row, hotseat treats
-it as gone and switches away from it. Each service is judged on its own:
-switching Claude never touches Codex.
+If the service refuses the login in use three reads in a row, hotseat treats
+it as gone and switches away from it. A busy service, an outage, or a token
+that expired while nothing was running do not count: hotseat waits as long
+as it was asked to, refreshes an expired token itself when no agent is
+running, and leaves one to a running agent. An account whose saved login is
+refused is never switched to, and is marked on the board until you sign in
+to it again. Each service is judged on its own: switching Claude never
+touches Codex.
+
+The menu bar app shows a notification when it switches, when it could not,
+and when every account is out of room.
 
 ## Two accounts at the same time
 
@@ -196,6 +204,8 @@ An export contains live logins. Keep it private and delete it when done.
 | `titleShowModelLimits` | `true` | include per-model weekly limits |
 | `titleShortenEmail` | `true` | show the part before the @ |
 | `autoThresholdPercent` | `90` | switch once a limit reaches this |
+| `autoThresholdFiveHour` | `0` | a limit of its own for the 5-hour window, or 0 for the general one |
+| `autoThresholdWeekly` | `0` | a limit of its own for the weekly window, or 0 for the general one |
 | `autoModelLimits` | empty | model limits that count too: names, or `all` |
 | `autoCooldownSeconds` | `300` | minimum gap between switches |
 | `autoUnhealthyTicks` | `3` | failed reads in a row before switching away |

@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { retryAfterMs, ServiceError } from '../../core/errors.ts';
 import { readJson, writeJsonAtomic } from '../../core/fs.ts';
 import type {
 	Credential,
@@ -82,6 +83,10 @@ export const codexSession: SessionSupport = {
 				: Number.NaN;
 		return Number.isFinite(stamp) ? stamp : 0;
 	},
+	// Codex leaves no record of which home a running process uses, so a
+	// session is never known to be running; nothing outside the folder to forget.
+	isRunning: async () => false,
+	forget: async () => undefined,
 };
 
 /** Turns a window's duration into the label a person uses for it. */
@@ -191,7 +196,13 @@ export class CodexProvider implements Provider {
 				accept: 'application/json',
 			},
 		});
-		if (!response.ok) throw new Error(`usage request failed with ${response.status}`);
+		if (!response.ok) {
+			throw new ServiceError(
+				`usage request failed with ${response.status}`,
+				response.status,
+				retryAfterMs(response.headers.get('retry-after'), Date.now()),
+			);
+		}
 		return (await response.json()) as UsagePayload;
 	}
 
@@ -211,7 +222,9 @@ export class CodexProvider implements Provider {
 				scope: 'openid profile email',
 			}),
 		});
-		if (!response.ok) throw new Error(`token refresh failed with ${response.status}`);
+		if (!response.ok) {
+			throw new ServiceError(`token refresh failed with ${response.status}`, response.status);
+		}
 		const body = (await response.json()) as {
 			access_token: string;
 			refresh_token?: string;

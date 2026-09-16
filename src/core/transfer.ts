@@ -3,7 +3,8 @@ import { PROVIDERS } from './collect.ts';
 import { readJson, writeJsonAtomic } from './fs.ts';
 import { hotseatHome } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry } from './registry.ts';
-import type { AccountRecord, Credential, ProviderId, Registry } from './types.ts';
+import { forgetSession } from './session.ts';
+import type { AccountRecord, Credential, Provider, ProviderId, Registry } from './types.ts';
 import { PROVIDER_IDS } from './types.ts';
 import { storeCredential } from './vault.ts';
 
@@ -104,8 +105,13 @@ export async function moveSlot(
 }
 
 /** Deletes everything hotseat stores. The agents' own logins are untouched. */
-export async function purge(): Promise<string> {
+export async function purge(providers: Record<ProviderId, Provider> = PROVIDERS): Promise<string> {
 	const home = hotseatHome();
+	// Session logins live partly outside the folder, in the keychain.
+	const registry = await loadRegistry().catch(() => null);
+	for (const account of registry?.accounts ?? []) {
+		await forgetSession(providers[account.provider], account);
+	}
 	await rm(home, { recursive: true, force: true });
 	return home;
 }

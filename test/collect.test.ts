@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { ACTIVE_CALM_MS, CANDIDATE_MS, collectState, plainError } from '../src/core/collect.ts';
+import { ServiceError } from '../src/core/errors.ts';
 import { updateRegistry, upsertAccount } from '../src/core/registry.ts';
+import { prepareSession, sessionDir } from '../src/core/session.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
-import { storeCredential } from '../src/core/vault.ts';
+import { loadCredential, storeCredential } from '../src/core/vault.ts';
 import { cred, type FakeProvider, fakeProviders } from './fake-provider.ts';
 import { withHome } from './helpers.ts';
 
@@ -77,7 +79,8 @@ describe('reading every account', () => {
 			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
 			expect(usage?.windows.map((window) => window.percent)).toEqual([10, 5]);
 			expect(usage?.error).toBe('read too often, waiting a while');
-			expect(usage?.failedReads).toBe(1);
+			expect(usage?.errorKind).toBe('throttled');
+			expect(usage?.failedReads).toBeUndefined();
 			expect(usage?.fetchedAt).toBe(new Date(T).toISOString());
 		});
 	});
@@ -190,5 +193,168 @@ describe('what a failed read says', () => {
 		['no saved login', 'no saved login'],
 	])('"%s" reads as "%s"', (raw, plain) => {
 		expect(plainError(new Error(raw))).toBe(plain);
+	});
+});
+
+describe('what counts as a login that stopped working', () => {
+	test('a throttled read is not counted, and is not tried again before the service says', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			await collectState({ providers, now: T });
+			providers.claude.failures.set(
+				'B',
+				new ServiceError('usage request failed with 429', 429, 120_000),
+			);
+			const later = T + CANDIDATE_MS + 1;
+			const state = await collectState({ providers, now: later });
+			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+			expect(usage?.errorKind).toBe('throttled');
+			expect(usage?.failedReads).toBeUndefined();
+			expect(usage?.retryAt).toBe(new Date(later + 120_000).toISOString());
+			const reads = providers.claude.readsOf.get('B') ?? 0;
+			await collectState({ providers, now: later + 60_000, force: true });
+			expect(providers.claude.readsOf.get('B')).toBe(reads);
+			await collectState({ providers, now: later + 121_000, force: true });
+			expect(providers.claude.readsOf.get('B')).toBe(reads + 1);
+		});
+	});
+
+	test('an outage or a timeout is shown but not counted', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.failures.set('B', new ServiceError('usage request failed with 503', 503));
+			const state = await collectState({ providers, now: T });
+			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+			expect(usage?.errorKind).toBe('service');
+			expect(usage?.failedReads).toBeUndefined();
+		});
+	});
+
+	test('a login the service refuses is counted', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.failures.set('B', new ServiceError('usage request failed with 401', 401));
+			const state = await collectState({ providers, now: T });
+			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+			expect(usage?.errorKind).toBe('auth');
+			expect(usage?.failedReads).toBe(1);
+		});
+	});
+
+	test('a saved login the service refuses to refresh is not retried until it changes', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.refreshFailures.set(
+				'B',
+				new ServiceError('token refresh failed with 400 invalid_grant', 400),
+			);
+			const state = await collectState({ providers, now: T });
+			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+			expect(usage?.error).toBe(
+				'the saved login no longer works - run hotseat add to sign in again',
+			);
+			expect(usage?.errorKind).toBe('auth');
+			const refreshes = providers.claude.calls.refresh;
+			await collectState({ providers, now: T + CANDIDATE_MS + 1 });
+			await collectState({ providers, now: T + 2 * CANDIDATE_MS + 2 });
+			expect(providers.claude.calls.refresh).toBe(refreshes);
+			await storeCredential(b, cred('B2'));
+			providers.claude.readings.set('B2', () => reading(10));
+			await collectState({ providers, now: T + 3 * CANDIDATE_MS + 3 });
+			expect(providers.claude.calls.refresh).toBe(refreshes + 1);
+		});
+	});
+});
+
+describe('a reading that says nothing', () => {
+	test('does not replace a real one', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			await collectState({ providers, now: T });
+			providers.claude.readings.set('B', () => ({
+				fetchedAt: 'x',
+				windows: [
+					{ key: 'five_hour', label: '5h', percent: 0 },
+					{ key: 'seven_day', label: 'week', percent: 0 },
+				],
+			}));
+			const state = await collectState({ providers, now: T + CANDIDATE_MS + 1 });
+			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+			expect(usage?.windows.map((window) => window.percent)).toEqual([10, 5]);
+			expect(usage?.error).toBeUndefined();
+		});
+	});
+
+	test('a reset time missing from a new reading is carried forward while it is still ahead', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const reset = new Date(T + 5 * 3_600_000).toISOString();
+			await collectState({ providers, now: T });
+			providers.claude.readings.set('B', () => ({
+				fetchedAt: 'x',
+				windows: [
+					{ key: 'five_hour', label: '5h', percent: 12 },
+					{ key: 'seven_day', label: 'week', percent: 6 },
+				],
+			}));
+			const state = await collectState({ providers, now: T + CANDIDATE_MS + 1 });
+			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+			expect(usage?.windows.map((window) => [window.percent, window.resetsAt])).toEqual([
+				[12, reset],
+				[6, reset],
+			]);
+		});
+	});
+});
+
+describe('the login in use on an idle machine', () => {
+	test('is refreshed by hotseat when it expired and nothing is running', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			providers.claude.installed = cred('A', 100, T - 1000);
+			providers.claude.rotate = '+';
+			providers.claude.identities.set('A+', { email: 'a@example.com' });
+			const state = await collectState({ providers, now: T });
+			expect(providers.claude.calls.refresh).toBeGreaterThan(0);
+			expect(providers.claude.installed?.token).toBe('A+');
+			expect((await loadCredential(a))?.token).toBe('A+');
+			const usage = state.providers.claude.accounts.find((account) => account.id === a.id)?.usage;
+			expect(usage?.windows.length).toBe(2);
+			expect(usage?.error).toBeUndefined();
+		});
+	});
+
+	test('is left to a running agent, and the wait is not held against it', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			await collectState({ providers, now: T });
+			providers.claude.installed = cred('A', 100, T + ACTIVE_CALM_MS);
+			providers.claude.running = [{ pid: 1, command: 'claude' }];
+			providers.claude.failures.set('A', new ServiceError('usage request failed with 401', 401));
+			const state = await collectState({ providers, now: T + ACTIVE_CALM_MS + 1 });
+			const usage = state.providers.claude.accounts.find((account) => account.id === a.id)?.usage;
+			expect(usage?.windows.length).toBe(2);
+			expect(usage?.failedReads).toBeUndefined();
+			expect(usage?.error).toContain('refresh');
+			expect(providers.claude.refreshesOf.get('A') ?? 0).toBe(0);
+			expect(providers.claude.installed?.token).toBe('A');
+		});
+	});
+});
+
+describe('an account open in another terminal', () => {
+	test("is read with that terminal's own login and never refreshed from here", async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const session = await prepareSession(providers.claude, b);
+			await providers.claude.session.writeLogin(session.dir, cred('B-session', 200));
+			providers.claude.readings.set('B-session', () => reading(33));
+			providers.claude.runningIn.add(sessionDir(providers.claude, b));
+			const state = await collectState({ providers, now: T });
+			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+			expect(usage?.windows[0]?.percent).toBe(33);
+			expect(providers.claude.refreshesOf.get('B') ?? 0).toBe(0);
+			expect(providers.claude.refreshesOf.get('B-session') ?? 0).toBe(0);
+		});
 	});
 });

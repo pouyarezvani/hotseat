@@ -16,6 +16,10 @@ export type Trigger = 'proactive' | 'at-limit' | 'failover';
  */
 export interface PolicySettings {
 	thresholdPercent: number;
+	/** A limit of its own for the 5-hour window; 0 or absent means the general one. */
+	thresholdFiveHour?: number;
+	/** A limit of its own for the weekly window; 0 or absent means the general one. */
+	thresholdWeekly?: number;
 	cooldownSeconds: number;
 	/** Model names whose own weekly limit counts, or 'all', or empty for none. */
 	modelLimits: string[];
@@ -73,6 +77,42 @@ export function headroom(account: AccountState, modelLimits: string[]): number |
 	const windows = relevantWindows(account, modelLimits);
 	if (windows.length === 0) return undefined;
 	return 100 - Math.max(...windows.map((window) => window.percent));
+}
+
+/** The account-wide short window, however the service names it. */
+export function isFiveHourWindow(window: Pick<UsageWindow, 'key' | 'label'>): boolean {
+	return window.key === 'five_hour' || (!isModelWindow(window) && !isWeeklyWindow(window));
+}
+
+/** The limit that applies to one window: its own, when set, else the general one. */
+export function windowThreshold(
+	window: Pick<UsageWindow, 'key' | 'label'>,
+	settings: PolicySettings,
+): number {
+	if (isModelWindow(window)) return settings.thresholdPercent;
+	if (isWeeklyWindow(window)) return settings.thresholdWeekly || settings.thresholdPercent;
+	if (isFiveHourWindow(window)) return settings.thresholdFiveHour || settings.thresholdPercent;
+	return settings.thresholdPercent;
+}
+
+/** The counted window closest to, or furthest past, its own limit. */
+export function tightest(
+	account: AccountState,
+	settings: PolicySettings,
+): { window: UsageWindow; threshold: number } | undefined {
+	let best: { window: UsageWindow; threshold: number } | undefined;
+	for (const window of relevantWindows(account, settings.modelLimits)) {
+		const threshold = windowThreshold(window, settings);
+		if (!best || window.percent - threshold > best.window.percent - best.threshold)
+			best = { window, threshold };
+	}
+	return best;
+}
+
+/** Whether any counted window has reached its own limit. */
+export function overThreshold(account: AccountState, settings: PolicySettings): boolean {
+	const found = tightest(account, settings);
+	return found !== undefined && found.window.percent >= found.threshold;
 }
 
 function parseReset(iso: string | undefined, now: number): number | undefined {
@@ -150,24 +190,26 @@ export interface Verdict {
 
 /** Decides whether this tick should switch at all, and why. */
 export function decideTrigger(
-	activeHeadroom: number | undefined,
+	active: AccountState | undefined,
 	settings: PolicySettings,
 	memory: SwitchMemory,
 	unhealthyTicks: number,
 	now: number,
 ): Verdict {
 	let trigger: Trigger;
-	// A login that keeps failing to read is treated as gone, whatever its last
+	const found = active ? tightest(active, settings) : undefined;
+	// A login that keeps being refused is treated as gone, whatever its last
 	// good numbers said: the numbers may be hours old and the token revoked.
 	if (unhealthyTicks >= settings.unhealthyTicks && settings.unhealthyTicks > 0) {
 		trigger = 'failover';
-	} else if (activeHeadroom !== undefined) {
-		const used = 100 - activeHeadroom;
-		if (used < settings.thresholdPercent) {
+	} else if (found) {
+		const used = found.window.percent;
+		if (used < found.threshold) {
 			// Floored, so a reading a hair under the limit never prints as at it.
-			return { hold: `at ${Math.floor(used)}%, below the ${settings.thresholdPercent}% limit` };
+			return { hold: `at ${Math.floor(used)}%, below the ${found.threshold}% limit` };
 		}
-		trigger = activeHeadroom <= 0 ? 'at-limit' : 'proactive';
+		trigger =
+			(headroom(active as AccountState, settings.modelLimits) ?? 1) <= 0 ? 'at-limit' : 'proactive';
 	} else {
 		return {
 			hold: `no reading on the account in use, ${unhealthyTicks + 1} of ${settings.unhealthyTicks} before failing over`,
@@ -310,11 +352,12 @@ export function rankCandidates(input: RankInput): AccountState[] {
 	const activeHeadroom = active ? headroom(active, models) : undefined;
 	const pool = accounts.filter((account) => !account.disabled && account.id !== activeId);
 
-	const allAbove = everyAccountAboveThreshold(
-		pool.map((account) => headroom(account, models)),
-		activeHeadroom,
-		settings.thresholdPercent,
-	);
+	const measured = pool.filter((account) => headroom(account, models) !== undefined);
+	const allAbove =
+		active !== undefined &&
+		overThreshold(active, settings) &&
+		measured.length > 0 &&
+		measured.every((account) => overThreshold(account, settings));
 	const bestCandidateHeadroom = Math.max(
 		0,
 		...pool.map((account) => headroom(account, models)).filter((h): h is number => h !== undefined),
@@ -323,24 +366,36 @@ export function rankCandidates(input: RankInput): AccountState[] {
 
 	const qualifying: [Key, AccountState][] = [];
 	const fallback: [Key, AccountState][] = [];
+	// Accounts with a sliver left: the last resort of an escape, most room first.
+	const slivers: [Key, AccountState][] = [];
 
 	for (const candidate of pool) {
+		// A login the service refused needs a person, not a switch.
+		if (candidate.usage?.errorKind === 'auth') continue;
 		const h = headroom(candidate, models);
 		if (h === undefined) continue;
 		if (h <= 0) continue;
-		// Unless everywhere is spent, a landing spot needs real room, or the
-		// next turn would only trigger another switch.
-		if (h < MIN_USABLE_HEADROOM && !allAbove) continue;
 		if (candidate.id === noReturn) continue;
+		// A landing spot needs real room, or the next turn would only trigger
+		// another switch. When the current account is out, a sliver still
+		// beats stopping, but only once nothing better exists.
+		if (h < MIN_USABLE_HEADROOM && !(allAbove && trigger === 'proactive')) {
+			if (trigger !== 'proactive') slivers.push([[-h], candidate]);
+			continue;
+		}
 		const resetAt = weeklyResetAt(candidate, now) ?? Number.POSITIVE_INFINITY;
 		const recoveryAt = allAbove ? bindingRecoveryAt(candidate, models, now) : 0;
 		let byRecovery = false;
 
 		if (trigger === 'proactive') {
 			// A proactive move lands somewhere healthy: an account that is itself
-			// over the threshold would only trigger the next switch.
-			if (100 - h >= settings.thresholdPercent && !allAbove) continue;
+			// over a limit would only trigger the next switch.
+			if (overThreshold(candidate, settings) && !allAbove) continue;
 			if (allAbove) {
+				// Everywhere is over a limit, but a full 5-hour window is still
+				// no place to land: it would refuse the very next turn.
+				const short = relevantWindows(candidate, models).find(isFiveHourWindow);
+				if (short && short.percent >= windowThreshold(short, settings)) continue;
 				// Everywhere is over the threshold, so "healthy" has no answer and
 				// the question becomes which account comes back first.
 				byRecovery = recoveryIsUseful(
@@ -374,7 +429,7 @@ export function rankCandidates(input: RankInput): AccountState[] {
 		qualifying.push([key, candidate]);
 	}
 
-	const ordered = qualifying.length > 0 ? qualifying : fallback;
+	const ordered = qualifying.length > 0 ? qualifying : fallback.length > 0 ? fallback : slivers;
 	ordered.sort((a, b) => compareKeys(a[0], b[0]));
 	return ordered.map(([, account]) => account);
 }

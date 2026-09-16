@@ -2,11 +2,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { credentialFromToken } from '../providers/claude/index.ts';
+import { oauthOf } from '../providers/claude/keychain.ts';
 import { loginIsolated } from '../providers/claude/login.ts';
 import { collectState, PROVIDERS } from './collect.ts';
 import { readJson, writeJsonAtomic } from './fs.ts';
 import { statePath } from './paths.ts';
-import { updateRegistry, upsertAccount } from './registry.ts';
+import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
 import type { AccountRecord, Credential, ProviderId } from './types.ts';
 import { storeCredential } from './vault.ts';
 
@@ -41,8 +42,34 @@ export async function publishState(): Promise<void> {
 	await writeJsonAtomic(statePath(), await collectState({ force: true }), 0o600);
 }
 
-export async function enrollFromToken(token: string): Promise<AccountRecord> {
-	return enroll('claude', credentialFromToken(token));
+/**
+ * Adds a Claude account from a setup token. Such a token can only run the
+ * model, so it must not quietly replace a full sign-in that can also read the
+ * account's usage; that takes saying so.
+ */
+export async function enrollFromToken(
+	token: string,
+	options: { email?: string; replace?: boolean } = {},
+): Promise<AccountRecord> {
+	const credential = credentialFromToken(token);
+	const identity = await PROVIDERS.claude.identify(credential).catch(() => null);
+	const email = identity?.email ?? options.email;
+	if (!email) {
+		throw new Error(
+			'could not read the account from that token - pass --email to label it yourself',
+		);
+	}
+	const registry = await loadRegistry();
+	const existing = accountsFor(registry, 'claude').find(
+		(account) => account.email.toLowerCase() === email.toLowerCase(),
+	);
+	const full = existing?.login ? oauthOf(existing.login) : null;
+	if (full && full.refreshToken.length > 0 && !options.replace) {
+		throw new Error(
+			`${email} already has a full sign-in saved; a setup token has fewer permissions - add --replace to use it anyway`,
+		);
+	}
+	return enroll('claude', credential, email);
 }
 
 /** A full Claude sign-in, isolated so the current login is left alone. */

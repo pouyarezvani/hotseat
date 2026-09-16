@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 /// The menu is built around one idea: an account row IS the switch. Clicking a
 /// row switches to that account, so the common case needs no verb and no
@@ -35,11 +36,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	private var pendingReload: DispatchWorkItem?
 	private static let menuWidth: CGFloat = 340
 
+	/// The last notice shown per service, so a state that persists is said once.
+	private var lastNotice: [String: Notice] = [:]
+
 	func applicationDidFinishLaunching(_ notification: Notification) {
 		let menu = NSMenu()
 		menu.delegate = self
 		menu.autoenablesItems = false
 		statusItem.menu = menu
+		UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 		refresh()
 		watchState()
 	}
@@ -108,16 +113,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		isBusy = true
 		DispatchQueue.global(qos: .utility).async { [weak self] in
 			guard let self else { return }
-			self.runner.run(["auto", "--once"])
+			let reports = self.runner.decode([TickReport].self, ["auto", "--once", "--json"]) ?? []
 			let loaded = self.runner.board()
 			let spans = self.runner.title()
 			DispatchQueue.main.async {
 				self.isBusy = false
 				self.board = loaded
 				self.render(spans: spans)
+				self.announce(reports)
 				self.rescheduleTimer()
 				self.drainQueue()
 			}
+		}
+	}
+
+	/// Says what the pass did, once per change: a switch, a switch that could
+	/// not happen, or every account being out of room.
+	private func announce(_ reports: [TickReport]) {
+		for report in reports {
+			guard let notice = Notice.from(report, previous: lastNotice[report.provider]) else {
+				if report.outcome == "holding", !report.detail.hasPrefix("every other account is out of room") {
+					lastNotice[report.provider] = nil
+				}
+				continue
+			}
+			lastNotice[report.provider] = notice
+			let content = UNMutableNotificationContent()
+			content.title = notice.title
+			content.body = notice.body
+			let request = UNNotificationRequest(
+				identifier: "hotseat.\(report.provider).\(Date().timeIntervalSince1970)", content: content, trigger: nil)
+			UNUserNotificationCenter.current().add(request)
 		}
 	}
 
@@ -237,6 +263,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	func menuNeedsUpdate(_ menu: NSMenu) {
 		menu.removeAllItems()
 		liveSubmenus.removeAll()
+		if board == nil, !runner.lastError.isEmpty {
+			menu.addItem(
+				caption(
+					"hotseat could not read its files",
+					tip: "The CLI answered with an error instead of the board: \(runner.lastError). Fix the file it names, or run  hotseat status  in a terminal to see the full message."))
+			menu.addItem(.separator())
+			appendFooter(to: menu)
+			return
+		}
 		guard let board, !board.orderedProviders.isEmpty else {
 			menu.addItem(
 				caption(
@@ -524,6 +559,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		}
 		threshold.submenu = thresholdMenu
 		menu.addItem(threshold)
+		menu.addItem(
+			windowThresholdItem(
+				"5-hour limit", key: "autoThresholdFiveHour", current: settings.autoThresholdFiveHour,
+				tip: "A limit of its own for the 5-hour window. It refills quickly, so many people let it run higher than the weekly one. \u{201C}Same as above\u{201D} uses the general limit."))
+		menu.addItem(
+			windowThresholdItem(
+				"Weekly limit", key: "autoThresholdWeekly", current: settings.autoThresholdWeekly,
+				tip: "A limit of its own for the weekly window. This is the quota that expires unused, so some people spend it further than the 5-hour one. \u{201C}Same as above\u{201D} uses the general limit."))
 		let models = submenuItem(
 			"Also count a model\u{2019}s own limit",
 			tip: "Besides the 5-hour and weekly limits, some models have their own weekly limit, like Fable. Choose whether those count when deciding to switch. Count a model you use; ignore one you do not, or hotseat will switch you away for a limit that was never in your way.")
@@ -594,6 +637,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 	/// Cursor, then Visual Studio Code.
 	static let editorBundleIds = ["com.todesktop.230313mzl4w4u92", "com.microsoft.VSCode"]
+
+	/// A submenu giving one window a limit of its own, or none.
+	private func windowThresholdItem(_ title: String, key: String, current: Double, tip: String) -> NSMenuItem {
+		let item = submenuItem(title, tip: tip)
+		let submenu = NSMenu()
+		submenu.autoenablesItems = false
+		submenu.addItem(
+			choiceItem(
+				"Same as above", key: key, value: "0", current: String(Int(current)),
+				tip: "This window follows the general limit above, with no limit of its own."))
+		submenu.addItem(.separator())
+		for value in Self.thresholdChoices {
+			submenu.addItem(
+				choiceItem(
+					"\(value)%", key: key, value: String(value), current: String(Int(current)),
+					tip: "Switch once this window is \(value)% used, whatever the general limit says. The other windows keep theirs."))
+		}
+		item.submenu = submenu
+		return item
+	}
 
 	/// Early, a little early, and then every point from the default up to the
 	/// very end, because the right spot between 90 and 99 depends on how long

@@ -1,6 +1,12 @@
 import { loop as autoLoop, tick as autoTick, rememberManualSwitch } from './core/auto.ts';
 import { collectState, PROVIDERS } from './core/collect.ts';
-import { enroll, loginClaudeIsolated, loginCodexIsolated, publishState } from './core/enroll.ts';
+import {
+	enroll,
+	enrollFromToken,
+	loginClaudeIsolated,
+	loginCodexIsolated,
+	publishState,
+} from './core/enroll.ts';
 import { readHistory, recordSwitch, type SwitchReason } from './core/history.ts';
 import { listMappings, mappingFor, removeMapping, setMapping } from './core/mappings.ts';
 import {
@@ -19,10 +25,11 @@ import {
 	loadRegistry,
 	migrateVault,
 	removeAccount,
+	setAlias,
 	updateRegistry,
 	upsertAccount,
 } from './core/registry.ts';
-import { captureSession, needsSession, prepareSession } from './core/session.ts';
+import { captureSession, forgetSession, needsSession, prepareSession } from './core/session.ts';
 import {
 	DEFAULTS,
 	describeSetting,
@@ -36,7 +43,6 @@ import { activate, nextAvailable, pickBest, rotateNext } from './core/switch.ts'
 import { exportAccounts, importAccounts, moveSlot, purge, swapSlots } from './core/transfer.ts';
 import { PROVIDER_IDS, type ProviderId } from './core/types.ts';
 import { storeCredential } from './core/vault.ts';
-import { credentialFromToken } from './providers/claude/index.ts';
 import { renderBoard } from './ui/board.ts';
 import { renderHelp } from './ui/help.ts';
 import { closePrompt, isInteractive, select } from './ui/prompt.ts';
@@ -277,25 +283,15 @@ export async function main(argv: readonly string[]): Promise<number> {
 					throw new Error('setup tokens are a Claude feature - use "hotseat add codex" instead');
 				}
 				const raw =
-					rest[1] && rest[1] !== '-' ? rest[1] : await new Response(Bun.stdin.stream()).text();
-				const credential = credentialFromToken(raw);
-				const identity = await PROVIDERS.claude.identify(credential).catch(() => null);
-				const email = identity?.email ?? flagValue(rest, '--email');
-				if (!email) {
-					throw new Error(
-						'could not read the account from that token - pass --email to label it yourself',
-					);
-				}
-				const account = await updateRegistry((registry) =>
-					upsertAccount(registry, {
-						provider: 'claude',
-						email,
-						...(identity?.plan ? { plan: identity.plan } : {}),
-					}),
-				);
-				await storeCredential(account, credential);
-				await publishState();
-				success(`added ${email} as Claude account ${account.slot}`);
+					rest[1] && rest[1] !== '-' && !rest[1].startsWith('--')
+						? rest[1]
+						: await new Response(Bun.stdin.stream()).text();
+				const email = flagValue(rest, '--email');
+				const account = await enrollFromToken(raw, {
+					...(email ? { email } : {}),
+					replace: rest.includes('--replace'),
+				});
+				success(`added ${account.email} as Claude account ${account.slot}`);
 				return 0;
 			}
 			case 'switch': {
@@ -346,12 +342,9 @@ export async function main(argv: readonly string[]): Promise<number> {
 				const providerId = parseProvider(rest[0]);
 				const account = await resolve(providerId, rest[1]);
 				const name = rest[2];
-				await updateRegistry((registry) => {
-					const record = registry.accounts.find((entry) => entry.id === account.id);
-					if (!record) return;
-					if (name && name !== '--unset') record.alias = name;
-					else delete record.alias;
-				});
+				await updateRegistry((registry) =>
+					setAlias(registry, account.id, name && name !== '--unset' ? name : undefined),
+				);
 				process.stdout.write(
 					name && name !== '--unset'
 						? `${account.email} is now called "${name}"\n`
@@ -363,6 +356,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 				const providerId = parseProvider(rest[0]);
 				const account = await resolve(providerId, rest[1]);
 				const wasInUse = (await loadRegistry()).active[providerId] === account.id;
+				await forgetSession(PROVIDERS[providerId], account);
 				await updateRegistry((registry) => removeAccount(registry, account.id));
 				await publishState();
 				success(`removed ${account.email} and deleted its saved login`);
@@ -469,6 +463,10 @@ export async function main(argv: readonly string[]): Promise<number> {
 			case 'auto': {
 				if (rest.includes('--once')) {
 					const reports = await autoTick();
+					if (rest.includes('--json')) {
+						process.stdout.write(`${JSON.stringify(reports)}\n`);
+						return 0;
+					}
 					if (reports.length === 0)
 						process.stdout.write('nothing to switch: each service needs two accounts\n');
 					for (const report of reports) {
@@ -546,8 +544,13 @@ export async function main(argv: readonly string[]): Promise<number> {
 				}
 				const state = await collectState();
 				const providerState = state.providers[providerId];
+				// Anything said here goes to stderr: the command's own stdout may be
+				// piped somewhere that expects only its output.
+				const aside = (text: string): void => {
+					process.stderr.write(`${text}\n`);
+				};
 				if (!needsSession(providerState, account.id)) {
-					note(`${account.email} is the account in use, so this runs on the shared login`);
+					aside(`${account.email} is the account in use, so this runs on the shared login`);
 					const plain = Bun.spawn(command, {
 						stdin: 'inherit',
 						stdout: 'inherit',
@@ -559,7 +562,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 				const shared = providerState.accounts.find(
 					(entry) => entry.id === providerState.activeAccountId,
 				);
-				note(
+				aside(
 					`running as ${account.email} in this terminal only - every other terminal stays on ${shared?.email ?? 'the shared login'}`,
 				);
 				const child = Bun.spawn(command, {
@@ -570,7 +573,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 				});
 				const code = await child.exited;
 				if (await captureSession(provider, account)) {
-					note(`saved the login ${account.email} refreshed during this session`);
+					aside(`saved the login ${account.email} refreshed during this session`);
 				}
 				return code;
 			}

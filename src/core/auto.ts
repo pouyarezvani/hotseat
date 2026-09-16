@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { collectState, PROVIDERS } from './collect.ts';
-import { readJson, writeJsonAtomic } from './fs.ts';
+import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
 import { recordSwitch } from './history.ts';
 import { hotseatHome } from './paths.ts';
 import {
@@ -40,14 +40,28 @@ function autoStatePath(): string {
 }
 
 async function loadAutoState(): Promise<AutoState> {
-	const stored = await readJson<Partial<AutoState>>(autoStatePath());
+	const stored = await readJsonLoose<Partial<AutoState>>(autoStatePath());
 	if (stored?.version !== 2) return structuredClone(EMPTY);
 	return { version: 2, memory: stored.memory ?? {} };
+}
+
+/** Rewrites one service's memory under the lock, so two passes cannot lose each other's. */
+async function rememberFor(provider: ProviderId, memory: SwitchMemory): Promise<void> {
+	const lock = await acquireLock(hotseatHome(), 10_000, 'auto.lock');
+	try {
+		const auto = await loadAutoState();
+		auto.memory[provider] = memory;
+		await writeJsonAtomic(autoStatePath(), auto, 0o600);
+	} finally {
+		await lock.release();
+	}
 }
 
 export function policyOf(settings: Settings): PolicySettings {
 	return {
 		thresholdPercent: settings.autoThresholdPercent,
+		thresholdFiveHour: settings.autoThresholdFiveHour,
+		thresholdWeekly: settings.autoThresholdWeekly,
 		cooldownSeconds: settings.autoCooldownSeconds,
 		modelLimits: settings.autoModelLimits,
 		unhealthyTicks: settings.autoUnhealthyTicks,
@@ -55,7 +69,10 @@ export function policyOf(settings: Settings): PolicySettings {
 }
 
 export interface Decision {
+	/** The first choice, when there is one. */
 	target?: { id: string; email: string };
+	/** Every usable account in order, so a first choice that fails has a runner-up. */
+	targets: { id: string; email: string }[];
 	trigger?: Trigger;
 	hold?: string;
 }
@@ -71,12 +88,11 @@ export function decide(
 	const active = providerState.accounts.find(
 		(account) => account.id === providerState.activeAccountId,
 	);
-	if (!active) return { hold: 'no account is currently in use' };
+	if (!active) return { hold: 'no account is currently in use', targets: [] };
 
-	const activeHeadroom = headroom(active, policy.modelLimits);
-	const verdict = decideTrigger(activeHeadroom, policy, memory, unhealthyTicks, now);
+	const verdict = decideTrigger(active, policy, memory, unhealthyTicks, now);
 	if (verdict.hold !== undefined || verdict.trigger === undefined) {
-		return { hold: verdict.hold ?? 'nothing to do' };
+		return { hold: verdict.hold ?? 'nothing to do', targets: [] };
 	}
 	const trigger = verdict.trigger;
 
@@ -89,22 +105,23 @@ export function decide(
 		recovered,
 		policy,
 	);
-	const [target] = rankCandidates({
+	const ranked = rankCandidates({
 		trigger,
 		accounts: providerState.accounts,
 		activeId: active.id,
 		noReturn,
 		settings: policy,
 		now,
-	});
+	}).map((account) => ({ id: account.id, email: account.email }));
+	const [target] = ranked;
 	if (!target) {
 		const reason =
 			trigger === 'at-limit' || trigger === 'failover'
 				? 'every other account is out of room too'
 				: 'no other account has room to switch to';
-		return { hold: reason, trigger };
+		return { hold: reason, trigger, targets: [] };
 	}
-	return { target: { id: target.id, email: target.email }, trigger };
+	return { target, targets: ranked, trigger };
 }
 
 /**
@@ -121,9 +138,8 @@ export async function rememberManualSwitch(input: {
 	leftRecoveryAt?: number;
 	now?: number;
 }): Promise<void> {
-	const auto = await loadAutoState();
 	const now = input.now ?? Date.now();
-	auto.memory[input.provider] = {
+	await rememberFor(input.provider, {
 		lastSwitchAt: now,
 		lastSwitchTo: input.toId,
 		...(input.fromId ? { lastSwitchFrom: input.fromId } : {}),
@@ -133,8 +149,7 @@ export async function rememberManualSwitch(input: {
 				? input.leftRecoveryAt
 				: null,
 		leftTrigger: 'proactive',
-	};
-	await writeJsonAtomic(autoStatePath(), auto, 0o600);
+	});
 }
 
 /** One pass over every enabled service. Returns what it did, for logging. */
@@ -172,54 +187,65 @@ export async function tick(
 			continue;
 		}
 		const trigger = decision.trigger ?? 'proactive';
-		try {
-			const result = await activate(providerId, decision.target.id, options);
-			const leftHeadroom = active ? headroom(active, policy.modelLimits) : undefined;
-			const leftRecovery = active
-				? bindingRecoveryAt(active, policy.modelLimits, now)
-				: Number.POSITIVE_INFINITY;
-			// Memory is written before the history line, and to disk right away:
-			// once the login has changed, a crash must not leave the next pass
-			// free to change it straight back.
-			auto.memory[providerId] = {
-				lastSwitchAt: now,
-				lastSwitchTo: decision.target.id,
-				...(active ? { lastSwitchFrom: active.id } : {}),
-				leftHeadroom: leftHeadroom ?? null,
-				leftRecoveryAt: Number.isFinite(leftRecovery) ? leftRecovery : null,
-				leftTrigger: trigger,
-			};
-			await writeJsonAtomic(autoStatePath(), auto, 0o600);
-			await recordSwitch({
-				at: new Date(now).toISOString(),
-				provider: providerId,
-				...(result.from ? { from: result.from } : {}),
-				to: result.to,
-				reason: 'auto',
-				...(leftHeadroom !== undefined ? { leftAtPercent: Math.round(100 - leftHeadroom) } : {}),
-			});
-			reports.push({
-				provider: providerId,
-				outcome: 'switched',
-				detail: `switched to ${result.to}${
-					result.runningProcesses > 0 && !result.liveSwap
-						? ` (${result.runningProcesses} open ${result.runningProcesses === 1 ? 'session keeps' : 'sessions keep'} the old account until restarted)`
-						: ''
-				}`,
-				trigger,
-				to: result.to,
-			});
-		} catch (error) {
+		const skipped: string[] = [];
+		let landed: Awaited<ReturnType<typeof activate>> | undefined;
+		let chosen = decision.target;
+		for (const candidate of decision.targets) {
+			try {
+				landed = await activate(providerId, candidate.id, options);
+				chosen = candidate;
+				break;
+			} catch (error) {
+				skipped.push(`${candidate.email}: ${(error as Error).message}`);
+			}
+		}
+		if (!landed || !chosen) {
 			reports.push({
 				provider: providerId,
 				outcome: 'blocked',
-				detail: (error as Error).message,
+				detail: skipped.join('; ') || 'no account could be switched to',
 				trigger,
 			});
+			continue;
 		}
+		const result = landed;
+		const leftHeadroom = active ? headroom(active, policy.modelLimits) : undefined;
+		const leftRecovery = active
+			? bindingRecoveryAt(active, policy.modelLimits, now)
+			: Number.POSITIVE_INFINITY;
+		// Memory is written before the history line, and to disk right away:
+		// once the login has changed, a crash must not leave the next pass
+		// free to change it straight back.
+		await rememberFor(providerId, {
+			lastSwitchAt: now,
+			lastSwitchTo: chosen.id,
+			...(active ? { lastSwitchFrom: active.id } : {}),
+			leftHeadroom: leftHeadroom ?? null,
+			leftRecoveryAt: Number.isFinite(leftRecovery) ? leftRecovery : null,
+			leftTrigger: trigger,
+		});
+		await recordSwitch({
+			at: new Date(now).toISOString(),
+			provider: providerId,
+			...(result.from ? { from: result.from } : {}),
+			to: result.to,
+			reason: 'auto',
+			...(leftHeadroom !== undefined ? { leftAtPercent: Math.round(100 - leftHeadroom) } : {}),
+		});
+		const restart =
+			result.runningProcesses > 0 && !result.liveSwap
+				? ` (${result.runningProcesses} open ${result.runningProcesses === 1 ? 'session keeps' : 'sessions keep'} the old account until restarted)`
+				: '';
+		const passedOver = skipped.length > 0 ? ` after passing over ${skipped.join('; ')}` : '';
+		reports.push({
+			provider: providerId,
+			outcome: 'switched',
+			detail: `switched to ${result.to}${restart}${passedOver}`,
+			trigger,
+			to: result.to,
+		});
 	}
 
-	await writeJsonAtomic(autoStatePath(), auto, 0o600);
 	return reports;
 }
 

@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { tick } from '../src/core/auto.ts';
+import { collectState } from '../src/core/collect.ts';
+import { ServiceError } from '../src/core/errors.ts';
 import { readHistory } from '../src/core/history.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
+import { prepareSession, sessionDir } from '../src/core/session.ts';
 import { activate } from '../src/core/switch.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
-import { loadCredential, storeCredential } from '../src/core/vault.ts';
+import { dropCredential, loadCredential, storeCredential } from '../src/core/vault.ts';
 import { cred, type FakeProvider, fakeProviders, tokenOf } from './fake-provider.ts';
 import { withHome } from './helpers.ts';
 
@@ -188,6 +191,91 @@ describe('switching automatically', () => {
 				outcomes.push(report?.outcome ?? '');
 			}
 			expect(outcomes).toEqual(['holding', 'holding', 'holding']);
+		});
+	});
+});
+
+describe('switching carefully', () => {
+	test('refuses to switch when it cannot tell whose login is installed, so nothing is lost', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.installed = cred('X');
+			providers.claude.identifyFails = true;
+			await expect(activate('claude', b.id, { providers, now: T })).rejects.toThrow(
+				/could not tell whose login/,
+			);
+			expect(providers.claude.calls.write).toBe(0);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('X');
+		});
+	});
+
+	test('does not save an older outgoing login over a newer saved one', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			await storeCredential(a, cred('A-new', 300));
+			providers.claude.installed = cred('A-old', 100);
+			providers.claude.identities.set('A-old', { email: 'a@example.com' });
+			await activate('claude', b.id, { providers, now: T });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-new');
+		});
+	});
+
+	test('refuses to switch onto an account that is open in another terminal', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			await prepareSession(providers.claude, b);
+			providers.claude.runningIn.add(sessionDir(providers.claude, b));
+			await expect(activate('claude', b.id, { providers, now: T })).rejects.toThrow(
+				/open in another terminal/,
+			);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+
+	test('tells the agent who is signed in after a switch', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.identities.set('B', { email: 'b@example.com', organizationId: 'org-b' });
+			await activate('claude', b.id, { providers, now: T });
+			expect(providers.claude.recorded).toEqual([
+				{ email: 'b@example.com', organizationId: 'org-b' },
+			]);
+		});
+	});
+});
+
+describe('when the first choice cannot be used', () => {
+	async function three(): Promise<Awaited<ReturnType<typeof world>> & { c: AccountRecord }> {
+		const base = await world();
+		const c = await updateRegistry((registry) =>
+			upsertAccount(registry, { provider: 'claude', email: 'c@example.com' }),
+		);
+		await storeCredential(c, cred('C'));
+		base.providers.claude.identities.set('C', { email: 'c@example.com' });
+		base.providers.claude.readings.set('A', () => reading(95));
+		base.providers.claude.readings.set('B', () => reading(40, 120));
+		base.providers.claude.readings.set('C', () => reading(60, 6));
+		return { ...base, c };
+	}
+
+	test('the next account in line is tried', async () => {
+		await withHome(async () => {
+			const { providers, c } = await three();
+			await collectState({ providers, now: T });
+			await dropCredential(c);
+			const reports = await tick({ providers, now: T });
+			expect(reports[0]).toMatchObject({ outcome: 'switched', to: 'b@example.com' });
+			expect(reports[0]?.detail).toContain('c@example.com');
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('B');
+		});
+	});
+
+	test('an account whose login the service refused is never chosen', async () => {
+		await withHome(async () => {
+			const { providers } = await three();
+			providers.claude.failures.set('C', new ServiceError('usage request failed with 401', 401));
+			const reports = await tick({ providers, now: T });
+			expect(reports[0]).toMatchObject({ outcome: 'switched', to: 'b@example.com' });
 		});
 	});
 });

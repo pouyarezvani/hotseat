@@ -1,3 +1,4 @@
+import { retryAfterMs, ServiceError } from '../../core/errors.ts';
 import type {
 	Credential,
 	Identity,
@@ -14,7 +15,7 @@ import {
 	readKeychain,
 	writeKeychain,
 } from './keychain.ts';
-import { claudeSession } from './session.ts';
+import { claudeConfigPath, claudeSession, updateOauthAccount } from './session.ts';
 import { claudeSessions } from './sessions.ts';
 
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
@@ -135,14 +136,36 @@ export class ClaudeProvider implements Provider {
 			headers: headers(oauth.accessToken),
 			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 		});
-		if (!response.ok) throw new Error(`profile lookup failed with ${response.status}`);
+		if (!response.ok) {
+			throw new ServiceError(
+				`profile lookup failed with ${response.status}`,
+				response.status,
+				retryAfterMs(response.headers.get('retry-after'), Date.now()),
+			);
+		}
 		const body = (await response.json()) as {
-			account?: { email_address?: string; email?: string };
-			organization?: { name?: string };
+			account?: { email_address?: string; email?: string; uuid?: string };
+			organization?: { name?: string; uuid?: string };
 		};
 		const email = body.account?.email_address ?? body.account?.email;
 		if (!email) throw new Error('profile response carried no email address');
-		return { email, ...(oauth.subscriptionType ? { plan: oauth.subscriptionType } : {}) };
+		return {
+			email,
+			...(oauth.subscriptionType ? { plan: oauth.subscriptionType } : {}),
+			...(body.account?.uuid ? { accountId: body.account.uuid } : {}),
+			...(body.organization?.uuid ? { organizationId: body.organization.uuid } : {}),
+			...(body.organization?.name ? { organizationName: body.organization.name } : {}),
+		};
+	}
+
+	expiresAt(credential: Credential): number | undefined {
+		const expires = oauthOf(credential)?.expiresAt;
+		return expires !== undefined && expires > 0 ? expires : undefined;
+	}
+
+	/** Claude Code shows who is signed in from its own config file, which a switch must keep true. */
+	recordIdentity(identity: Identity): Promise<void> {
+		return updateOauthAccount(claudeConfigPath(), identity);
 	}
 
 	async fetchUsage(credential: Credential): Promise<UsageSnapshot> {
@@ -154,7 +177,11 @@ export class ClaudeProvider implements Provider {
 			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 		});
 		if (!response.ok) {
-			return { fetchedAt, windows: [], error: `usage request failed with ${response.status}` };
+			throw new ServiceError(
+				`usage request failed with ${response.status}`,
+				response.status,
+				retryAfterMs(response.headers.get('retry-after'), Date.now()),
+			);
 		}
 		return mapUsage((await response.json()) as UsagePayload, fetchedAt);
 	}
@@ -175,7 +202,13 @@ export class ClaudeProvider implements Provider {
 				client_id: CLIENT_ID,
 			}),
 		});
-		if (!response.ok) throw new Error(`token refresh failed with ${response.status}`);
+		if (!response.ok) {
+			throw new ServiceError(
+				`token refresh failed with ${response.status}`,
+				response.status,
+				retryAfterMs(response.headers.get('retry-after'), Date.now()),
+			);
+		}
 		const body = (await response.json()) as {
 			access_token: string;
 			refresh_token?: string;

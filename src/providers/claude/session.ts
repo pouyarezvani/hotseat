@@ -1,8 +1,9 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readJson, writeJsonAtomic } from '../../core/fs.ts';
+import { readJsonLoose, writeJsonAtomic } from '../../core/fs.ts';
 import type { SessionSupport } from '../../core/types.ts';
 import {
+	deleteKeychain,
 	isolateAccountKeys,
 	mergeAccountKeys,
 	oauthOf,
@@ -10,6 +11,7 @@ import {
 	writeKeychain,
 } from './keychain.ts';
 import { keychainServiceFor } from './login.ts';
+import { claudeSessions } from './sessions.ts';
 
 /** Claude Code's everyday folder, never the one a session is running in. */
 export function claudeHome(): string {
@@ -29,9 +31,10 @@ export function claudeConfigPath(): string {
  * session has written to the file itself is kept.
  */
 export async function seedClaudeConfig(dir: string, mainConfigPath: string): Promise<void> {
-	const main = (await readJson<Record<string, unknown>>(mainConfigPath)) ?? {};
+	// Claude Code rewrites its file constantly; a torn read is an empty file, not a stop.
+	const main = (await readJsonLoose<Record<string, unknown>>(mainConfigPath)) ?? {};
 	const path = join(dir, '.claude.json');
-	const existing = (await readJson<Record<string, unknown>>(path)) ?? {};
+	const existing = (await readJsonLoose<Record<string, unknown>>(path)) ?? {};
 	const seeded: Record<string, unknown> = {
 		...existing,
 		hasCompletedOnboarding: true,
@@ -41,6 +44,27 @@ export async function seedClaudeConfig(dir: string, mainConfigPath: string): Pro
 		seeded.mcpServers = main.mcpServers;
 	}
 	await writeJsonAtomic(path, seeded, 0o600);
+}
+
+/**
+ * Rewrites the account Claude Code records as signed in, so what it shows
+ * and what hotseat installed agree. Everything else in the file, and any key
+ * of the account entry hotseat does not know, is kept.
+ */
+export async function updateOauthAccount(path: string, identity: Identity): Promise<void> {
+	const config = (await readJsonLoose<Record<string, unknown>>(path)) ?? {};
+	const current =
+		typeof config.oauthAccount === 'object' && config.oauthAccount !== null
+			? (config.oauthAccount as Record<string, unknown>)
+			: {};
+	config.oauthAccount = {
+		...current,
+		emailAddress: identity.email,
+		...(identity.organizationId ? { organizationUuid: identity.organizationId } : {}),
+		...(identity.accountId ? { accountUuid: identity.accountId } : {}),
+		...(identity.organizationName ? { organizationName: identity.organizationName } : {}),
+	};
+	await writeJsonAtomic(path, config, 0o600);
 }
 
 export const claudeSession: SessionSupport = {
@@ -73,9 +97,19 @@ export const claudeSession: SessionSupport = {
 		return found ? isolateAccountKeys(found) : null;
 	},
 	issuedAt(credential) {
-		return oauthOf(credential)?.expiresAt ?? 0;
+		// The sign-in's own expiry marks its generation; the access token's
+		// expiry only says which copy was refreshed last, which an old sign-in
+		// can win while a newer one sits saved.
+		const oauth = oauthOf(credential);
+		return oauth?.refreshTokenExpiresAt ?? oauth?.expiresAt ?? 0;
 	},
 	seed(dir) {
 		return seedClaudeConfig(dir, claudeConfigPath());
+	},
+	async isRunning(dir) {
+		return (await claudeSessions(dir)).length > 0;
+	},
+	forget(dir) {
+		return deleteKeychain(keychainServiceFor(dir));
 	},
 };

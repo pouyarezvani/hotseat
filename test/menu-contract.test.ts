@@ -356,9 +356,21 @@ describe('the files the menu opens for editing', () => {
 
 describe('the menu bar does not refresh off its own writes', () => {
 	test('the folder watcher reloads only when the published board changed', () => {
-		const watcher = menu.slice(menu.indexOf('private func watchState'), menu.indexOf('private func stopWatching'));
+		const watcher = menu.slice(
+			menu.indexOf('private func watchState'),
+			menu.indexOf('private func stopWatching'),
+		);
 		expect(watcher).toContain('publishedStamp()');
 		expect(watcher).toContain('guard stamp != self.lastPublished else { return }');
 		expect(menu).toContain('appendingPathComponent("state.json")');
+	});
+});
+
+describe('the menu bar hears what the automatic pass did', () => {
+	test('it asks for the pass as JSON, and the CLI answers in JSON', () => {
+		expect(menu).toContain('["auto", "--once", "--json"]');
+		const auto = cli.slice(cli.indexOf("case 'auto'"), cli.indexOf("case 'move'"));
+		expect(auto).toContain("rest.includes('--json')");
+		expect(auto).toContain('JSON.stringify(reports)');
 	});
 });

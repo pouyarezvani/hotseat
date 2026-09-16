@@ -1,4 +1,4 @@
-import { lstat, mkdir, symlink } from 'node:fs/promises';
+import { lstat, mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hotseatHome } from './paths.ts';
 import type { AccountRecord, Credential, Provider, ProviderState } from './types.ts';
@@ -26,23 +26,77 @@ async function exists(path: string): Promise<boolean> {
 }
 
 /**
+ * Saves a login for the account unless the saved one is newer, so an older
+ * copy found lying around can never revert a fresh sign-in.
+ */
+export async function adoptIfNewer(
+	provider: Provider,
+	account: Pick<AccountRecord, 'id' | 'email'>,
+	candidate: Credential,
+): Promise<boolean> {
+	const saved = await loadCredential(account);
+	if (saved && provider.session.issuedAt(candidate) < provider.session.issuedAt(saved))
+		return false;
+	if (saved && JSON.stringify(saved) === JSON.stringify(candidate)) return false;
+	await storeCredential(account, candidate);
+	return true;
+}
+
+/** The login a session folder holds, if the folder exists. */
+export async function sessionLogin(
+	provider: Provider,
+	account: Pick<AccountRecord, 'email'>,
+): Promise<Credential | null> {
+	const dir = sessionDir(provider, account);
+	return (await exists(dir)) ? provider.session.readLogin(dir) : null;
+}
+
+/** Whether an agent is running as this account in a terminal of its own. */
+export async function sessionRunning(
+	provider: Provider,
+	account: Pick<AccountRecord, 'email'>,
+): Promise<boolean> {
+	const dir = sessionDir(provider, account);
+	return (await exists(dir)) && provider.session.isRunning(dir);
+}
+
+/**
  * The account's freshest login, wherever it is. A session refreshes its own
- * copy while it runs, so that copy can be newer than the saved one; whichever
- * is newer is saved and returned.
+ * copy while it runs, so that copy can be newer than the saved one. A newer
+ * session copy is adopted only once the service confirms it is this
+ * account's: a sign-in to someone else inside the session must not be
+ * filed under this name.
  */
 export async function freshestLogin(
 	provider: Provider,
 	account: Pick<AccountRecord, 'id' | 'email'>,
 ): Promise<Credential | null> {
 	const saved = await loadCredential(account);
-	const dir = sessionDir(provider, account);
-	const inSession = (await exists(dir)) ? await provider.session.readLogin(dir) : null;
+	const inSession = await sessionLogin(provider, account);
 	if (!inSession) return saved;
-	if (!saved || provider.session.issuedAt(inSession) > provider.session.issuedAt(saved)) {
-		await storeCredential(account, inSession);
-		return inSession;
+	if (saved && provider.session.issuedAt(inSession) <= provider.session.issuedAt(saved))
+		return saved;
+	const who = await provider.identify(inSession).catch(() => undefined);
+	if (who?.email.toLowerCase() !== account.email.toLowerCase()) return saved;
+	await storeCredential(account, inSession);
+	return inSession;
+}
+
+/**
+ * Removes the account's session folder and whatever its login left behind,
+ * such as a keychain item. Refused while an agent is running there.
+ */
+export async function forgetSession(
+	provider: Provider,
+	account: Pick<AccountRecord, 'email'>,
+): Promise<void> {
+	const dir = sessionDir(provider, account);
+	if (!(await exists(dir))) return;
+	if (await provider.session.isRunning(dir)) {
+		throw new Error(`${account.email} is open in another terminal (hotseat run) - close it first`);
 	}
-	return saved;
+	await provider.session.forget(dir);
+	await rm(dir, { recursive: true, force: true });
 }
 
 /** Whether running as this account needs a session, or is just the shared login. */
@@ -68,7 +122,9 @@ export async function prepareSession(
 		const source = join(home, name);
 		const target = join(dir, name);
 		if (!(await exists(source)) || (await exists(target))) continue;
-		await symlink(source, target);
+		// The real file, not a link to it: the agent replaces a link's target
+		// one hop down when it writes, and would cut a chain of two.
+		await symlink(await realpath(source), target);
 	}
 
 	const login = await freshestLogin(provider, account);

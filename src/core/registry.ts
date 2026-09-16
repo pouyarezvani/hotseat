@@ -259,3 +259,32 @@ export function removeAccount(registry: Registry, id: string): AccountRecord | u
 	if (registry.active[removed.provider] === id) delete registry.active[removed.provider];
 	return removed;
 }
+
+/**
+ * Names an account, or unnames it. A name that is only digits would be taken
+ * for an account number, and two accounts with one name could not be told
+ * apart, so both are refused.
+ */
+export function setAlias(registry: Registry, id: string, alias: string | undefined): AccountRecord {
+	const record = registry.accounts.find((entry) => entry.id === id);
+	if (!record) throw new Error('that account is no longer in accounts.json');
+	if (alias === undefined || alias.trim().length === 0) {
+		delete record.alias;
+		return record;
+	}
+	const name = alias.trim();
+	if (/^\d+$/.test(name)) {
+		throw new Error(
+			`"${name}" is a number, which is how accounts are already picked - choose a name`,
+		);
+	}
+	const taken = registry.accounts.find(
+		(entry) =>
+			entry.id !== id &&
+			entry.provider === record.provider &&
+			entry.alias?.toLowerCase() === name.toLowerCase(),
+	);
+	if (taken) throw new Error(`${taken.email} is already called "${name}"`);
+	record.alias = name;
+	return record;
+}

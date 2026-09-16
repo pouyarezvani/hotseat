@@ -165,12 +165,18 @@ describe('deciding whether to switch', () => {
 	const memory: SwitchMemory = {};
 
 	test('holds while the account in use is below the threshold', () => {
-		expect(decideTrigger(30, policy, memory, 0, NOW).hold).toContain('below the 90% limit');
+		expect(
+			decideTrigger(account('x', { weekly: [70, 24] }), policy, memory, 0, NOW).hold,
+		).toContain('below the 90% limit');
 	});
 
 	test('over the threshold is proactive, at zero is at-limit', () => {
-		expect(decideTrigger(8, policy, memory, 0, NOW).trigger).toBe('proactive');
-		expect(decideTrigger(0, policy, memory, 0, NOW).trigger).toBe('at-limit');
+		expect(decideTrigger(account('x', { weekly: [92, 24] }), policy, memory, 0, NOW).trigger).toBe(
+			'proactive',
+		);
+		expect(decideTrigger(account('x', { weekly: [100, 24] }), policy, memory, 0, NOW).trigger).toBe(
+			'at-limit',
+		);
 	});
 
 	test('no reading holds for a few checks, then fails over', () => {
@@ -181,8 +187,12 @@ describe('deciding whether to switch', () => {
 
 	test('the cooldown holds a proactive switch but never an at-limit one', () => {
 		const recent: SwitchMemory = { lastSwitchAt: NOW - 60_000 };
-		expect(decideTrigger(8, policy, recent, 0, NOW).hold).toContain('cooling down');
-		expect(decideTrigger(0, policy, recent, 0, NOW).trigger).toBe('at-limit');
+		expect(
+			decideTrigger(account('x', { weekly: [92, 24] }), policy, recent, 0, NOW).hold,
+		).toContain('cooling down');
+		expect(decideTrigger(account('x', { weekly: [100, 24] }), policy, recent, 0, NOW).trigger).toBe(
+			'at-limit',
+		);
 	});
 });
 
@@ -487,17 +497,148 @@ describe('a login that stops answering', () => {
 	};
 
 	test('fails over after enough failed reads even though its last numbers looked fine', () => {
-		expect(decideTrigger(50, settings, {}, 3, NOW)).toEqual({ trigger: 'failover' });
+		expect(decideTrigger(account('x', { weekly: [50, 24] }), settings, {}, 3, NOW)).toEqual({
+			trigger: 'failover',
+		});
 	});
 
 	test('is given its chances first, and the count is shown', () => {
 		expect(decideTrigger(undefined, settings, {}, 1, NOW).hold).toBe(
 			'no reading on the account in use, 2 of 3 before failing over',
 		);
-		expect(decideTrigger(50, settings, {}, 2, NOW).hold).toBe('at 50%, below the 90% limit');
+		expect(decideTrigger(account('x', { weekly: [50, 24] }), settings, {}, 2, NOW).hold).toBe(
+			'at 50%, below the 90% limit',
+		);
 	});
 
 	test('a reading a hair under the limit is never described as at it', () => {
-		expect(decideTrigger(10.4, settings, {}, 0, NOW).hold).toBe('at 89%, below the 90% limit');
+		expect(decideTrigger(account('x', { weekly: [89.6, 24] }), settings, {}, 0, NOW).hold).toBe(
+			'at 89%, below the 90% limit',
+		);
+	});
+});
+
+describe('a limit of its own for the 5-hour and the weekly window', () => {
+	const settings: PolicySettings = {
+		thresholdPercent: 90,
+		thresholdFiveHour: 95,
+		thresholdWeekly: 98,
+		cooldownSeconds: 0,
+		modelLimits: ['fable'],
+		unhealthyTicks: 3,
+	};
+
+	test('each window is judged against its own limit', () => {
+		expect(
+			decideTrigger(account('x', { fiveHour: [92, 2], weekly: [50, 24] }), settings, {}, 0, NOW)
+				.hold,
+		).toBe('at 92%, below the 95% limit');
+		expect(
+			decideTrigger(account('x', { fiveHour: [96, 2], weekly: [50, 24] }), settings, {}, 0, NOW)
+				.trigger,
+		).toBe('proactive');
+		expect(
+			decideTrigger(account('x', { fiveHour: [10, 2], weekly: [98, 24] }), settings, {}, 0, NOW)
+				.trigger,
+		).toBe('proactive');
+		expect(
+			decideTrigger(account('x', { fiveHour: [10, 2], weekly: [97, 24] }), settings, {}, 0, NOW)
+				.hold,
+		).toBe('at 97%, below the 98% limit');
+	});
+
+	test('a model limit keeps the general limit', () => {
+		expect(
+			decideTrigger(
+				account('x', { fiveHour: [10, 2], weekly: [50, 24], models: { fable: [91, 24] } }),
+				settings,
+				{},
+				0,
+				NOW,
+			).trigger,
+		).toBe('proactive');
+	});
+
+	test('a landing spot is judged the same way', () => {
+		const accounts = [
+			account('active', { fiveHour: [96, 2], weekly: [50, 24] }),
+			account('fullish', { fiveHour: [94, 1], weekly: [92, 24] }, 2),
+			account('roomy', { fiveHour: [50, 1], weekly: [50, 120] }, 3),
+		];
+		const [best] = rankCandidates({
+			trigger: 'proactive',
+			accounts,
+			activeId: 'active',
+			noReturn: undefined,
+			settings,
+			now: NOW,
+		});
+		expect(best?.id).toBe('fullish');
+	});
+});
+
+describe('where an escape lands', () => {
+	const settings: PolicySettings = {
+		thresholdPercent: 90,
+		cooldownSeconds: 0,
+		modelLimits: [],
+		unhealthyTicks: 3,
+	};
+
+	test('when nothing has room to spare, the escape goes to whoever has the most left', () => {
+		const accounts = [
+			account('active', { weekly: [100, 100] }),
+			account('sliver', { weekly: [97, 1] }, 2),
+			account('bigger', { weekly: [96, 120] }, 3),
+		];
+		const [best] = rankCandidates({
+			trigger: 'at-limit',
+			accounts,
+			activeId: 'active',
+			noReturn: undefined,
+			settings,
+			now: NOW,
+		});
+		expect(best?.id).toBe('bigger');
+	});
+
+	test('everything over the limit still does not land on a full 5-hour window', () => {
+		const accounts = [
+			account('active', { fiveHour: [10, 2], weekly: [97, 100] }),
+			account('soon', { fiveHour: [96, 1], weekly: [93, 20] }, 2),
+			account('later', { fiveHour: [10, 1], weekly: [92, 60] }, 3),
+		];
+		const [best] = rankCandidates({
+			trigger: 'proactive',
+			accounts,
+			activeId: 'active',
+			noReturn: undefined,
+			settings,
+			now: NOW,
+		});
+		expect(best?.id).toBe('later');
+	});
+
+	test('a login the service refused is never a landing spot', () => {
+		const refused = account('refused', { weekly: [10, 1] }, 2);
+		refused.usage = {
+			...(refused.usage ?? { fetchedAt: inHours(0), windows: [] }),
+			error: 'the saved login no longer works',
+			errorKind: 'auth',
+		};
+		const accounts = [
+			account('active', { weekly: [100, 100] }),
+			refused,
+			account('fine', { weekly: [50, 120] }, 3),
+		];
+		const [best] = rankCandidates({
+			trigger: 'at-limit',
+			accounts,
+			activeId: 'active',
+			noReturn: undefined,
+			settings,
+			now: NOW,
+		});
+		expect(best?.id).toBe('fine');
 	});
 });

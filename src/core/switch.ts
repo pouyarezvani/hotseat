@@ -1,7 +1,7 @@
 import { liveIdentity, PROVIDERS } from './collect.ts';
 import { MIN_USABLE_HEADROOM, headroom as policyHeadroom, rankCandidates } from './policy.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
-import { freshestLogin } from './session.ts';
+import { adoptIfNewer, freshestLogin, sessionRunning } from './session.ts';
 import type { AccountRecord, AccountState, Provider, ProviderId, ProviderState } from './types.ts';
 import { storeCredential } from './vault.ts';
 
@@ -104,6 +104,13 @@ export async function activate(
 
 	const live = await provider.readAgentCredential().catch(() => null);
 	const identity = live ? await liveIdentity(provider, live, registry) : undefined;
+	if (live && !identity) {
+		// An installed login nobody can name would be overwritten unsaved,
+		// and with it any token the agent rotated since it was last saved.
+		throw new Error(
+			'could not tell whose login is installed right now (offline?) - not switching, so nothing is lost',
+		);
+	}
 	let previous: AccountRecord | undefined = identity
 		? accountsFor(registry, providerId).find(
 				(account) => account.email.toLowerCase() === identity.email.toLowerCase(),
@@ -143,14 +150,25 @@ export async function activate(
 		return { ...base, from: previous.email, fromId: previous.id, alreadyActive: true };
 	}
 
+	if (await sessionRunning(provider, target)) {
+		throw new Error(
+			`${target.email} is open in another terminal (hotseat run) - close it first, or pick another account`,
+		);
+	}
+
 	const refreshed = await provider.refreshIfNeeded(stored);
 	if (refreshed !== stored) await storeCredential(target, refreshed);
 
 	// Save the outgoing login before overwriting it, so a token the agent
-	// refreshed while that account was in use is not lost.
-	if (live && previous && !savedLogin) await storeCredential(previous, live);
+	// refreshed while that account was in use is not lost. Never over a
+	// newer sign-in already saved for that account.
+	if (live && previous && !savedLogin) await adoptIfNewer(provider, previous, live);
 
 	await provider.writeAgentCredential(refreshed);
+	if (provider.recordIdentity) {
+		const who = await provider.identify(refreshed).catch(() => ({ email: target.email }));
+		await provider.recordIdentity(who).catch(() => undefined);
+	}
 
 	await updateRegistry((current) => {
 		current.active[providerId] = target.id;

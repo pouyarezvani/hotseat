@@ -134,5 +134,8 @@ export function oauthOf(credential: Credential): ClaudeOauth | null {
 			? { subscriptionType: oauth.subscriptionType }
 			: {}),
 		...(typeof oauth.rateLimitTier === 'string' ? { rateLimitTier: oauth.rateLimitTier } : {}),
+		...(typeof oauth.refreshTokenExpiresAt === 'number'
+			? { refreshTokenExpiresAt: oauth.refreshTokenExpiresAt }
+			: {}),
 	};
 }

@@ -37,12 +37,42 @@ export function keychainAccount(): string {
 	}
 }
 
+/** How long a keychain call may take before it is treated as stuck. */
+export const KEYCHAIN_TIMEOUT_MS = 5_000;
+
+/**
+ * Waits for a process to end, or ends it. A locked keychain can put up a
+ * prompt and wait forever, which would leave every hotseat command hanging
+ * with it; the menu bar app would sit busy until its own long timeout.
+ */
+export async function settleWithin(
+	proc: { exited: Promise<number>; kill(): void },
+	ms: number,
+	what: string,
+): Promise<number> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const cutoff = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => {
+			proc.kill();
+			reject(new Error(`${what} did not answer within ${ms / 1000}s (is it locked?)`));
+		}, ms);
+	});
+	try {
+		return await Promise.race([proc.exited, cutoff]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 export async function readKeychain(service = KEYCHAIN_SERVICE): Promise<Credential | null> {
 	const proc = Bun.spawn(
 		[SECURITY, 'find-generic-password', '-a', keychainAccount(), '-w', '-s', service],
 		{ stdout: 'pipe', stderr: 'ignore' },
 	);
-	const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+	const [text, code] = await Promise.all([
+		new Response(proc.stdout).text(),
+		settleWithin(proc, KEYCHAIN_TIMEOUT_MS, 'the keychain'),
+	]);
 	if (code === NOT_FOUND_RC) return null;
 	if (code !== 0) throw new Error(`keychain read failed with status ${code}`);
 	const raw = text.replace(/\n$/, '');
@@ -82,7 +112,10 @@ export async function writeKeychain(
 		: Bun.spawn([SECURITY, 'add-generic-password', '-U', '-a', account, '-s', service, '-X', hex], {
 				stderr: 'pipe',
 			});
-	const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+	const [stderr, code] = await Promise.all([
+		new Response(proc.stderr).text(),
+		settleWithin(proc, KEYCHAIN_TIMEOUT_MS, 'the keychain'),
+	]);
 	if (code !== 0) throw new Error(`keychain write failed: ${stderr.trim() || `status ${code}`}`);
 }
 
@@ -91,7 +124,7 @@ export async function deleteKeychain(service = KEYCHAIN_SERVICE): Promise<void> 
 		[SECURITY, 'delete-generic-password', '-a', keychainAccount(), '-s', service],
 		{ stdout: 'ignore', stderr: 'ignore' },
 	);
-	const code = await proc.exited;
+	const code = await settleWithin(proc, KEYCHAIN_TIMEOUT_MS, 'the keychain');
 	if (code !== 0 && code !== NOT_FOUND_RC) {
 		throw new Error(`keychain delete failed with status ${code}`);
 	}

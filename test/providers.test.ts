@@ -61,3 +61,20 @@ describe('refreshing a Claude login', () => {
 		expect(after.trustedDeviceToken).toBe('device');
 	});
 });
+
+describe('waiting on the keychain', () => {
+	test('a call that does not come back in time is cut off and named', async () => {
+		const { settleWithin } = await import('../src/providers/claude/keychain.ts');
+		const slow = Bun.spawn(['/bin/sleep', '5'], { stdout: 'ignore', stderr: 'ignore' });
+		await expect(settleWithin(slow, 100, 'the keychain')).rejects.toThrow(
+			/the keychain did not answer within 0.1s/,
+		);
+		expect(slow.killed).toBe(true);
+	});
+
+	test('a call that comes back in time is left alone', async () => {
+		const { settleWithin } = await import('../src/providers/claude/keychain.ts');
+		const quick = Bun.spawn(['/usr/bin/true'], { stdout: 'ignore', stderr: 'ignore' });
+		expect(await settleWithin(quick, 2000, 'the keychain')).toBe(0);
+	});
+});

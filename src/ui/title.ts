@@ -5,11 +5,14 @@ export interface TitleSpan {
 	text: string;
 	/** A percentage carries its own severity colour; every other span is plain. */
 	percent?: number;
+	/** Set on the span naming a service, so a renderer may show its mark instead. */
+	provider?: ProviderId;
 }
 
 const PROVIDER_LABEL: Record<ProviderId, string> = { claude: 'Claude', codex: 'Codex' };
 const DOT = ' · ';
-const DASH = ' — ';
+/** Between the service, the account and the numbers. A bullet: narrow, unlike a dash. */
+const SEP = ' • ';
 
 export type TitleOptions = Pick<
 	Settings,
@@ -45,21 +48,19 @@ export function buildTitle(state: State, options: TitleOptions): TitleSpan[] {
 		if (!active) continue;
 		if (spans.length > 0) spans.push({ text: options.titleCompact ? '  ' : '   ' });
 
-		const separator = options.titleCompact ? ' ' : DASH;
-		spans.push({ text: PROVIDER_LABEL[providerId] });
+		const separator = options.titleCompact ? ' ' : SEP;
+		spans.push({ text: PROVIDER_LABEL[providerId], provider: providerId });
 		if (options.titleShowAccount && !options.titleCompact) {
 			spans.push({
-				text: `${DASH}${accountLabel(active.email, active.alias, options.titleShortenEmail)}`,
+				text: `${SEP}${accountLabel(active.email, active.alias, options.titleShortenEmail)}`,
 			});
 		}
 		if (options.titlePercentage === 'none') continue;
 
 		const all = active.usage?.windows ?? [];
 		const windows = options.titleShowModelLimits ? all : all.filter((w) => !isModelLimit(w));
-		if (windows.length === 0) {
-			spans.push({ text: `${separator}—` });
-			continue;
-		}
+		// No numbers yet: the name alone says which account is in use.
+		if (windows.length === 0) continue;
 		if (options.titlePercentage === 'worst' || options.titleCompact) {
 			spans.push(
 				{ text: separator },

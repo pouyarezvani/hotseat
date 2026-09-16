@@ -129,6 +129,7 @@ struct HistoryEntry: Decodable {
 struct TitleSpan: Decodable {
 	let text: String
 	let percent: Double?
+	let provider: String?
 }
 
 enum Severity {

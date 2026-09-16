@@ -49,10 +49,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	/// than the file: an atomic write replaces the file, which would end a
 	/// watch on it, and creating the file to watch it truncated the board the
 	/// CLI had just published.
+	/// Where hotseat keeps its files, honouring the same override the CLI does.
+	static let homePath: String =
+		ProcessInfo.processInfo.environment["HOTSEAT_HOME"]
+		?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hotseat").path
+
 	private func watchState() {
-		let home =
-			ProcessInfo.processInfo.environment["HOTSEAT_HOME"]
-			?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hotseat").path
+		let home = Self.homePath
 		try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
 		let descriptor = open(home, O_EVTONLY)
 		guard descriptor >= 0 else { return }
@@ -162,7 +165,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			return
 		}
 		let title = NSMutableAttributedString()
+		let compact = board?.settings.titleCompact ?? false
 		for span in spans {
+			if compact, let provider = span.provider, let mark = Logo.image(for: provider) {
+				// The mark stands in for the name. An image inside text is not
+				// tinted the way a template image elsewhere would be, so it is
+				// painted in the text colour here, under the bar's own appearance.
+				// Its bottom sits a little under the baseline so it centres on
+				// the digits beside it.
+				let tinted = Logo.tinted(mark, with: .labelColor, appearance: button.effectiveAppearance)
+				let attachment = NSTextAttachment()
+				attachment.image = tinted
+				attachment.bounds = NSRect(x: 0, y: -2, width: tinted.size.width, height: tinted.size.height)
+				title.append(NSAttributedString(attachment: attachment))
+				continue
+			}
 			if let percent = span.percent {
 				title.append(
 					NSAttributedString(
@@ -529,7 +546,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		models.submenu = modelsMenu
 		menu.addItem(models)
 
+		menu.addItem(.separator())
+		menu.addItem(caption("Files", tip: "The two files hotseat keeps for you to edit by hand."))
+		menu.addItem(
+			action(
+				"Edit accounts.json\u{2026}", #selector(editAccountsFile), enabled: true,
+				tip: "Open the file that lists every account and its saved login in Cursor or VS Code, whichever is installed. Add an account by writing an entry with a service and an email; delete an entry to forget it. Keep this file to yourself: it holds live logins."))
+		menu.addItem(
+			action(
+				"Edit settings.json\u{2026}", #selector(editSettingsFile), enabled: true,
+				tip: "Open your settings file in Cursor or VS Code, whichever is installed. It holds only the settings you have changed; run  hotseat config  in a terminal to see every key and its allowed values."))
 	}
+
+	@objc private func editAccountsFile() { openInEditor("accounts.json", ifMissing: nil) }
+	@objc private func editSettingsFile() {
+		openInEditor("settings.json", ifMissing: "{\n\t\"version\": 1\n}\n")
+	}
+
+	/// Opens one of hotseat's files in a code editor: Cursor first, then VS
+	/// Code, then whatever the Mac opens JSON with.
+	private func openInEditor(_ name: String, ifMissing stub: String?) {
+		let path = (Self.homePath as NSString).appendingPathComponent(name)
+		if let stub, !FileManager.default.fileExists(atPath: path) {
+			try? stub.write(toFile: path, atomically: true, encoding: .utf8)
+			try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+		}
+		let file = URL(fileURLWithPath: path)
+		for bundleId in Self.editorBundleIds {
+			guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else { continue }
+			NSWorkspace.shared.open([file], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+			return
+		}
+		NSWorkspace.shared.open(file)
+	}
+
+	/// Cursor, then Visual Studio Code.
+	static let editorBundleIds = ["com.todesktop.230313mzl4w4u92", "com.microsoft.VSCode"]
 
 	/// Re-reads settings so a submenu opened right after a change shows the new
 	/// value. This reads the settings file only, with no network call, because it

@@ -149,4 +149,36 @@ let noSettings = """
 """.data(using: .utf8)!
 check("a board decodes with no settings at all", (try? JSONDecoder().decode(Board.self, from: noSettings)) != nil)
 
+// MARK: - Marks
+//
+// The compact title shows each service's mark in place of its name. A mark
+// that fails to load falls back to the name silently, so this is where a
+// missing or broken file is caught.
+
+print("marks")
+let logos = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HOTSEAT_LOGOS"] ?? "macos/Logos")
+for provider in ["claude", "codex"] {
+	if let mark = Logo.image(for: provider, in: logos) {
+		check("the \(provider) mark loads as a template the height of the text", mark.isTemplate && mark.size.height == 12, "\(mark.size)")
+	} else {
+		check("the \(provider) mark loads", false)
+	}
+}
+check("a service without a mark gets none rather than a crash", Logo.image(for: "other", in: logos) == nil)
+if let mark = Logo.image(for: "claude", in: logos) {
+	let painted = Logo.tinted(mark, with: .white, appearance: NSAppearance(named: .darkAqua))
+	if let rep = painted.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)) {
+		var lit = 0
+		for x in 0..<rep.pixelsWide {
+			for y in 0..<rep.pixelsHigh {
+				guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+				if c.alphaComponent > 0.5, c.redComponent > 0.9, c.greenComponent > 0.9, c.blueComponent > 0.9 { lit += 1 }
+			}
+		}
+		check("a tinted mark is painted in the colour asked for", lit > 20, "\(lit) white pixels")
+	} else {
+		check("a tinted mark can be read back", false)
+	}
+}
+
 exit(failures == 0 ? 0 : 1)

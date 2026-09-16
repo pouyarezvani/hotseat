@@ -175,7 +175,7 @@ An export contains live logins. Keep it private and delete it when done.
 
 | Key | Default | |
 | --- | --- | --- |
-| `titleCompact` | `false` | shrink the menu bar button |
+| `titleCompact` | `false` | shrink the menu bar button to each service's mark and one number |
 | `titleShowAccount` | `true` | show the account name in the title |
 | `titlePercentage` | `all` | `all`, `worst`, or `none` |
 | `titleShowModelLimits` | `true` | include per-model weekly limits |
@@ -226,7 +226,9 @@ Everything hotseat stores lives in `~/.hotseat`, owner-readable only:
 
 ### Editing the files by hand
 
-Both `accounts.json` and `settings.json` are yours to edit. `settings.json`
+Both `accounts.json` and `settings.json` are yours to edit. The menu bar's
+Settings has an item for each that opens it in Cursor or VS Code, whichever
+is installed. `settings.json`
 holds only the keys you have changed; `hotseat config` lists every key with
 its allowed values.
 
@@ -289,3 +291,7 @@ AppKit replace that action with an internal one.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The Claude and OpenAI marks in `macos/Logos` belong to Anthropic and OpenAI.
+They appear in the compact menu bar title only to say which service a number
+belongs to.

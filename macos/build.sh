@@ -24,6 +24,7 @@ if [ ! -f "$here/Icon/Hotseat.icns" ] || [ "$here/Icon/MakeIcon.swift" -nt "$her
 	cp "$iconset/icon_512x512.png" "$here/Icon/icon.png"
 fi
 cp "$here/Icon/Hotseat.icns" "$resources_dir/Hotseat.icns"
+cp "$here"/Logos/*.svg "$resources_dir/"
 
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -51,6 +52,7 @@ swiftc \
 	-framework AppKit \
 	-o "$macos_dir/Hotseat" \
 	"$here/Sources/Model.swift" \
+	"$here/Sources/Logo.swift" \
 	"$here/Sources/Runner.swift" \
 	"$here/Sources/AccountRowView.swift" \
 	"$here/Sources/main.swift"
@@ -60,8 +62,8 @@ swiftc \
 tmp="$(mktemp -d)"
 cp "$here/Tests/RenderCheck.swift" "$tmp/main.swift"
 swiftc -target arm64-apple-macos14.0 -framework AppKit -o "$tmp/rendercheck" \
-	"$here/Sources/Model.swift" "$here/Sources/AccountRowView.swift" "$tmp/main.swift"
-"$tmp/rendercheck"
+	"$here/Sources/Model.swift" "$here/Sources/Logo.swift" "$here/Sources/AccountRowView.swift" "$tmp/main.swift"
+HOTSEAT_LOGOS="$here/Logos" "$tmp/rendercheck"
 rm -rf "$tmp"
 
 codesign --force --sign - "$app"

@@ -313,3 +313,25 @@ describe('every menu item explains itself on hover', () => {
 		}
 	});
 });
+
+describe('the files the menu opens for editing', () => {
+	test('are the two files hotseat documents as editable, under the hotseat folder', () => {
+		expect(menu).toContain('openInEditor("accounts.json"');
+		expect(menu).toContain('openInEditor("settings.json"');
+		const readme = menu.includes('Self.homePath');
+		expect(readme).toBe(true);
+	});
+
+	test('the compact title uses a mark for every service the CLI knows', () => {
+		const logo = require('node:fs').readFileSync(
+			join(ROOT, 'macos/Sources/Logo.swift'),
+			'utf8',
+		) as string;
+		for (const id of PROVIDER_IDS) {
+			expect(logo).toContain(`case "${id}": return "`);
+		}
+		for (const file of ['claude.svg', 'openai.svg']) {
+			expect(require('node:fs').existsSync(join(ROOT, 'macos/Logos', file))).toBe(true);
+		}
+	});
+});

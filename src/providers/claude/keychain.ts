@@ -37,9 +37,9 @@ export function keychainAccount(): string {
 	}
 }
 
-export async function readKeychain(): Promise<Credential | null> {
+export async function readKeychain(service = KEYCHAIN_SERVICE): Promise<Credential | null> {
 	const proc = Bun.spawn(
-		[SECURITY, 'find-generic-password', '-a', keychainAccount(), '-w', '-s', KEYCHAIN_SERVICE],
+		[SECURITY, 'find-generic-password', '-a', keychainAccount(), '-w', '-s', service],
 		{ stdout: 'pipe', stderr: 'ignore' },
 	);
 	const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
@@ -69,24 +69,26 @@ function quote(value: string): string {
  * other process could read it from the process list. The argv form is the
  * fallback for a payload past the stdin line limit.
  */
-export async function writeKeychain(credential: Credential): Promise<void> {
+export async function writeKeychain(
+	credential: Credential,
+	service = KEYCHAIN_SERVICE,
+): Promise<void> {
 	const hex = Buffer.from(JSON.stringify(credential), 'utf8').toString('hex');
 	const account = keychainAccount();
-	const line = `add-generic-password -U -a ${quote(account)} -s ${quote(KEYCHAIN_SERVICE)} -X ${hex}\n`;
+	const line = `add-generic-password -U -a ${quote(account)} -s ${quote(service)} -X ${hex}\n`;
 	const useStdin = Buffer.byteLength(line, 'utf8') <= STDIN_LINE_LIMIT;
 	const proc = useStdin
 		? Bun.spawn([SECURITY, '-i'], { stdin: new TextEncoder().encode(line), stderr: 'pipe' })
-		: Bun.spawn(
-				[SECURITY, 'add-generic-password', '-U', '-a', account, '-s', KEYCHAIN_SERVICE, '-X', hex],
-				{ stderr: 'pipe' },
-			);
+		: Bun.spawn([SECURITY, 'add-generic-password', '-U', '-a', account, '-s', service, '-X', hex], {
+				stderr: 'pipe',
+			});
 	const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
 	if (code !== 0) throw new Error(`keychain write failed: ${stderr.trim() || `status ${code}`}`);
 }
 
-export async function deleteKeychain(): Promise<void> {
+export async function deleteKeychain(service = KEYCHAIN_SERVICE): Promise<void> {
 	const proc = Bun.spawn(
-		[SECURITY, 'delete-generic-password', '-a', keychainAccount(), '-s', KEYCHAIN_SERVICE],
+		[SECURITY, 'delete-generic-password', '-a', keychainAccount(), '-s', service],
 		{ stdout: 'ignore', stderr: 'ignore' },
 	);
 	const code = await proc.exited;

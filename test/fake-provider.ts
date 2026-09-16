@@ -1,15 +1,17 @@
+import { join } from 'node:path';
 import type {
 	Credential,
 	Identity,
 	Provider,
 	ProviderId,
 	RunningProcess,
+	SessionSupport,
 	UsageSnapshot,
 } from '../src/core/types.ts';
 
-/** A credential is just a token here; whatever else a real one carries is noise. */
-export function cred(token: string): Credential {
-	return { token };
+/** A credential is just a token here, plus when it was issued when that matters. */
+export function cred(token: string, issued = 0): Credential {
+	return issued > 0 ? { token, issued } : { token };
 }
 
 export function tokenOf(credential: Credential): string {
@@ -32,10 +34,30 @@ export class FakeProvider implements Provider {
 	/** When set, every refresh rotates the token by appending this. */
 	rotate = '';
 	running: RunningProcess[] = [];
+	/** Where the fake agent keeps its everyday setup; a test points this somewhere. */
+	home = '';
+	seeded: string[] = [];
+	readonly session: SessionSupport;
 
 	constructor(id: ProviderId) {
 		this.id = id;
 		this.displayName = id === 'claude' ? 'Claude' : 'Codex';
+		this.session = {
+			homeVariable: `${id.toUpperCase()}_HOME`,
+			sharedHome: () => this.home,
+			sharedEntries: ['settings.json', 'skills'],
+			defaultCommand: id,
+			writeLogin: (dir, credential) =>
+				Bun.write(join(dir, 'login.json'), JSON.stringify(credential)).then(() => undefined),
+			readLogin: async (dir) => {
+				const file = Bun.file(join(dir, 'login.json'));
+				return (await file.exists()) ? ((await file.json()) as Credential) : null;
+			},
+			issuedAt: (credential) => (typeof credential.issued === 'number' ? credential.issued : 0),
+			seed: async (dir) => {
+				this.seeded.push(dir);
+			},
+		};
 	}
 
 	async readAgentCredential(): Promise<Credential | null> {

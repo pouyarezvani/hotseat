@@ -48,9 +48,13 @@ const GROUPS: Group[] = [
 		],
 	},
 	{
-		title: 'Per project',
+		title: 'One terminal, another account',
 		entries: [
-			{ usage: 'run <service> -- <command>', what: 'run a command on this folder’s account' },
+			{
+				usage: 'run <service> [account]',
+				what: 'open the agent as that account in this terminal only',
+			},
+			{ usage: 'run <service> [account] -- <command>', what: 'or run any command that way' },
 			{ usage: 'map <service> <account> [path]', what: 'tie a folder to an account' },
 			{ usage: 'unmap [path]', what: 'remove that rule' },
 		],

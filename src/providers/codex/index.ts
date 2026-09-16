@@ -6,6 +6,7 @@ import type {
 	Identity,
 	Provider,
 	RunningProcess,
+	SessionSupport,
 	UsageSnapshot,
 	UsageWindow,
 } from '../../core/types.ts';
@@ -55,6 +56,33 @@ export function authPath(): string {
 	const home = process.env.CODEX_HOME;
 	return join(home && home.length > 0 ? home : join(homedir(), '.codex'), 'auth.json');
 }
+
+export const codexSession: SessionSupport = {
+	homeVariable: 'CODEX_HOME',
+	sharedHome: () => join(homedir(), '.codex'),
+	// The setup, not the login and not the transcripts, memories or state
+	// databases, which Codex keeps per home.
+	sharedEntries: [
+		'config.toml',
+		'AGENTS.md',
+		'skills',
+		'prompts',
+		'rules',
+		'hooks.json',
+		'keybindings.json',
+		'plugins',
+	],
+	defaultCommand: 'codex',
+	writeLogin: (dir, credential) => writeJsonAtomic(join(dir, 'auth.json'), credential),
+	readLogin: (dir) => readJson<Credential>(join(dir, 'auth.json')),
+	issuedAt(credential) {
+		const stamp =
+			typeof credential.last_refresh === 'string'
+				? Date.parse(credential.last_refresh)
+				: Number.NaN;
+		return Number.isFinite(stamp) ? stamp : 0;
+	},
+};
 
 /** Turns a window's duration into the label a person uses for it. */
 export function windowLabel(seconds: number | null | undefined): string {
@@ -117,6 +145,7 @@ export class CodexProvider implements Provider {
 	readonly displayName = 'Codex';
 	/** A running session is pinned to its account, so a swap needs a restart. */
 	readonly liveSwap = false;
+	readonly session = codexSession;
 
 	readAgentCredential(): Promise<Credential | null> {
 		return readJson<Credential>(authPath());

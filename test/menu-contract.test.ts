@@ -68,22 +68,38 @@ describe('the menu only asks for commands the CLI has', () => {
 			...menu.matchAll(/choiceItem\([^)]*?key:\s*"([A-Za-z]+)",\s*value:\s*"([A-Za-z0-9-]+)"/gs),
 		].map(([, key, value]) => ({ key, value }));
 
-		const loops = [
-			...menu.matchAll(/for (?:choice|value) in \[([^\]]+)\][\s\S]{0,400}?key:\s*"([A-Za-z]+)"/g),
-		].flatMap(([, list, key]) =>
-			(list ?? '')
-				.split(',')
-				.map((part) => part.trim().replace(/"/g, ''))
-				.filter((part) => part.length > 0)
-				.map((value) => ({ key, value })),
+		const choices = /thresholdChoices: \[Int\] = \[([^\]]+)\] \+ Array\((\d+)\.\.\.(\d+)\)/.exec(
+			menu,
 		);
+		const thresholds = choices
+			? [
+					...(choices[1] ?? '').split(',').map((part) => Number(part.trim())),
+					...Array.from(
+						{ length: Number(choices[3]) - Number(choices[2]) + 1 },
+						(_, i) => Number(choices[2]) + i,
+					),
+				].map((value) => ({ key: 'autoThresholdPercent', value: String(value) }))
+			: [];
+
+		const loops = [
+			...thresholds,
+			...menu.matchAll(/for (?:choice|value) in \[([^\]]+)\][\s\S]{0,400}?key:\s*"([A-Za-z]+)"/g),
+		]
+			.flatMap((entry) => (Array.isArray(entry) ? [entry] : []))
+			.flatMap(([, list, key]) =>
+				(list ?? '')
+					.split(',')
+					.map((part) => part.trim().replace(/"/g, ''))
+					.filter((part) => part.length > 0)
+					.map((value) => ({ key, value })),
+			);
 
 		const tupleBlock = menu.slice(menu.indexOf('percentageChoices: [(String, String, String)]'));
 		const tuples = [
 			...tupleBlock.slice(0, tupleBlock.indexOf(']\n')).matchAll(/\("([a-z]+)", "/g),
 		].map(([, value]) => ({ key: 'titlePercentage', value }));
 
-		const offered = [...literals, ...loops, ...tuples];
+		const offered = [...literals, ...loops, ...tuples, ...thresholds];
 		expect(offered.length).toBeGreaterThan(5);
 		for (const { key, value } of offered) {
 			if (!key || !value || !isSettingKey(key)) continue;
@@ -305,9 +321,11 @@ describe('every menu item explains itself on hover', () => {
 	});
 
 	test('every threshold choice and every title choice has its own tooltip', () => {
-		for (const value of [80, 85, 90, 95, 99]) {
-			expect(body).toMatch(new RegExp(`${value}: "Switch`));
+		expect(body).toContain('thresholdChoices: [Int] = [80, 85] + Array(90...99)');
+		for (const value of [80, 85, 90, 99]) {
+			expect(body).toMatch(new RegExp(`case ${value}:\\s*\\n\\s*return "Switch`));
 		}
+		expect(body).toContain('leaving \\(left)% for the turn in progress');
 		for (const choice of ['"all"', '"worst"', '"none"']) {
 			expect(body).toMatch(new RegExp(`\\(${choice}, "[^"]+", "[^"]{40,}"\\)`));
 		}

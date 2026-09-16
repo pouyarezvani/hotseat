@@ -496,19 +496,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			tip: "How full a limit has to get before hotseat switches you to another account. Any limit counts: the 5-hour, the weekly, or a model limit you have chosen to count below.")
 		let thresholdMenu = NSMenu()
 		thresholdMenu.autoenablesItems = false
-		let thresholdTips: [Int: String] = [
-			80: "Switch early, once any limit is 80% used. You switch more often, but you never get near running out.",
-			85: "Switch once any limit is 85% used. A little earlier than the default, for extra margin.",
-			90: "Switch once any limit is 90% used. The default: uses each account well while leaving room for a long turn before the switch lands.",
-			95: "Switch late, once any limit is 95% used. Uses each account almost fully, with little margin. A long turn can hit the limit before the switch lands.",
-			99: "Switch only at the very end, once any limit is 99% used. Squeezes everything out of each account, but a single long turn will likely hit the limit first and stop.",
-		]
-		for value in [80, 85, 90, 95, 99] {
+		for value in Self.thresholdChoices {
 			thresholdMenu.addItem(
 				choiceItem(
 					"\(value)%", key: "autoThresholdPercent", value: String(value),
 					current: String(Int(settings.autoThresholdPercent)),
-					tip: thresholdTips[value] ?? ""))
+					tip: Self.thresholdTip(value)))
 		}
 		threshold.submenu = thresholdMenu
 		menu.addItem(threshold)
@@ -582,6 +575,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 	/// Cursor, then Visual Studio Code.
 	static let editorBundleIds = ["com.todesktop.230313mzl4w4u92", "com.microsoft.VSCode"]
+
+	/// Early, a little early, and then every point from the default up to the
+	/// very end, because the right spot between 90 and 99 depends on how long
+	/// a turn runs.
+	static let thresholdChoices: [Int] = [80, 85] + Array(90...99)
+
+	static func thresholdTip(_ value: Int) -> String {
+		switch value {
+		case 80:
+			return "Switch early, once any limit is 80% used. You switch more often, but you never get near running out."
+		case 85:
+			return "Switch once any limit is 85% used. A little earlier than the default, for extra margin."
+		case 90:
+			return "Switch once any limit is 90% used. The default: uses each account well while leaving room for a long turn before the switch lands."
+		case 99:
+			return "Switch only at the very end, once any limit is 99% used. Squeezes everything out of each account, but a single long turn will likely hit the limit first and stop."
+		default:
+			let left = 100 - value
+			return "Switch once any limit is \(value)% used, leaving \(left)% for the turn in progress to finish on. Later means more of each account used; earlier means more margin for a long turn."
+		}
+	}
 
 	/// Re-reads settings so a submenu opened right after a change shows the new
 	/// value. This reads the settings file only, with no network call, because it

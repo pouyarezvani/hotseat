@@ -1,8 +1,9 @@
 import { liveIdentity, PROVIDERS } from './collect.ts';
 import { MIN_USABLE_HEADROOM, headroom as policyHeadroom, rankCandidates } from './policy.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
+import { freshestLogin } from './session.ts';
 import type { AccountRecord, AccountState, Provider, ProviderId, ProviderState } from './types.ts';
-import { loadCredential, storeCredential } from './vault.ts';
+import { storeCredential } from './vault.ts';
 
 export { MIN_USABLE_HEADROOM };
 
@@ -92,7 +93,9 @@ export async function activate(
 	const target = accountsFor(registry, providerId).find((account) => account.id === accountId);
 	if (!target) throw new Error(`no ${provider.displayName} account with id ${accountId}`);
 
-	const stored = await loadCredential(target);
+	// A session running as this account may hold a newer token than the saved
+	// copy; installing the older one would fail at its next refresh.
+	const stored = await freshestLogin(provider, target);
 	if (!stored) {
 		throw new Error(
 			`no saved login for ${target.email} - run "hotseat save ${providerId}" while it is signed in`,

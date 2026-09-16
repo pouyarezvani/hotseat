@@ -101,13 +101,28 @@ If the login in use stops answering for three checks in a row, hotseat treats
 it as gone and switches away from it. Each service is judged on its own:
 switching Claude never touches Codex.
 
-## A different account per project
+## Two accounts at the same time
+
+```sh
+hotseat run claude 3             # open Claude Code as account 3, in this terminal only
+hotseat run codex 2 -- codex resume
+hotseat run claude 3 -- claude -p "hello"
+```
+
+Every other terminal, and the editor extension, stay on the shared login. The
+agent is pointed at a folder of its own under `~/.hotseat/sessions`, which
+links to your everyday setup (settings, instructions, skills, commands, agents,
+hooks, plugins, MCP servers) and keeps that account's own login and chat
+history. A token the session refreshes is saved back when it ends, and a
+switch always installs the freshest copy, so nothing goes stale. Running the
+account that is already in use just runs the command on the shared login.
+
+### A different account per folder
 
 ```sh
 hotseat map claude 2 ~/work      # this folder and everything under it uses account 2
 hotseat map                      # list the rules
-hotseat run claude -- claude     # run with this folder's account
-hotseat run claude 3 -- claude   # or name one outright
+cd ~/work && hotseat run claude  # opens Claude Code as account 2
 ```
 
 Rules apply to a folder and everything beneath it, so setting one on a project
@@ -153,7 +168,7 @@ Add `--json` to `status`, `title` or `history` for machine-readable output.
 | `hotseat swap <service> <a> <b>` | exchange two accounts' numbers |
 | `hotseat map <service> <account> [folder]` | use that account in a folder |
 | `hotseat unmap [folder]` | remove that rule |
-| `hotseat run <service> [account] -- <command>` | run a command on the folder's account |
+| `hotseat run <service> [account] [-- <command>]` | run as that account in this terminal only |
 
 A service is `claude` or `codex`. An account is its number, its email, or the
 name you gave it.
@@ -221,7 +236,8 @@ Everything hotseat stores lives in `~/.hotseat`, owner-readable only:
 ├── usage.json        cached readings
 ├── history.jsonl     a line per switch
 ├── auto-state.json   what the last automatic switch left behind
-└── mappings.json     folder rules
+├── mappings.json     folder rules
+└── sessions/         one folder per account run on its own, with its history
 ```
 
 ### Editing the files by hand

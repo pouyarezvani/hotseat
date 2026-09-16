@@ -14,6 +14,7 @@ import {
 	readKeychain,
 	writeKeychain,
 } from './keychain.ts';
+import { claudeSession } from './session.ts';
 import { claudeSessions } from './sessions.ts';
 
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
@@ -116,6 +117,7 @@ export class ClaudeProvider implements Provider {
 	readonly displayName = 'Claude';
 	/** Claude Code re-reads the credential per request, so a swap lands mid-session. */
 	readonly liveSwap = true;
+	readonly session = claudeSession;
 
 	async readAgentCredential(): Promise<Credential | null> {
 		const live = await readKeychain();

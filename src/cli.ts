@@ -22,6 +22,7 @@ import {
 	updateRegistry,
 	upsertAccount,
 } from './core/registry.ts';
+import { captureSession, needsSession, prepareSession } from './core/session.ts';
 import {
 	DEFAULTS,
 	describeSetting,
@@ -528,10 +529,11 @@ export async function main(argv: readonly string[]): Promise<number> {
 			}
 			case 'run': {
 				const providerId = parseProvider(rest[0]);
+				const provider = PROVIDERS[providerId];
 				const separator = rest.indexOf('--');
-				if (separator < 0)
-					throw new Error('put the command after --, as in: run claude 2 -- claude');
-				const selector = separator > 1 ? rest[1] : undefined;
+				const selector = separator < 0 ? rest[1] : separator > 1 ? rest[1] : undefined;
+				const given = separator < 0 ? [] : rest.slice(separator + 1);
+				const command = given.length > 0 ? given : [provider.session.defaultCommand];
 				const account = selector
 					? await resolve(providerId, selector)
 					: ((await mappingFor(process.cwd(), providerId).then(async (mapping) =>
@@ -539,18 +541,38 @@ export async function main(argv: readonly string[]): Promise<number> {
 						)) ?? undefined);
 				if (!account) {
 					throw new Error(
-						'no account given and no rule covers this directory - use "hotseat map" to set one',
+						'no account given and no rule covers this folder - name one, or set a rule with "hotseat map"',
 					);
 				}
-				await seat(providerId, account.id, 'manual');
-				const command = rest.slice(separator + 1);
-				if (command.length === 0) return 0;
+				const state = await collectState();
+				const providerState = state.providers[providerId];
+				if (!needsSession(providerState, account.id)) {
+					note(`${account.email} is the account in use, so this runs on the shared login`);
+					const plain = Bun.spawn(command, {
+						stdin: 'inherit',
+						stdout: 'inherit',
+						stderr: 'inherit',
+					});
+					return await plain.exited;
+				}
+				const session = await prepareSession(provider, account);
+				const shared = providerState.accounts.find(
+					(entry) => entry.id === providerState.activeAccountId,
+				);
+				note(
+					`running as ${account.email} in this terminal only - every other terminal stays on ${shared?.email ?? 'the shared login'}`,
+				);
 				const child = Bun.spawn(command, {
+					env: { ...process.env, ...session.env },
 					stdin: 'inherit',
 					stdout: 'inherit',
 					stderr: 'inherit',
 				});
-				return await child.exited;
+				const code = await child.exited;
+				if (await captureSession(provider, account)) {
+					note(`saved the login ${account.email} refreshed during this session`);
+				}
+				return code;
 			}
 			case 'export': {
 				const path = rest[0];

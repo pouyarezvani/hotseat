@@ -82,6 +82,47 @@ describe('renderBoard', () => {
 		expect(stripAnsi(renderBoard(state, options))).toContain('token expired');
 	});
 
+	test('counts only accounts that could actually be switched to', () => {
+		// Account 1 is in use and account 2 has no reading, so neither is somewhere
+		// to switch. A count that included them would promise a move that the
+		// switcher would then refuse to make.
+		expect(stripAnsi(renderBoard(fixture(), options))).toContain('nothing to switch to');
+	});
+
+	test('counts an account with real room left', () => {
+		const state = fixture();
+		const spare = state.providers.claude.accounts[1];
+		if (!spare) throw new Error('fixture missing account');
+		spare.usage = {
+			fetchedAt: '2026-09-16T12:00:00Z',
+			windows: [{ key: 'five_hour', label: '5h', percent: 10 }],
+		};
+		expect(stripAnsi(renderBoard(state, options))).toContain('1 to switch to');
+	});
+
+	test('does not count an account with only a sliver left', () => {
+		const state = fixture();
+		const spare = state.providers.claude.accounts[1];
+		if (!spare) throw new Error('fixture missing account');
+		spare.usage = {
+			fetchedAt: '2026-09-16T12:00:00Z',
+			windows: [{ key: 'five_hour', label: '5h', percent: 98 }],
+		};
+		expect(stripAnsi(renderBoard(state, options))).toContain('nothing to switch to');
+	});
+
+	test('does not count a disabled account', () => {
+		const state = fixture();
+		const spare = state.providers.claude.accounts[1];
+		if (!spare) throw new Error('fixture missing account');
+		spare.disabled = true;
+		spare.usage = {
+			fetchedAt: '2026-09-16T12:00:00Z',
+			windows: [{ key: 'five_hour', label: '5h', percent: 0 }],
+		};
+		expect(stripAnsi(renderBoard(state, options))).toContain('nothing to switch to');
+	});
+
 	test('points at the add command when nothing is set up', () => {
 		const empty: State = {
 			version: 1,
@@ -117,9 +158,12 @@ describe('headroomOf', () => {
 		expect(headroomOf(account)).toBe(9);
 	});
 
-	test('treats an unmeasured account as fully available', () => {
+	test('an unmeasured account has unknown headroom, not full headroom', () => {
+		// Calling it full would rank it top and send a switch to an account whose
+		// real level nobody knows. Unknown is the honest answer, and the switcher
+		// skips it for exactly that reason.
 		const account = fixture().providers.claude.accounts[1];
 		if (!account) throw new Error('fixture missing account');
-		expect(headroomOf(account)).toBe(100);
+		expect(Number.isNaN(headroomOf(account))).toBe(true);
 	});
 });

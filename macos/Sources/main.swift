@@ -201,7 +201,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	private func providerHeader(_ title: String, state: ProviderState, providerId: String)
 		-> NSMenuItem
 	{
-		let ready = state.accounts.filter { !$0.disabled && $0.headroom > 3 }.count
+		// Counts only accounts that could actually be switched to, using the same
+		// rule the switcher applies, so the number never contradicts what
+		// choosing an account would do. The one in use is excluded, because it is
+		// not somewhere to switch.
+		let spare = state.accounts.filter {
+			!$0.disabled && $0.id != state.activeAccountId
+				&& $0.headroom >= Account.minimumUsableHeadroom
+		}.count
 		let item = NSMenuItem()
 		let text = NSMutableAttributedString(
 			string: title,
@@ -211,7 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			])
 		text.append(
 			NSAttributedString(
-				string: "   \(ready) of \(state.accounts.count) available",
+				string: spare == 0 ? "   nothing to switch to" : "   \(spare) to switch to",
 				attributes: [
 					.font: NSFont.systemFont(ofSize: 11),
 					.foregroundColor: NSColor.tertiaryLabelColor,
@@ -341,24 +348,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 		menu.addItem(.separator())
 		menu.addItem(caption("Switching"))
-		menu.addItem(toggle("Switch automatically", key: "autoEnabled", on: settings.autoEnabled))
-		let strategy = NSMenuItem(title: "When switching, pick", action: nil, keyEquivalent: "")
+		menu.addItem(
+			toggle("Switch for me automatically", key: "autoEnabled", on: settings.autoEnabled))
+		// Indented to show they belong to the toggle above, but left usable so the
+		// rules can be set before automatic switching is turned on.
+		let strategy = NSMenuItem(title: "\u{2003}pick the account that", action: nil, keyEquivalent: "")
 		let strategyMenu = NSMenu()
 		strategyMenu.autoenablesItems = false
 		strategyMenu.addItem(
 			choiceItem(
-				"The account that resets soonest", key: "autoStrategy", value: "soonest-reset",
+				"resets soonest", key: "autoStrategy", value: "soonest-reset",
 				current: settings.autoStrategy))
 		strategyMenu.addItem(
 			choiceItem(
-				"The account with the most left", key: "autoStrategy", value: "most-left",
+				"has the most left", key: "autoStrategy", value: "most-left",
 				current: settings.autoStrategy))
 		strategy.submenu = strategyMenu
 		menu.addItem(strategy)
-		let threshold = NSMenuItem(title: "Switch at", action: nil, keyEquivalent: "")
+		let threshold = NSMenuItem(title: "\u{2003}switch once a limit hits", action: nil, keyEquivalent: "")
 		let thresholdMenu = NSMenu()
 		thresholdMenu.autoenablesItems = false
-		for value in [80, 85, 90, 95] {
+		for value in [80, 85, 90, 95, 99] {
 			thresholdMenu.addItem(
 				choiceItem(
 					"\(value)%", key: "autoThresholdPercent", value: String(value),

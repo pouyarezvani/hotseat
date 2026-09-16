@@ -6,9 +6,21 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
 app="$here/build/Hotseat.app"
 macos_dir="$app/Contents/MacOS"
+resources_dir="$app/Contents/Resources"
 
 rm -rf "$app"
-mkdir -p "$macos_dir"
+mkdir -p "$macos_dir" "$resources_dir"
+
+# The icon is drawn from code so it is reviewable and reproducible.
+if [ ! -f "$here/Icon/Hotseat.icns" ] || [ "$here/Icon/MakeIcon.swift" -nt "$here/Icon/Hotseat.icns" ]; then
+	iconset="$(mktemp -d)/hotseat.iconset"
+	mkdir -p "$iconset"
+	swiftc -target arm64-apple-macos13.0 -framework AppKit -o "$iconset/../makeicon" "$here/Icon/MakeIcon.swift"
+	"$iconset/../makeicon" "$iconset"
+	iconutil -c icns "$iconset" -o "$here/Icon/Hotseat.icns"
+	cp "$iconset/icon_512x512.png" "$here/Icon/icon.png"
+fi
+cp "$here/Icon/Hotseat.icns" "$resources_dir/Hotseat.icns"
 
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -19,6 +31,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 	<key>CFBundleDisplayName</key><string>Hotseat</string>
 	<key>CFBundleIdentifier</key><string>dev.hotseat.menubar</string>
 	<key>CFBundleExecutable</key><string>Hotseat</string>
+	<key>CFBundleIconFile</key><string>Hotseat</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>0.1.0</string>
 	<key>CFBundleVersion</key><string>1</string>

@@ -22,6 +22,10 @@ struct Account: Decodable {
 	let disabled: Bool
 	let usage: UsageSnapshot?
 
+	/// An account with a sliver of quota left is not worth switching to: it would
+	/// be spent within a turn or two. Mirrors MIN_USABLE_HEADROOM in the CLI.
+	static let minimumUsableHeadroom: Double = 5
+
 	var displayName: String { alias ?? email }
 	var worstPercent: Double { usage?.windows.map(\.percent).max() ?? 0 }
 	var headroom: Double { 100 - worstPercent }

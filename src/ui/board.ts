@@ -1,3 +1,4 @@
+import { headroom, MIN_USABLE_HEADROOM } from '../core/switch.ts';
 import type { AccountState, ProviderId, State, UsageWindow } from '../core/types.ts';
 import {
 	bold,
@@ -47,12 +48,17 @@ export function renderBoard(state: State, options: BoardOptions): string {
 	for (const providerId of Object.keys(state.providers) as ProviderId[]) {
 		const providerState = state.providers[providerId];
 		if (providerState.accounts.length === 0) continue;
-		const ready = providerState.accounts.filter(
-			(account) => !account.disabled && headroomOf(account) > 3,
+		// The same rule the switcher applies, and excluding the account in use,
+		// so this count never contradicts what switching would actually do.
+		const spare = providerState.accounts.filter(
+			(account) =>
+				!account.disabled &&
+				account.id !== providerState.activeAccountId &&
+				headroom(account) >= MIN_USABLE_HEADROOM,
 		).length;
 		const lines = [
 			heading(t, PROVIDER_LABEL[providerId]),
-			dim(t, `${ready} of ${providerState.accounts.length} ready`),
+			dim(t, spare === 0 ? 'nothing to switch to' : `${spare} to switch to`),
 			'',
 		];
 		for (const account of providerState.accounts) {
@@ -124,8 +130,9 @@ function worstOf(account: AccountState): number {
 	return windows.length === 0 ? 0 : Math.max(...windows.map((window) => window.percent));
 }
 
-export function headroomOf(account: AccountState): number {
-	const windows = account.usage?.windows ?? [];
-	if (windows.length === 0) return 100;
-	return 100 - worstOf(account);
-}
+/**
+ * Re-exported from the switcher rather than defined again here. The two used to
+ * disagree about an account with no reading, which made the header promise a
+ * switch the switcher would refuse.
+ */
+export { headroom as headroomOf } from '../core/switch.ts';

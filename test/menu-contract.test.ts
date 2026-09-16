@@ -148,3 +148,32 @@ describe('the menu never holds a credential', () => {
 		}
 	});
 });
+
+describe('the menu shows the app icon', () => {
+	test('the bundle declares an icon file', async () => {
+		const build = await read('macos/build.sh');
+		expect(build).toContain('CFBundleIconFile');
+		expect(build).toContain('Hotseat.icns');
+	});
+
+	test('the icon is drawn from source rather than checked in as an opaque blob', async () => {
+		const generator = await read('macos/Icon/MakeIcon.swift');
+		expect(generator).toContain('icon_512x512@2x');
+		expect(generator).toContain('icon_16x16');
+	});
+});
+
+describe('the ready count agrees with what switching would do', () => {
+	test('the menu uses the same minimum headroom as the switcher', async () => {
+		const { MIN_USABLE_HEADROOM } = await import('../src/core/switch.ts');
+		const declared = /minimumUsableHeadroom: Double = (\d+)/.exec(model)?.[1];
+		expect(Number(declared)).toBe(MIN_USABLE_HEADROOM);
+	});
+
+	test('the count excludes the account already in use', () => {
+		const header = menu.slice(menu.indexOf('func providerHeader'));
+		const body = header.slice(0, header.indexOf('private func accountItem'));
+		expect(body).toContain('activeAccountId');
+		expect(body).toContain('minimumUsableHeadroom');
+	});
+});

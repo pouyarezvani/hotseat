@@ -5,7 +5,13 @@ import { join } from 'node:path';
 import { readHistory, recordSwitch } from '../src/core/history.ts';
 import { listMappings, mappingFor, removeMapping, setMapping } from '../src/core/mappings.ts';
 import { hotseatHome } from '../src/core/paths.ts';
-import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
+import {
+	accountsFor,
+	findAccount,
+	loadRegistry,
+	updateRegistry,
+	upsertAccount,
+} from '../src/core/registry.ts';
 import {
 	exportAccounts,
 	importAccounts,
@@ -134,7 +140,7 @@ describe('account order', () => {
 
 	test('moving onto a taken number trades places rather than colliding', async () => {
 		await withHome(async () => {
-			const first = await add('one@example.com');
+			await add('one@example.com');
 			const second = await add('two@example.com');
 			await moveSlot('claude', second.id, 1);
 			const byEmail = new Map(
@@ -314,6 +320,48 @@ describe('purge', () => {
 			await purge();
 			expect(await Bun.file(join(home, 'accounts.json')).exists()).toBe(false);
 			expect(await Bun.file(join(home, 'history.jsonl')).exists()).toBe(false);
+			expect((await loadRegistry()).accounts).toEqual([]);
+		});
+	});
+});
+
+describe('naming an account', () => {
+	test('a prefix that fits two accounts is refused rather than guessed', async () => {
+		await withHome(async () => {
+			await add('alice@example.com');
+			await add('adam@example.com');
+			const registry = await loadRegistry();
+			expect(() => findAccount(registry, 'claude', 'a')).toThrow(
+				/could be alice@example.com or adam@example.com/,
+			);
+			expect(findAccount(registry, 'claude', 'al')?.email).toBe('alice@example.com');
+		});
+	});
+
+	test('an exact address wins over a longer one it prefixes', async () => {
+		await withHome(async () => {
+			await add('a@example.com');
+			await add('a@example.com.au');
+			expect(findAccount(await loadRegistry(), 'claude', 'a@example.com')?.email).toBe(
+				'a@example.com',
+			);
+		});
+	});
+});
+
+describe('importing', () => {
+	test('an entry that is not an account is refused before anything is written', async () => {
+		await withHome(async () => {
+			const file = join(await mkdtemp(join(tmpdir(), 'hotseat-export-')), 'accounts.json');
+			await Bun.write(
+				file,
+				JSON.stringify({
+					version: 1,
+					exportedAt: 'x',
+					accounts: [{ provider: 'claude', email: 'x@example.com' }],
+				}),
+			);
+			await expect(importAccounts(file)).rejects.toThrow(/not a hotseat account/);
 			expect((await loadRegistry()).accounts).toEqual([]);
 		});
 	});

@@ -78,8 +78,13 @@ describe('the menu only asks for commands the CLI has', () => {
 				.map((value) => ({ key, value })),
 		);
 
-		const offered = [...literals, ...loops];
-		expect(offered.length).toBeGreaterThan(8);
+		const tupleBlock = menu.slice(menu.indexOf('percentageChoices: [(String, String, String)]'));
+		const tuples = [
+			...tupleBlock.slice(0, tupleBlock.indexOf(']\n')).matchAll(/\("([a-z]+)", "/g),
+		].map(([, value]) => ({ key: 'titlePercentage', value }));
+
+		const offered = [...literals, ...loops, ...tuples];
+		expect(offered.length).toBeGreaterThan(5);
 		for (const { key, value } of offered) {
 			if (!key || !value || !isSettingKey(key)) continue;
 			expect(() => coerce(key, value)).not.toThrow();
@@ -175,5 +180,136 @@ describe('the ready count agrees with what switching would do', () => {
 		const body = header.slice(0, header.indexOf('private func accountItem'));
 		expect(body).toContain('activeAccountId');
 		expect(body).toContain('minimumUsableHeadroom');
+	});
+});
+
+/**
+ * Returns every call of `name(` in the source with its balanced argument text,
+ * so a call whose arguments span lines and nest parentheses is read whole.
+ */
+function calls(source: string, name: string): string[] {
+	const found: string[] = [];
+	const needle = `${name}(`;
+	let from = 0;
+	for (;;) {
+		const start = source.indexOf(needle, from);
+		if (start < 0) return found;
+		const before = source[start - 1] ?? ' ';
+		if (/[A-Za-z0-9_.]/.test(before) && before !== '.') {
+			from = start + needle.length;
+			continue;
+		}
+		let depth = 0;
+		let index = start + needle.length - 1;
+		for (; index < source.length; index += 1) {
+			const char = source[index];
+			if (char === '(') depth += 1;
+			if (char === ')') depth -= 1;
+			if (depth === 0) break;
+		}
+		found.push(source.slice(start, index + 1));
+		from = index + 1;
+	}
+}
+
+describe('every menu item explains itself on hover', () => {
+	const body = menu.slice(menu.indexOf('// MARK: - Menu'));
+	const optionalTip = ['caption', 'action', 'bound'];
+
+	test.each(optionalTip)('every %s(…) item passes a tooltip', (helper) => {
+		const sites = calls(body, helper).filter((site) => !site.startsWith(`${helper}(_ `));
+		expect(sites.length).toBeGreaterThan(0);
+		for (const site of sites) {
+			expect(site).toContain('tip:');
+		}
+	});
+
+	test('the helpers that always take a tooltip really assign it', () => {
+		for (const helper of [
+			'live',
+			'toggle',
+			'choiceItem',
+			'submenuItem',
+			'caption',
+			'action',
+			'bound',
+		]) {
+			const definition = menu.slice(menu.indexOf(`func ${helper}(`));
+			const signature = definition.slice(0, definition.indexOf('{'));
+			expect(signature).toContain('tip');
+			const implementation = definition.slice(0, definition.indexOf('\n\t}\n'));
+			expect(implementation).toMatch(/toolTip = tip|tip: tip/);
+		}
+	});
+
+	test('items built by hand set a tooltip too', () => {
+		for (const marker of ['func providerHeader', 'func accountItem', 'func fillHistory']) {
+			const start = body.indexOf(marker);
+			expect(start).toBeGreaterThan(-1);
+			const section = body.slice(start, body.indexOf('\n\t}\n', start));
+			expect(section).toContain('toolTip =');
+		}
+	});
+
+	test('an account row shows its tooltip on the view the mouse is over', () => {
+		expect(row).toContain('override var toolTip');
+		expect(row).toContain('content.toolTip = toolTip');
+	});
+
+	/**
+	 * Every string literal that follows `tip:` or `toolTip =`, read with a small
+	 * scanner because an interpolation may itself contain quotes.
+	 */
+	function tooltipLiterals(): string[] {
+		const found: string[] = [];
+		for (const match of body.matchAll(/(?:tip:|toolTip =)\s*"/g)) {
+			let depth = 0;
+			let index = (match.index ?? 0) + match[0].length;
+			const start = index;
+			for (; index < body.length; index += 1) {
+				const char = body[index];
+				if (char === '\\') {
+					if (body[index + 1] === '(') depth += 1;
+					index += 1;
+					continue;
+				}
+				if (depth > 0 && char === ')') depth -= 1;
+				else if (depth === 0 && char === '"') break;
+			}
+			found.push(body.slice(start, index));
+		}
+		return found;
+	}
+	const tips = tooltipLiterals();
+
+	test('there are tooltips for every kind of item', () => {
+		expect(tips.length).toBeGreaterThan(30);
+	});
+
+	test.each(tips)('"%s" is a full plain-English sentence', (tip) => {
+		const prose = tip.replace(/\\\([^)]*\)/g, 'X').replace(/\\u\{[0-9a-f]+\}/gi, "'");
+		expect(prose.length).toBeGreaterThan(30);
+		expect(prose.trim()).toMatch(/[.X]$/);
+		const words = prose.toLowerCase().replace(/hotseat/g, '');
+		for (const jargon of [
+			'bench',
+			'seat',
+			'rotation',
+			'headroom',
+			'provider',
+			'ready',
+			'hysteresis',
+		]) {
+			expect(words).not.toMatch(new RegExp(`\\b${jargon}\\b`));
+		}
+	});
+
+	test('every threshold choice and every title choice has its own tooltip', () => {
+		for (const value of [80, 85, 90, 95, 99]) {
+			expect(body).toMatch(new RegExp(`${value}: "Switch`));
+		}
+		for (const choice of ['"all"', '"worst"', '"none"']) {
+			expect(body).toMatch(new RegExp(`\\(${choice}, "[^"]+", "[^"]{40,}"\\)`));
+		}
 	});
 });

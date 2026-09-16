@@ -1,12 +1,6 @@
-import { loop as autoLoop, tick as autoTick } from './core/auto.ts';
+import { loop as autoLoop, tick as autoTick, rememberManualSwitch } from './core/auto.ts';
 import { collectState, PROVIDERS } from './core/collect.ts';
-import {
-	enroll,
-	enrollFromToken,
-	loginClaudeIsolated,
-	loginCodexIsolated,
-	publishState,
-} from './core/enroll.ts';
+import { enroll, loginClaudeIsolated, loginCodexIsolated, publishState } from './core/enroll.ts';
 import { readHistory, recordSwitch, type SwitchReason } from './core/history.ts';
 import { listMappings, mappingFor, removeMapping, setMapping } from './core/mappings.ts';
 import {
@@ -18,6 +12,7 @@ import {
 	startMenuBar,
 	stopMenuBar,
 } from './core/menubar.ts';
+import { bindingRecoveryAt, headroom as policyHeadroom } from './core/policy.ts';
 import {
 	accountsFor,
 	findAccount,
@@ -35,14 +30,14 @@ import {
 	SETTING_KEYS,
 	setSetting,
 } from './core/settings.ts';
-import { activate, headroom, nextAvailable, pickNext, rotateNext } from './core/switch.ts';
+import { activate, nextAvailable, pickBest, rotateNext } from './core/switch.ts';
 import { exportAccounts, importAccounts, moveSlot, purge, swapSlots } from './core/transfer.ts';
 import { PROVIDER_IDS, type ProviderId } from './core/types.ts';
 import { dropCredential, storeCredential } from './core/vault.ts';
 import { credentialFromToken } from './providers/claude/index.ts';
 import { renderBoard } from './ui/board.ts';
 import { renderHelp } from './ui/help.ts';
-import { askText, closePrompt, isInteractive, select } from './ui/prompt.ts';
+import { closePrompt, isInteractive, select } from './ui/prompt.ts';
 import { note, problem, say, step, success } from './ui/report.ts';
 import { theme } from './ui/style.ts';
 import { buildTitle, titleText } from './ui/title.ts';
@@ -73,7 +68,12 @@ async function status(json: boolean, force: boolean): Promise<number> {
 		return 0;
 	}
 	process.stdout.write(
-		`\n${renderBoard(state, { theme: theme(), barWidth: settings.barWidth, now: Date.now() })}\n`,
+		`\n${renderBoard(state, {
+			theme: theme(),
+			barWidth: settings.barWidth,
+			now: Date.now(),
+			modelLimits: settings.autoModelLimits,
+		})}\n`,
 	);
 	return 0;
 }
@@ -84,14 +84,41 @@ async function seat(
 	reason: SwitchReason,
 ): Promise<number> {
 	const provider = PROVIDERS[providerId];
+	const settings = await loadSettings();
+	const before = await collectState();
+	const leaving = before.providers[providerId].accounts.find(
+		(account) => account.id === before.providers[providerId].activeAccountId,
+	);
 	const result = await activate(providerId, accountId);
+	if (result.alreadyActive) {
+		note(`${provider.displayName} is already using ${result.to}`);
+		return 0;
+	}
+	if (result.savedLogin) {
+		note(
+			`the login that was in use, ${result.savedLogin.email}, was not saved yet - kept it as account ${result.savedLogin.slot}`,
+		);
+	}
+	const now = Date.now();
 	await recordSwitch({
-		at: new Date().toISOString(),
+		at: new Date(now).toISOString(),
 		provider: providerId,
 		...(result.from ? { from: result.from } : {}),
 		to: result.to,
 		reason,
 	});
+	const leftHeadroom = leaving ? policyHeadroom(leaving, settings.autoModelLimits) : undefined;
+	await rememberManualSwitch({
+		provider: providerId,
+		...(result.fromId ? { fromId: result.fromId } : {}),
+		toId: result.toId,
+		...(leftHeadroom !== undefined ? { leftHeadroom } : {}),
+		...(leaving
+			? { leftRecoveryAt: bindingRecoveryAt(leaving, settings.autoModelLimits, now) }
+			: {}),
+		now,
+	});
+	await publishState();
 	success(`${provider.displayName} is now using ${result.to}`);
 	if (result.runningProcesses > 0) {
 		const count = result.runningProcesses;
@@ -142,6 +169,7 @@ async function capture(providerId: ProviderId, announce: boolean): Promise<numbe
 	await updateRegistry((registry) => {
 		registry.active[providerId] = account.id;
 	});
+	await publishState();
 	if (announce) {
 		success(`saved ${identity.email} as ${provider.displayName} account ${account.slot}`);
 	}
@@ -252,7 +280,8 @@ export async function main(argv: readonly string[]): Promise<number> {
 					}),
 				);
 				await storeCredential(account, credential);
-				process.stdout.write(`saved ${email} as Claude account ${account.slot}\n`);
+				await publishState();
+				success(`added ${email} as Claude account ${account.slot}`);
 				return 0;
 			}
 			case 'switch': {
@@ -264,9 +293,9 @@ export async function main(argv: readonly string[]): Promise<number> {
 				const settings = await loadSettings();
 				return await seatPicked(
 					providerId,
-					(state) => pickNext(state, { strategy: settings.autoStrategy, hysteresisPercent: 0 }),
+					(state) => pickBest(state, settings.autoModelLimits),
 					'best',
-					'no other account has more room than the current one',
+					'no other account has enough left to switch to',
 				);
 			}
 			case 'rotate': {
@@ -283,7 +312,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 				return await seatPicked(
 					providerId,
 					nextAvailable,
-					'rotate',
+					'next',
 					'every other account is out of room',
 				);
 			}
@@ -319,10 +348,16 @@ export async function main(argv: readonly string[]): Promise<number> {
 			case 'remove': {
 				const providerId = parseProvider(rest[0]);
 				const account = await resolve(providerId, rest[1]);
+				const wasInUse = (await loadRegistry()).active[providerId] === account.id;
 				await dropCredential(account);
 				await updateRegistry((registry) => removeAccount(registry, account.id));
 				await publishState();
 				success(`removed ${account.email} and deleted its saved login`);
+				if (wasInUse) {
+					note(
+						`${PROVIDERS[providerId].displayName} itself is still signed in as ${account.email}. Switch to another account to change that.`,
+					);
+				}
 				return 0;
 			}
 			case 'list': {
@@ -339,8 +374,8 @@ export async function main(argv: readonly string[]): Promise<number> {
 				return 0;
 			}
 			case 'history': {
-				const limit = Number.parseInt(flagValue(rest, '--limit') ?? '20', 10);
-				const entries = await readHistory(Number.isFinite(limit) ? limit : 20);
+				const asked = Number.parseInt(flagValue(rest, '--limit') ?? '20', 10);
+				const entries = await readHistory(Number.isFinite(asked) && asked > 0 ? asked : 20);
 				if (rest.includes('--json')) {
 					process.stdout.write(`${JSON.stringify(entries)}\n`);
 					return 0;
@@ -360,23 +395,17 @@ export async function main(argv: readonly string[]): Promise<number> {
 					const value = rest[2];
 					if (value === undefined) throw new Error(`config set ${key} needs a value`);
 					await setSetting(key, value);
+					await publishState();
 					return await showConfig(rest.includes('--json'));
 				}
 				if (rest[0] === 'reset') {
 					const key = rest[1];
 					if (!key || !isSettingKey(key)) throw new Error(`unknown setting "${key ?? ''}"`);
 					await resetSetting(key);
+					await publishState();
 					return await showConfig(rest.includes('--json'));
 				}
 				return await showConfig(rest.includes('--json'));
-			}
-			case 'headroom': {
-				const providerId = parseProvider(rest[0]);
-				const state = await collectState();
-				for (const account of state.providers[providerId].accounts) {
-					process.stdout.write(`${account.email} ${headroom(account)}\n`);
-				}
-				return 0;
 			}
 			case 'menubar': {
 				const app = await findApp();
@@ -386,8 +415,12 @@ export async function main(argv: readonly string[]): Promise<number> {
 				}
 				const binary = process.execPath;
 				if (rest[0] === 'stop') {
+					if (!(await isRunning())) {
+						note('the menu bar app was not running');
+						return 0;
+					}
 					await stopMenuBar();
-					success('the menu bar app is closed');
+					success('closed the menu bar app');
 					return 0;
 				}
 				if (rest[0] === 'install') {
@@ -421,8 +454,11 @@ export async function main(argv: readonly string[]): Promise<number> {
 			}
 			case 'auto': {
 				if (rest.includes('--once')) {
-					for (const report of await autoTick()) {
-						process.stdout.write(`${report.provider}: ${report.detail}\n`);
+					const reports = await autoTick();
+					if (reports.length === 0)
+						process.stdout.write('nothing to switch: each service needs two accounts\n');
+					for (const report of reports) {
+						process.stdout.write(`${PROVIDERS[report.provider].displayName}: ${report.detail}\n`);
 					}
 					return 0;
 				}

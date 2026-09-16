@@ -3,134 +3,210 @@ import { collectState, PROVIDERS } from './collect.ts';
 import { readJson, writeJsonAtomic } from './fs.ts';
 import { recordSwitch } from './history.ts';
 import { hotseatHome } from './paths.ts';
+import {
+	bindingRecoveryAt,
+	decideTrigger,
+	headroom,
+	leftAccountRecovered,
+	noReturnAccount,
+	type PolicySettings,
+	rankCandidates,
+	type SwitchMemory,
+	type Trigger,
+} from './policy.ts';
 import { loadSettings, type Settings } from './settings.ts';
-import { activate, headroom, pickNext } from './switch.ts';
-import type { ProviderId, State } from './types.ts';
+import { activate } from './switch.ts';
+import type { Provider, ProviderId, ProviderState } from './types.ts';
 
-export type TickOutcome = 'switched' | 'holding' | 'blocked' | 'idle';
+export type TickOutcome = 'switched' | 'holding' | 'blocked';
 
 export interface TickReport {
 	provider: ProviderId;
 	outcome: TickOutcome;
 	detail: string;
+	trigger?: Trigger;
 	to?: string;
 }
 
 interface AutoState {
-	version: 1;
-	/** Per provider, when the last automatic switch landed. */
-	lastSwitchAt: Partial<Record<ProviderId, number>>;
-	/** The account each provider most recently left, held back from an immediate return. */
-	lastLeft: Partial<Record<ProviderId, { id: string; headroom: number }>>;
+	version: 2;
+	memory: Partial<Record<ProviderId, SwitchMemory>>;
 }
 
-const EMPTY: AutoState = { version: 1, lastSwitchAt: {}, lastLeft: {} };
+const EMPTY: AutoState = { version: 2, memory: {} };
 
 function autoStatePath(): string {
 	return join(hotseatHome(), 'auto-state.json');
 }
 
 async function loadAutoState(): Promise<AutoState> {
-	return (await readJson<AutoState>(autoStatePath())) ?? structuredClone(EMPTY);
+	const stored = await readJson<Partial<AutoState>>(autoStatePath());
+	if (stored?.version !== 2) return structuredClone(EMPTY);
+	return { version: 2, memory: stored.memory ?? {} };
 }
 
-/**
- * Decides one provider's move. Kept separate from the loop and from any I/O so
- * the policy can be tested directly against a state fixture.
- */
+export function policyOf(settings: Settings): PolicySettings {
+	return {
+		thresholdPercent: settings.autoThresholdPercent,
+		cooldownSeconds: settings.autoCooldownSeconds,
+		modelLimits: settings.autoModelLimits,
+		unhealthyTicks: settings.autoUnhealthyTicks,
+	};
+}
+
+export interface Decision {
+	target?: { id: string; email: string };
+	trigger?: Trigger;
+	hold?: string;
+}
+
+/** One provider's decision, from a state fixture and a memory. Pure. */
 export function decide(
-	state: State,
-	providerId: ProviderId,
-	settings: Settings,
-	auto: AutoState,
+	providerState: ProviderState,
+	policy: PolicySettings,
+	memory: SwitchMemory,
+	unhealthyTicks: number,
 	now: number,
-): { accountId: string; email: string } | { hold: string } {
-	const providerState = state.providers[providerId];
+): Decision {
 	const active = providerState.accounts.find(
 		(account) => account.id === providerState.activeAccountId,
 	);
 	if (!active) return { hold: 'no account is currently in use' };
 
-	const room = headroom(active);
-	if (!Number.isFinite(room)) return { hold: 'no usage reading for the current account' };
-	const used = 100 - room;
-	if (used < settings.autoThresholdPercent) {
-		return { hold: `at ${Math.round(used)}%, under the ${settings.autoThresholdPercent}% mark` };
+	const activeHeadroom = headroom(active, policy.modelLimits);
+	const verdict = decideTrigger(activeHeadroom, policy, memory, unhealthyTicks, now);
+	if (verdict.hold !== undefined || verdict.trigger === undefined) {
+		return { hold: verdict.hold ?? 'nothing to do' };
 	}
+	const trigger = verdict.trigger;
 
-	// A switch that lands because the account is fully spent cannot wait for the
-	// cooldown: there is nothing left to wait with.
-	const spent = room <= 0;
-	const lastSwitch = auto.lastSwitchAt[providerId] ?? 0;
-	const sinceSwitch = (now - lastSwitch) / 1000;
-	if (!spent && sinceSwitch < settings.autoCooldownSeconds) {
-		return {
-			hold: `cooling down for another ${Math.round(settings.autoCooldownSeconds - sinceSwitch)}s`,
-		};
-	}
-
-	// Hold back the account just left until it has recovered enough to be a real
-	// improvement, so two accounts near the same level cannot ping-pong.
-	const left = auto.lastLeft[providerId];
-	const exclude =
-		left &&
-		(() => {
-			const candidate = providerState.accounts.find((account) => account.id === left.id);
-			if (!candidate) return false;
-			const candidateRoom = headroom(candidate);
-			return !Number.isFinite(candidateRoom) || candidateRoom <= left.headroom + 3;
-		})()
-			? left.id
-			: undefined;
-
-	const target = pickNext(providerState, {
-		strategy: settings.autoStrategy,
-		hysteresisPercent: spent ? 0 : settings.autoHysteresisPercent,
-		...(exclude ? { exclude } : {}),
+	const recovered = leftAccountRecovered(memory, providerState.accounts, active.id, policy, now);
+	const noReturn = noReturnAccount(
+		trigger,
+		memory,
+		providerState.accounts,
+		active.id,
+		recovered,
+		policy,
+	);
+	const [target] = rankCandidates({
+		trigger,
+		accounts: providerState.accounts,
+		activeId: active.id,
+		noReturn,
+		settings: policy,
+		now,
 	});
-	if (!target) return { hold: 'no other account has meaningfully more room' };
-	return { accountId: target.id, email: target.email };
+	if (!target) {
+		const reason =
+			trigger === 'at-limit' || trigger === 'failover'
+				? 'every other account is out of room too'
+				: 'no other account has room to switch to';
+		return { hold: reason, trigger };
+	}
+	return { target: { id: target.id, email: target.email }, trigger };
 }
 
-/** One pass over every enabled provider. Returns what it did, for logging. */
-export async function tick(): Promise<TickReport[]> {
-	const settings = await loadSettings();
-	const reports: TickReport[] = [];
-	const state = await collectState();
+/**
+ * Records a switch the user made by hand so the automatic pass treats it the
+ * way it treats its own: the cooldown applies, and the account left is held
+ * back from an immediate return. Without this the next pass could reverse a
+ * click seconds after it landed.
+ */
+export async function rememberManualSwitch(input: {
+	provider: ProviderId;
+	fromId?: string;
+	toId: string;
+	leftHeadroom?: number;
+	leftRecoveryAt?: number;
+	now?: number;
+}): Promise<void> {
 	const auto = await loadAutoState();
-	const now = Date.now();
+	const now = input.now ?? Date.now();
+	auto.memory[input.provider] = {
+		lastSwitchAt: now,
+		lastSwitchTo: input.toId,
+		...(input.fromId ? { lastSwitchFrom: input.fromId } : {}),
+		leftHeadroom: input.leftHeadroom ?? null,
+		leftRecoveryAt:
+			input.leftRecoveryAt !== undefined && Number.isFinite(input.leftRecoveryAt)
+				? input.leftRecoveryAt
+				: null,
+		leftTrigger: 'proactive',
+	};
+	await writeJsonAtomic(autoStatePath(), auto, 0o600);
+}
+
+/** One pass over every enabled service. Returns what it did, for logging. */
+export async function tick(
+	options: { providers?: Record<ProviderId, Provider>; now?: number } = {},
+): Promise<TickReport[]> {
+	const settings = await loadSettings();
+	const policy = policyOf(settings);
+	const reports: TickReport[] = [];
+	const state = await collectState(options);
+	const auto = await loadAutoState();
+	const now = options.now ?? Date.now();
 
 	for (const providerId of Object.keys(PROVIDERS) as ProviderId[]) {
 		if (!settings.autoProviders.includes(providerId)) continue;
 		const providerState = state.providers[providerId];
 		if (providerState.accounts.length < 2) continue;
 
-		const verdict = decide(state, providerId, settings, auto, now);
-		if ('hold' in verdict) {
-			reports.push({ provider: providerId, outcome: 'holding', detail: verdict.hold });
-			continue;
-		}
-		const leaving = providerState.accounts.find(
+		const memory = auto.memory[providerId] ?? {};
+		const active = providerState.accounts.find(
 			(account) => account.id === providerState.activeAccountId,
 		);
+		// Reads that failed in a row on the account in use, counted by the
+		// collector per attempt, so a cached failure seen twice counts once.
+		const unhealthy = active?.usage?.failedReads ?? 0;
+
+		const decision = decide(providerState, policy, memory, unhealthy, now);
+		if (!decision.target) {
+			reports.push({
+				provider: providerId,
+				outcome: 'holding',
+				detail: decision.hold ?? 'nothing to do',
+				...(decision.trigger ? { trigger: decision.trigger } : {}),
+			});
+			continue;
+		}
+		const trigger = decision.trigger ?? 'proactive';
 		try {
-			const result = await activate(providerId, verdict.accountId, settings);
+			const result = await activate(providerId, decision.target.id, options);
+			const leftHeadroom = active ? headroom(active, policy.modelLimits) : undefined;
+			const leftRecovery = active
+				? bindingRecoveryAt(active, policy.modelLimits, now)
+				: Number.POSITIVE_INFINITY;
+			// Memory is written before the history line, and to disk right away:
+			// once the login has changed, a crash must not leave the next pass
+			// free to change it straight back.
+			auto.memory[providerId] = {
+				lastSwitchAt: now,
+				lastSwitchTo: decision.target.id,
+				...(active ? { lastSwitchFrom: active.id } : {}),
+				leftHeadroom: leftHeadroom ?? null,
+				leftRecoveryAt: Number.isFinite(leftRecovery) ? leftRecovery : null,
+				leftTrigger: trigger,
+			};
+			await writeJsonAtomic(autoStatePath(), auto, 0o600);
 			await recordSwitch({
 				at: new Date(now).toISOString(),
 				provider: providerId,
 				...(result.from ? { from: result.from } : {}),
 				to: result.to,
 				reason: 'auto',
-				...(leaving ? { leftAtPercent: Math.round(100 - headroom(leaving)) } : {}),
+				...(leftHeadroom !== undefined ? { leftAtPercent: Math.round(100 - leftHeadroom) } : {}),
 			});
-			auto.lastSwitchAt[providerId] = now;
-			if (leaving) {
-				auto.lastLeft[providerId] = { id: leaving.id, headroom: headroom(leaving) };
-			}
 			reports.push({
 				provider: providerId,
 				outcome: 'switched',
-				detail: `switched to ${result.to}`,
+				detail: `switched to ${result.to}${
+					result.runningProcesses > 0 && !result.liveSwap
+						? ` (${result.runningProcesses} open ${result.runningProcesses === 1 ? 'session keeps' : 'sessions keep'} the old account until restarted)`
+						: ''
+				}`,
+				trigger,
 				to: result.to,
 			});
 		} catch (error) {
@@ -138,6 +214,7 @@ export async function tick(): Promise<TickReport[]> {
 				provider: providerId,
 				outcome: 'blocked',
 				detail: (error as Error).message,
+				trigger,
 			});
 		}
 	}

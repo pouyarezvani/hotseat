@@ -4,6 +4,7 @@ import { readJson, writeJsonAtomic } from './fs.ts';
 import { hotseatHome } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry } from './registry.ts';
 import type { AccountRecord, Credential, ProviderId, Registry } from './types.ts';
+import { PROVIDER_IDS } from './types.ts';
 import { loadCredential, storeCredential } from './vault.ts';
 
 interface Bundle {
@@ -29,10 +30,23 @@ export async function exportAccounts(path: string): Promise<number> {
 
 export async function importAccounts(path: string): Promise<number> {
 	const bundle = await readJson<Bundle>(path);
-	if (!bundle || bundle.version !== 1) throw new Error(`${path} is not a hotseat export`);
+	if (bundle?.version !== 1 || !Array.isArray(bundle.accounts)) {
+		throw new Error(`${path} is not a hotseat export`);
+	}
 	let imported = 0;
 	for (const entry of bundle.accounts) {
 		const { credential, ...record } = entry;
+		const shaped =
+			typeof record === 'object' &&
+			record !== null &&
+			(PROVIDER_IDS as readonly string[]).includes(record.provider) &&
+			typeof record.email === 'string' &&
+			record.email.length > 0 &&
+			Number.isInteger(record.slot) &&
+			record.slot > 0;
+		if (!shaped) throw new Error(`${path} has an account entry that is not a hotseat account`);
+		record.disabled = record.disabled === true;
+		if (typeof record.addedAt !== 'string') record.addedAt = new Date().toISOString();
 		const account = await updateRegistry((registry) => {
 			const existing = registry.accounts.find(
 				(candidate) =>

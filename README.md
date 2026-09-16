@@ -8,7 +8,7 @@ macOS. MIT licensed.
 
 ```
 Claude  ────────────────────────────────────────────────
-2 of 3 ready
+1 to switch to
 
  ● 1  you@example.com  max
    ├ 5h     ███████████▊░░  84%  1h 11m
@@ -33,7 +33,8 @@ bun run build                 # builds the hotseat binary into dist/
 ln -sf "$PWD/dist/hotseat" ~/.local/bin/hotseat
 
 bash macos/build.sh           # builds the menu bar app
-open macos/build/Hotseat.app
+hotseat menubar               # opens it
+hotseat menubar install       # and starts it whenever you log in
 ```
 
 ## Adding accounts
@@ -43,7 +44,8 @@ hotseat add
 ```
 
 It asks which service, opens your browser, and you sign in. The account joins
-the list.
+the list. `hotseat add claude` or `hotseat add codex` instead saves the account
+that service is signed in to right now, with no browser.
 
 **Nothing is ever signed out.** Adding a second account does not disturb the one
 you are using. Each sign-in runs against its own scratch directory, so the
@@ -58,7 +60,7 @@ directly, which is what lets hotseat read their usage.
 
 ```sh
 hotseat switch claude 2     # by number, email, or a name you gave it
-hotseat best claude         # whichever account has the most left
+hotseat best claude         # switch now, the way automatic switching would
 hotseat rotate claude       # the next one in order
 hotseat next claude         # the next one that still has room
 ```
@@ -78,20 +80,26 @@ running, every refresh is also a switching pass. If you would rather not run
 the menu bar app, `hotseat auto` runs the same loop in a terminal, and
 `hotseat auto --once` does one pass for a cron job.
 
-When the account in use crosses the threshold, hotseat moves to **the account
-whose quota resets soonest among those with real room left**. That spends the
-quota that would otherwise expire unused, rather than burning down a fresh
-account first. Switch it with `hotseat config set autoStrategy most-left` if you
-would rather always jump to the emptiest account.
+There is one rule. When a limit on the account in use reaches the threshold
+(90% unless you change it), hotseat moves to **the account whose weekly quota
+resets soonest among those that still have room**. That spends the quota that
+would otherwise expire unused, rather than burning down a fresh account first.
 
-Three things keep it from thrashing:
+Which limits count is up to you. The 5-hour and weekly limits always do. A
+model's own weekly limit, such as Fable's, counts only if you say so, with
+`hotseat config set autoModelLimits fable` (or `all`), or from the menu bar's
+Settings. Count the models you use; an uncounted one is still shown, just not
+acted on.
+
+Two things keep it from thrashing:
 
 - A **cooldown** after each switch, skipped when the account is genuinely spent.
-- A **margin**: a candidate has to beat the current account by a real amount.
 - An account needs **at least 5% left** to be worth moving to, so a switch never
   lands somewhere that is about to run out.
 
-Each service is judged on its own. Switching Claude never touches Codex.
+If the login in use stops answering for three checks in a row, hotseat treats
+it as gone and switches away from it. Each service is judged on its own:
+switching Claude never touches Codex.
 
 ## A different account per project
 
@@ -115,6 +123,7 @@ root covers the whole project.
 | `hotseat list` | one line per account |
 | `hotseat title` | one-line summary, for a shell prompt |
 | `hotseat history` | recent switches |
+| `hotseat refresh` | read every account again now |
 
 Add `--json` to `status`, `title` or `history` for machine-readable output.
 
@@ -123,7 +132,7 @@ Add `--json` to `status`, `title` or `history` for machine-readable output.
 | Command | |
 | --- | --- |
 | `hotseat switch <service> <account>` | switch to a specific account |
-| `hotseat best <service>` | switch to the one with the most left |
+| `hotseat best <service>` | switch now, to the account that resets soonest with room left |
 | `hotseat rotate <service>` | switch to the next in order |
 | `hotseat next <service>` | switch to the next one with room |
 | `hotseat auto [--once]` | keep switching as limits fill up |
@@ -132,7 +141,9 @@ Add `--json` to `status`, `title` or `history` for machine-readable output.
 
 | Command | |
 | --- | --- |
-| `hotseat add [service]` | sign in and add an account |
+| `hotseat add` | sign in to another account and add it |
+| `hotseat add <service>` | add the account signed in right now |
+| `hotseat add-token claude [token]` | add a Claude account from a setup token (fewer permissions) |
 | `hotseat save <service>` | re-save the login signed in right now |
 | `hotseat remove <service> <account>` | forget it and delete its saved login |
 | `hotseat disable <service> <account>` | skip it when switching automatically |
@@ -140,6 +151,9 @@ Add `--json` to `status`, `title` or `history` for machine-readable output.
 | `hotseat rename <service> <account> <name>` | give it a short name |
 | `hotseat move <service> <account> <number>` | change its number |
 | `hotseat swap <service> <a> <b>` | exchange two accounts' numbers |
+| `hotseat map <service> <account> [folder]` | use that account in a folder |
+| `hotseat unmap [folder]` | remove that rule |
+| `hotseat run <service> [account] -- <command>` | run a command on the folder's account |
 
 A service is `claude` or `codex`. An account is its number, its email, or the
 name you gave it.
@@ -166,17 +180,15 @@ An export contains live logins. Keep it private and delete it when done.
 | `titlePercentage` | `all` | `all`, `worst`, or `none` |
 | `titleShowModelLimits` | `true` | include per-model weekly limits |
 | `titleShortenEmail` | `true` | show the part before the @ |
-| `autoThresholdPercent` | `90` | switch once a window passes this |
-| `autoIntervalSeconds` | `120` | seconds between checks |
+| `autoThresholdPercent` | `90` | switch once a limit reaches this |
+| `autoModelLimits` | empty | model limits that count too: names, or `all` |
 | `autoCooldownSeconds` | `300` | minimum gap between switches |
-| `autoHysteresisPercent` | `10` | how much better a candidate must be |
-| `autoStrategy` | `soonest-reset` | or `most-left` |
+| `autoUnhealthyTicks` | `3` | failed reads in a row before switching away |
+| `autoIntervalSeconds` | `120` | seconds between checks for `hotseat auto` |
 | `autoProviders` | `claude,codex` | which services to switch |
-| `refreshIntervalSeconds` | `180` | how long a reading is reused |
 | `barWidth` | `14` | meter width in the terminal |
 
-Values are bounded, because a bad one breaks something concrete. Reading faster
-than once a minute walks into the usage endpoints' own rate limits.
+Values are bounded, because a bad one breaks something concrete.
 
 ## How it works
 
@@ -192,7 +204,12 @@ credential when you switch.
 Usage comes from the same endpoints each agent uses for its own display, read
 with each account's own credential. Every account is polled, not only the one in
 use, because an account with no reading cannot be compared against another.
-Readings are cached for a few minutes and refreshed in the background.
+
+How often is not a setting. Each endpoint allows roughly thirty reads an hour
+per account, so hotseat spends that where it matters: the account in use is
+read every minute while it is near the threshold and climbing, every three
+minutes otherwise, and the others every five. A failed read keeps the last good
+numbers on screen, marked, until that window resets.
 
 Everything hotseat stores lives in `~/.hotseat`, owner-readable only:
 
@@ -203,6 +220,8 @@ Everything hotseat stores lives in `~/.hotseat`, owner-readable only:
 ├── state.json        the last board, which the menu bar watches
 ├── usage.json        cached readings
 ├── history.jsonl     a line per switch
+├── auto-state.json   what the last automatic switch left behind
+├── mappings.json     folder rules
 └── vault/            one saved login per account
 ```
 

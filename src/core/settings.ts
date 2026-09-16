@@ -1,7 +1,6 @@
 import { readJson, writeJsonAtomic } from './fs.ts';
 import { settingsPath } from './paths.ts';
 
-export type Strategy = 'soonest-reset' | 'most-left';
 export type TitlePercentage = 'worst' | 'all' | 'none';
 
 export interface Settings {
@@ -16,24 +15,22 @@ export interface Settings {
 	titleShowModelLimits: boolean;
 	/** Shorten an account to the part before the @ in titles. */
 	titleShortenEmail: boolean;
-	/** Rotate once the seated account passes this share of any window. */
+	/** Switch once the account in use passes this share of any counted window. */
 	autoThresholdPercent: number;
+	/**
+	 * Which models' own weekly limits count toward switching, by name, or
+	 * 'all'. Empty means only the 5h and weekly windows count. A named model at
+	 * its limit triggers a switch even with room in the overall windows.
+	 */
+	autoModelLimits: string[];
+	/** Consecutive checks with no reading on the account in use before failing over. */
+	autoUnhealthyTicks: number;
 	/** Seconds between auto-rotation checks. */
 	autoIntervalSeconds: number;
 	/** Seconds a rotation must wait before another may fire. */
 	autoCooldownSeconds: number;
-	/** A candidate must beat the seated account by this much to justify moving. */
-	autoHysteresisPercent: number;
-	/**
-	 * Which account to move to. 'soonest-reset' spends the quota that is about
-	 * to refresh anyway, and only counts accounts that still have room.
-	 * 'most-left' jumps to whichever account has the most remaining.
-	 */
-	autoStrategy: Strategy;
 	/** Which providers auto-rotation may touch. */
 	autoProviders: string[];
-	/** Seconds a usage reading is served from cache before a refetch. */
-	refreshIntervalSeconds: number;
 	barWidth: number;
 }
 
@@ -45,18 +42,13 @@ export const DEFAULTS: Settings = {
 	titleShowModelLimits: true,
 	titleShortenEmail: true,
 	autoThresholdPercent: 90,
+	autoModelLimits: [],
+	autoUnhealthyTicks: 3,
 	autoIntervalSeconds: 120,
 	autoCooldownSeconds: 300,
-	autoHysteresisPercent: 10,
-	autoStrategy: 'soonest-reset',
 	autoProviders: ['claude', 'codex'],
-	refreshIntervalSeconds: 180,
 	barWidth: 14,
 };
-
-/** Values the menu offers directly, so the menu and the CLI agree on what is sane. */
-export const THRESHOLD_CHOICES = [80, 90, 95, 98] as const;
-export const REFRESH_CHOICES = [60, 180, 300, 600] as const;
 
 interface Bound {
 	min: number;
@@ -64,21 +56,20 @@ interface Bound {
 }
 
 /**
- * Bounds exist because a value outside them breaks something concrete: polling
- * faster than a minute walks into the usage endpoint's own rate limit, and a
- * threshold above 99 leaves no room to land before the window closes.
+ * Bounds exist because a value outside them breaks something concrete: a
+ * threshold above 99 leaves no room to land before the limit closes, and a
+ * check interval under 30 seconds serves nothing, since readings are never
+ * refreshed faster than once a minute anyway.
  */
 const BOUNDS: Partial<Record<keyof Settings, Bound>> = {
 	autoThresholdPercent: { min: 50, max: 99 },
 	autoIntervalSeconds: { min: 30, max: 3600 },
 	autoCooldownSeconds: { min: 0, max: 86_400 },
-	autoHysteresisPercent: { min: 0, max: 50 },
-	refreshIntervalSeconds: { min: 60, max: 3600 },
+	autoUnhealthyTicks: { min: 1, max: 100 },
 	barWidth: { min: 6, max: 40 },
 };
 
 const CHOICES: Partial<Record<keyof Settings, readonly string[]>> = {
-	autoStrategy: ['soonest-reset', 'most-left'],
 	titlePercentage: ['worst', 'all', 'none'],
 };
 
@@ -108,6 +99,15 @@ export async function loadSettings(): Promise<Settings> {
 		}
 		if (typeof DEFAULTS[key] === 'boolean' && typeof merged[key] !== 'boolean') {
 			Object.assign(merged, { [key]: DEFAULTS[key] });
+			continue;
+		}
+		if (Array.isArray(DEFAULTS[key])) {
+			const value = merged[key];
+			Object.assign(merged, {
+				[key]: Array.isArray(value)
+					? value.filter((item): item is string => typeof item === 'string')
+					: DEFAULTS[key],
+			});
 		}
 	}
 	return merged;

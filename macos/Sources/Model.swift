@@ -28,8 +28,28 @@ struct Account: Decodable {
 
 	var displayName: String { alias ?? email }
 	var worstPercent: Double { usage?.windows.map(\.percent).max() ?? 0 }
-	var headroom: Double { 100 - worstPercent }
+
+	/// The names of the model-scoped limits this account reports, for the
+	/// settings menu to offer as choices.
+	var modelLimitNames: [String] {
+		(usage?.windows ?? []).filter { $0.key.hasPrefix("weekly_scoped:") }.map(\.label)
+	}
 	var hasReadings: Bool { !(usage?.windows.isEmpty ?? true) }
+
+	/// Room on the tightest counted limit, judged the same way the switcher
+	/// judges it, or nil with no reading. Which model limits count comes from
+	/// the same setting, so the header never promises a switch the switcher
+	/// would refuse.
+	func headroom(countingModels models: [String]) -> Double? {
+		let wanted = Set(models.map { $0.lowercased() })
+		let all = wanted.contains("all")
+		let counted = (usage?.windows ?? []).filter { window in
+			guard window.key.hasPrefix("weekly_scoped:") else { return true }
+			return all || wanted.contains(window.label.lowercased())
+		}
+		guard let worst = counted.map(\.percent).max() else { return nil }
+		return 100 - worst
+	}
 }
 
 struct ProviderState: Decodable {
@@ -37,21 +57,53 @@ struct ProviderState: Decodable {
 	let accounts: [Account]
 }
 
+/// Every field has a default, and decoding never fails on a missing one. A
+/// settings key added or removed on the CLI side must not blank the whole
+/// menu, which is what a strict decode of the enclosing board would do.
 struct Settings: Decodable {
-	let titleCompact: Bool
-	let titleShowAccount: Bool
-	let titlePercentage: String
-	let titleShowModelLimits: Bool
-	let titleShortenEmail: Bool
-	let autoThresholdPercent: Double
-	let autoStrategy: String
-	let refreshIntervalSeconds: Double
+	var titleCompact = false
+	var titleShowAccount = true
+	var titlePercentage = "all"
+	var titleShowModelLimits = true
+	var titleShortenEmail = true
+	var autoThresholdPercent = 90.0
+	var autoModelLimits: [String] = []
+
+	private enum Keys: String, CodingKey {
+		case titleCompact, titleShowAccount, titlePercentage, titleShowModelLimits
+		case titleShortenEmail, autoThresholdPercent, autoModelLimits
+	}
+
+	init() {}
+
+	init(from decoder: Decoder) throws {
+		let c = try decoder.container(keyedBy: Keys.self)
+		titleCompact = try c.decodeIfPresent(Bool.self, forKey: .titleCompact) ?? titleCompact
+		titleShowAccount = try c.decodeIfPresent(Bool.self, forKey: .titleShowAccount) ?? titleShowAccount
+		titlePercentage = try c.decodeIfPresent(String.self, forKey: .titlePercentage) ?? titlePercentage
+		titleShowModelLimits =
+			try c.decodeIfPresent(Bool.self, forKey: .titleShowModelLimits) ?? titleShowModelLimits
+		titleShortenEmail = try c.decodeIfPresent(Bool.self, forKey: .titleShortenEmail) ?? titleShortenEmail
+		autoThresholdPercent =
+			try c.decodeIfPresent(Double.self, forKey: .autoThresholdPercent) ?? autoThresholdPercent
+		autoModelLimits = try c.decodeIfPresent([String].self, forKey: .autoModelLimits) ?? autoModelLimits
+	}
 }
 
 struct Board: Decodable {
 	let updatedAt: String
 	let providers: [String: ProviderState]
+	/// Missing settings fall back to defaults rather than failing the board.
 	let settings: Settings
+
+	private enum Keys: String, CodingKey { case updatedAt, providers, settings }
+
+	init(from decoder: Decoder) throws {
+		let c = try decoder.container(keyedBy: Keys.self)
+		updatedAt = try c.decode(String.self, forKey: .updatedAt)
+		providers = try c.decode([String: ProviderState].self, forKey: .providers)
+		settings = try c.decodeIfPresent(Settings.self, forKey: .settings) ?? Settings()
+	}
 
 	static let providerOrder = ["claude", "codex"]
 	static let providerTitles = ["claude": "Claude", "codex": "Codex"]
@@ -83,9 +135,11 @@ enum Severity {
 	case calm, warm, hot, spent
 
 	init(percent: Double) {
+		// The same steps the terminal uses, so one number is never amber in one
+		// place and red in the other.
 		switch percent {
-		case ..<60: self = .calm
-		case ..<85: self = .warm
+		case ..<65: self = .calm
+		case ..<90: self = .warm
 		case ..<97: self = .hot
 		default: self = .spent
 		}
@@ -105,7 +159,10 @@ enum Countdown {
 	/// Renders the gap to a reset the way a person says it out loud.
 	static func describe(_ iso: String?, now: Date = Date()) -> String? {
 		guard let iso, let target = parse(iso) else { return nil }
-		let seconds = max(0, target.timeIntervalSince(now))
+		// A reset already behind us means the next reading will show fresh
+		// numbers; "0m" would read as if something were about to happen.
+		guard target > now else { return nil }
+		let seconds = target.timeIntervalSince(now)
 		let minutes = Int((seconds / 60).rounded())
 		if minutes < 60 { return "\(minutes)m" }
 		let hours = minutes / 60

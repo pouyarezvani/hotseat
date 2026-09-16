@@ -60,7 +60,7 @@ describe('untilReset', () => {
 	});
 
 	test('never reports a negative window for a reset already past', () => {
-		expect(untilReset('2026-09-15T12:00:00Z', now)).toBe('0m');
+		expect(untilReset('2026-09-15T12:00:00Z', now)).toBe('reset');
 	});
 
 	test('returns nothing for missing or unreadable input', () => {

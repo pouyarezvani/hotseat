@@ -38,12 +38,20 @@ export function findAccount(
 	const asSlot = Number.parseInt(selector, 10);
 	if (String(asSlot) === selector) return candidates.find((account) => account.slot === asSlot);
 	const needle = selector.toLowerCase();
-	return (
+	const exact =
 		candidates.find((account) => account.email.toLowerCase() === needle) ??
 		candidates.find((account) => account.alias?.toLowerCase() === needle) ??
-		candidates.find((account) => account.id === selector) ??
-		candidates.find((account) => account.email.toLowerCase().startsWith(needle))
-	);
+		candidates.find((account) => account.id === selector);
+	if (exact) return exact;
+	const prefixed = candidates.filter((account) => account.email.toLowerCase().startsWith(needle));
+	if (prefixed.length > 1) {
+		// A short prefix that fits two accounts must not quietly pick one,
+		// least of all for a remove.
+		throw new Error(
+			`"${selector}" could be ${prefixed.map((account) => account.email).join(' or ')} - give more of the address`,
+		);
+	}
+	return prefixed[0];
 }
 
 export function upsertAccount(

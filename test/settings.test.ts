@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import { readJson } from '../src/core/fs.ts';
 import { settingsPath } from '../src/core/paths.ts';
 import {
@@ -19,8 +20,8 @@ describe('defaults', () => {
 		});
 	});
 
-	test('the default strategy spends the quota that resets soonest', () => {
-		expect(DEFAULTS.autoStrategy).toBe('soonest-reset');
+	test('by default no single model limit counts toward switching', () => {
+		expect(DEFAULTS.autoModelLimits).toEqual([]);
 	});
 
 	test('there is no way to turn switching off, because switching is the point', () => {
@@ -80,11 +81,13 @@ describe('rejecting bad values', () => {
 	});
 
 	test('a choice key refuses an unknown choice and names the valid ones', () => {
-		expect(() => coerce('autoStrategy', 'whatever')).toThrow(/soonest-reset, most-left/);
+		expect(() => coerce('titlePercentage', 'whatever')).toThrow(/worst, all, none/);
 	});
 
 	test('a list key splits on commas and drops blanks', () => {
 		expect(coerce('autoProviders', 'claude, codex ,')).toEqual(['claude', 'codex']);
+		expect(coerce('autoModelLimits', 'Fable, Opus')).toEqual(['Fable', 'Opus']);
+		expect(coerce('autoModelLimits', '')).toEqual([]);
 	});
 
 	test('an unknown key is not a setting', () => {
@@ -92,8 +95,8 @@ describe('rejecting bad values', () => {
 		expect(isSettingKey('nonsense')).toBe(false);
 	});
 
-	test('a read below the polling floor would trip the rate limit, so it is refused', () => {
-		expect(() => coerce('refreshIntervalSeconds', '5')).toThrow(/between 60 and 3600/);
+	test('the check interval cannot go under what would trip the rate limit', () => {
+		expect(() => coerce('autoIntervalSeconds', '5')).toThrow(/between 30 and 3600/);
 	});
 });
 
@@ -119,8 +122,8 @@ describe('surviving a damaged settings file', () => {
 
 	test('an unknown choice falls back to its default', async () => {
 		await withHome(async () => {
-			await Bun.write(settingsPath(), JSON.stringify({ version: 1, autoStrategy: 'sideways' }));
-			expect((await loadSettings()).autoStrategy).toBe(DEFAULTS.autoStrategy);
+			await Bun.write(settingsPath(), JSON.stringify({ version: 1, titlePercentage: 'sideways' }));
+			expect((await loadSettings()).titlePercentage).toBe(DEFAULTS.titlePercentage);
 		});
 	});
 
@@ -132,6 +135,20 @@ describe('surviving a damaged settings file', () => {
 				expect(settings[key]).toBeDefined();
 			}
 			expect(settings.autoIntervalSeconds).toBeGreaterThanOrEqual(30);
+		});
+	});
+});
+
+describe('a settings file with the wrong shapes', () => {
+	test('a list setting holding something other than a list falls back to its default', async () => {
+		await withHome(async (home) => {
+			await Bun.write(
+				join(home, 'settings.json'),
+				JSON.stringify({ autoProviders: 5, autoModelLimits: ['fable', 3, null] }),
+			);
+			const settings = await loadSettings();
+			expect(settings.autoProviders).toEqual(['claude', 'codex']);
+			expect(settings.autoModelLimits).toEqual(['fable']);
 		});
 	});
 });

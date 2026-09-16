@@ -24,7 +24,10 @@ const GROUPS: Group[] = [
 		title: 'Switch',
 		entries: [
 			{ usage: 'switch <service> <account>', what: 'switch to a specific account' },
-			{ usage: 'best <service>', what: 'switch to the one with the most left' },
+			{
+				usage: 'best <service>',
+				what: 'switch now, to the account that resets soonest with room left',
+			},
 			{ usage: 'rotate <service>', what: 'switch to the next in order' },
 			{ usage: 'next <service>', what: 'switch to the next with room' },
 			{ usage: 'auto', what: 'run the switching loop in this terminal instead of the menu bar' },
@@ -33,7 +36,8 @@ const GROUPS: Group[] = [
 	{
 		title: 'Accounts',
 		entries: [
-			{ usage: 'add [service]', what: 'sign in and add an account' },
+			{ usage: 'add', what: 'sign in to another account and add it' },
+			{ usage: 'add <service>', what: 'add the account signed in right now' },
 			{ usage: 'remove <service> <account>', what: 'forget it and delete its saved login' },
 			{
 				usage: 'disable | enable <service> <account>',
@@ -79,7 +83,7 @@ export function renderHelp(): string {
 
 	const lines = [
 		'',
-		`${bold(t, paint(t, 'accent', 'hotseat'))}  ${dim(t, 'one bench of accounts for Claude Code and Codex')}`,
+		`${bold(t, paint(t, 'accent', 'hotseat'))}  ${dim(t, 'several Claude Code and Codex accounts, one in use at a time')}`,
 	];
 	for (const group of GROUPS) {
 		lines.push('', heading(t, group.title));

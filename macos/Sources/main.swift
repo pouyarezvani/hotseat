@@ -25,6 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	private var board: Board?
 	private var timer: Timer?
 	private var isBusy = false
+	/// An action asked for while a refresh was in flight. It runs when the
+	/// refresh finishes, rather than being dropped on the floor.
+	private var queued: [[String]] = []
 	/// Held so the submenu delegates are not released while their menus live.
 	private var liveSubmenus: [LiveSubmenu] = []
 	private var watcher: DispatchSourceFileSystemObject?
@@ -41,39 +44,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		watchState()
 	}
 
-	/// Watches the state file so a change made anywhere, such as adding an account
-	/// in a terminal, shows here at once rather than at the next scheduled read.
+	/// Watches the folder hotseat writes to, so a change made anywhere, such as
+	/// adding an account in a terminal, shows here at once. The folder rather
+	/// than the file: an atomic write replaces the file, which would end a
+	/// watch on it, and creating the file to watch it truncated the board the
+	/// CLI had just published.
 	private func watchState() {
 		let home =
 			ProcessInfo.processInfo.environment["HOTSEAT_HOME"]
 			?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hotseat").path
-		let path = (home as NSString).appendingPathComponent("state.json")
-		FileManager.default.createFile(atPath: path, contents: nil)
-		let descriptor = open(path, O_EVTONLY)
+		try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+		let descriptor = open(home, O_EVTONLY)
 		guard descriptor >= 0 else { return }
 		watchedDescriptor = descriptor
 		let source = DispatchSource.makeFileSystemObjectSource(
-			fileDescriptor: descriptor, eventMask: [.write, .delete, .rename], queue: .main)
+			fileDescriptor: descriptor, eventMask: [.write], queue: .main)
 		source.setEventHandler { [weak self] in
 			guard let self else { return }
-			// An atomic write replaces the file, so the old descriptor stops
-			// receiving events. Re-arm on the new one.
-			if source.data.contains(.delete) || source.data.contains(.rename) {
-				self.stopWatching()
-				DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.watchState() }
-			}
-			// A burst of writes is one change. Collapsing them also keeps a
-			// re-arm from counting as a second event.
+			// A burst of writes is one change.
 			self.pendingReload?.cancel()
 			let reload = DispatchWorkItem { [weak self] in self?.refresh() }
 			self.pendingReload = reload
 			DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: reload)
 		}
-		source.setCancelHandler { [weak self] in
-			guard let self, self.watchedDescriptor >= 0 else { return }
-			close(self.watchedDescriptor)
-			self.watchedDescriptor = -1
-		}
+		source.setCancelHandler { close(descriptor) }
 		source.resume()
 		watcher = source
 	}
@@ -100,33 +94,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 				self.board = loaded
 				self.render(spans: spans)
 				self.rescheduleTimer()
+				self.drainQueue()
 			}
 		}
 	}
 
+	private func drainQueue() {
+		guard !queued.isEmpty, !isBusy else { return }
+		let next = queued.removeFirst()
+		perform(next)
+	}
+
+	/// Ticks every minute. Which accounts are actually re-read on a tick is the
+	/// CLI's decision, made per account from how close each is to switching, so
+	/// the tick itself is cheap and needs no setting.
 	private func rescheduleTimer() {
-		let seconds = board?.settings.refreshIntervalSeconds ?? 180
-		guard timer?.timeInterval != seconds else { return }
-		timer?.invalidate()
-		let timer = Timer.scheduledTimer(
-			withTimeInterval: seconds, repeats: true
-		) { [weak self] _ in self?.refresh() }
-		timer.tolerance = seconds / 6
+		guard timer == nil else { return }
+		let seconds: TimeInterval = 60
+		let timer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: true) { [weak self] _ in
+			self?.refresh()
+		}
+		timer.tolerance = 10
 		self.timer = timer
 	}
 
-	/// Runs a CLI action, then refreshes, so the menu never shows a stale seat.
+	/// Runs a CLI action, then refreshes. If a refresh is already running the
+	/// action is queued behind it, never dropped. A failure is shown, because a
+	/// click that does nothing and says nothing is indistinguishable from a bug.
 	private func perform(_ arguments: [String]) {
-		guard !isBusy else { return }
+		guard !isBusy else {
+			queued.append(arguments)
+			return
+		}
 		isBusy = true
 		DispatchQueue.global(qos: .userInitiated).async { [weak self] in
 			guard let self else { return }
-			self.runner.run(arguments)
+			let ok = self.runner.run(arguments) != nil
+			let reason = self.runner.lastError
 			DispatchQueue.main.async {
 				self.isBusy = false
+				if !ok { self.report(failure: arguments, reason: reason) }
 				self.refresh()
 			}
 		}
+	}
+
+	private func report(failure arguments: [String], reason: String) {
+		let alert = NSAlert()
+		alert.messageText = "That did not work"
+		alert.informativeText = reason.isEmpty ? "hotseat \(arguments.joined(separator: " ")) failed." : reason
+		alert.alertStyle = .warning
+		NSApp.activate()
+		alert.runModal()
 	}
 
 	// MARK: - Title
@@ -167,8 +186,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 	// MARK: - Menu
 
-	private func live(_ title: String, _ build: @escaping (NSMenu) -> Void) -> NSMenuItem {
+	private func live(_ title: String, tip: String, _ build: @escaping (NSMenu) -> Void) -> NSMenuItem {
 		let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+		item.toolTip = tip
 		let submenu = NSMenu(title: title)
 		submenu.autoenablesItems = false
 		let delegate = LiveSubmenu(build: build)
@@ -182,11 +202,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		menu.removeAllItems()
 		liveSubmenus.removeAll()
 		guard let board, !board.orderedProviders.isEmpty else {
-			menu.addItem(caption("No accounts added yet"))
 			menu.addItem(
-				action("Add the current Claude account", #selector(addClaude), enabled: true))
+				caption(
+					"No accounts yet",
+					tip: "No account has been added. Save the login this Mac already has below, or run  hotseat add  in a terminal to sign in to one."))
 			menu.addItem(
-				action("Add the current Codex account", #selector(addCodex), enabled: true))
+				action(
+					"Save the Claude login this Mac is signed in to", #selector(addClaude), enabled: true,
+					tip: "Add the account Claude Code is signed in to on this Mac right now, using its existing login. Nothing is signed out and nothing changes for Claude Code."))
+			menu.addItem(
+				action(
+					"Save the Codex login this Mac is signed in to", #selector(addCodex), enabled: true,
+					tip: "Add the account Codex is signed in to on this Mac right now, using its existing login. Nothing is signed out and nothing changes for Codex."))
+			menu.addItem(
+				caption(
+					"To sign in to another, run  hotseat add  in a terminal.",
+					tip: "hotseat add opens your browser so you can sign in to another account and adds it here. The account you are using now stays signed in."))
 			menu.addItem(.separator())
 			appendFooter(to: menu)
 			return
@@ -208,9 +239,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		// rule the switcher applies, so the number never contradicts what
 		// choosing an account would do. The one in use is excluded, because it is
 		// not somewhere to switch.
-		let spare = state.accounts.filter {
-			!$0.disabled && $0.id != state.activeAccountId
-				&& $0.headroom >= Account.minimumUsableHeadroom
+		let models = board?.settings.autoModelLimits ?? []
+		let spare = state.accounts.filter { account in
+			guard !account.disabled, account.id != state.activeAccountId else { return false }
+			guard let room = account.headroom(countingModels: models) else { return false }
+			return room >= Account.minimumUsableHeadroom
 		}.count
 		let item = NSMenuItem()
 		let text = NSMutableAttributedString(
@@ -228,6 +261,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 				]))
 		item.attributedTitle = text
 		item.isEnabled = false
+		item.toolTip =
+			"Your \(title) accounts. The count is how many you could switch to right now: accounts that are on, not already in use, and have at least \(Int(Account.minimumUsableHeadroom))% left on their fullest limit."
 		return item
 	}
 
@@ -239,11 +274,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		let canSwitch = !isActive && !account.disabled
 		let provider = entry.id
 		let slot = String(account.slot)
-		item.view = AccountRowView(
+		let row = AccountRowView(
 			account: account,
 			isActive: isActive,
 			width: Self.menuWidth,
 			onClick: canSwitch ? { [weak self] in self?.perform(["switch", provider, slot]) } : nil)
+		let bars =
+			"Each bar is one of this account's limits and how much of it is used. The time on the right is when that limit resets."
+		let tip: String
+		if account.disabled {
+			tip = "This account is turned off, so automatic switching skips it. You can still switch to it from its menu. " + bars
+		} else if isActive {
+			tip = "This is the account \(entry.title) is using right now. " + bars
+		} else {
+			tip = "Click to switch \(entry.title) to this account. " + bars + " Hover the arrow for more options."
+		}
+		row.toolTip = tip
+		item.toolTip = tip
+		item.view = row
 		item.submenu = accountMenu(account, providerId: entry.id, isActive: isActive)
 		return item
 	}
@@ -254,65 +302,128 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		let menu = NSMenu()
 		menu.autoenablesItems = false
 		let selector = "\(providerId)|\(account.slot)"
+		let service = Board.providerTitles[providerId] ?? providerId
+		let pickup =
+			providerId == "claude"
+			? "Open Claude sessions, including ones in your editor, pick this up on their own within a moment."
+			: "Open Codex sessions keep the old account until they restart."
 		if !isActive && !account.disabled {
-			menu.addItem(bound("Switch to this account", #selector(seatSelector(_:)), selector))
+			menu.addItem(
+				bound(
+					"Switch to this account", #selector(seatSelector(_:)), selector,
+					tip: "Make this the account \(service) uses from now on. \(pickup)"))
 			menu.addItem(.separator())
 		}
 		menu.addItem(
 			bound(
 				account.disabled ? "Enable" : "Disable",
 				account.disabled ? #selector(enableSelector(_:)) : #selector(disableSelector(_:)),
-				selector))
-		menu.addItem(bound("Update saved login", #selector(captureSelector(_:)), selector))
-		menu.addItem(.separator())
-		menu.addItem(bound("Remove account", #selector(removeSelector(_:)), selector))
+				selector,
+				tip: account.disabled
+					? "Put this account back into automatic switching, so hotseat may move to it when another account runs out."
+					: "Take this account out of automatic switching. hotseat will never move to it on its own. It stays saved, and you can still switch to it by hand."))
+		menu.addItem(
+			bound(
+				"Remove account", #selector(removeSelector(_:)), selector,
+				tip: "Forget this account and delete its saved login from this Mac. The account itself is not affected, and you can add it again later. You will be asked to confirm."))
 		if let plan = account.plan {
 			menu.addItem(.separator())
-			menu.addItem(caption("Plan: \(plan)"))
+			menu.addItem(caption("\(plan.capitalized) plan", tip: "The subscription plan this account is on."))
 		}
 		if let fetched = account.usage?.fetchedAt {
-			menu.addItem(caption("Checked at \(Countdown.shortStamp(fetched))"))
+			// A failed read keeps the previous good reading, so this is when the
+			// numbers shown were last confirmed, not when a read was last tried.
+			menu.addItem(
+				caption(
+					"Last good reading \(Countdown.shortStamp(fetched))",
+					tip: "When these numbers were last read successfully. If a read fails, the last good numbers stay on screen rather than going blank."))
 		}
 		return menu
 	}
 
 	private func appendFooter(to menu: NSMenu) {
-		menu.addItem(action("Switch to the most available", #selector(switchToBest), enabled: true, key: "b"))
+		menu.addItem(
+			action(
+				"Switch now", #selector(switchToBest), enabled: true, key: "b",
+				tip: "Switch right away instead of waiting for a limit to fill up. Goes to the account that resets soonest and still has something left, which is the same choice automatic switching makes."))
 
 		menu.addItem(
-			live("Add an account") { [weak self] submenu in
+			live(
+				"Add an account",
+				tip: "Save a login this Mac already has, or add a Claude account from a setup token. Nothing is ever signed out."
+			) { [weak self] submenu in
 				guard let self else { return }
 				submenu.addItem(
 					self.action(
-						"Sign in to a different account\u{2026}", #selector(self.addFromToken),
-						enabled: true))
+						"Save the Claude login this Mac is signed in to", #selector(self.addClaude),
+						enabled: true,
+						tip: "Add the account Claude Code is signed in to on this Mac right now, using its existing login. Nothing is signed out and nothing changes for Claude Code."))
+				submenu.addItem(
+					self.action(
+						"Save the Codex login this Mac is signed in to", #selector(self.addCodex),
+						enabled: true,
+						tip: "Add the account Codex is signed in to on this Mac right now, using its existing login. Nothing is signed out and nothing changes for Codex."))
 				submenu.addItem(.separator())
-				submenu.addItem(self.caption("Or save the login already on this machine"))
-				submenu.addItem(self.action("Claude", #selector(self.addClaude), enabled: true))
-				submenu.addItem(self.action("Codex", #selector(self.addCodex), enabled: true))
+				submenu.addItem(
+					self.action(
+						"Add a Claude account from a setup token\u{2026}", #selector(self.addFromToken),
+						enabled: true,
+						tip: "Add a Claude account by pasting a token you get from running  claude setup-token  in a terminal. Useful when you cannot sign in through the browser. A setup token has fewer permissions than a normal sign-in, so  hotseat add  is usually better."))
 				submenu.addItem(.separator())
-				submenu.addItem(self.caption("Adding never signs anything out."))
+				submenu.addItem(
+					self.caption(
+						"To sign in to a new account, run  hotseat add  in a terminal.",
+						tip: "hotseat add opens your browser so you can sign in to any account and adds it here. The account you are using now stays signed in."))
+				submenu.addItem(
+					self.caption(
+						"Nothing is ever signed out.",
+						tip: "Adding an account never signs any account out, here or in Claude Code or Codex. Only Remove account deletes a saved login, and only from hotseat."))
 			})
 
-		menu.addItem(live("Recent switches") { [weak self] submenu in self?.fillHistory(submenu) })
-		menu.addItem(live("Settings") { [weak self] submenu in self?.fillSettings(submenu) })
+		menu.addItem(
+			live(
+				"Recent switches",
+				tip: "The last dozen times the account changed, newest first, with why it changed."
+			) { [weak self] submenu in self?.fillHistory(submenu) })
+		menu.addItem(
+			live(
+				"Settings",
+				tip: "What the menu bar shows, and when hotseat switches accounts for you."
+			) { [weak self] submenu in self?.fillSettings(submenu) })
 
 		menu.addItem(.separator())
-		menu.addItem(action("Refresh now", #selector(forceRefresh), enabled: true, key: "r"))
-		menu.addItem(action("Quit", #selector(quit), enabled: true, key: "q"))
+		menu.addItem(
+			action(
+				"Refresh now", #selector(forceRefresh), enabled: true, key: "r",
+				tip: "Read every account's limits again right now instead of waiting for the next check. Numbers read under a minute ago are kept as they are."))
+		menu.addItem(
+			action(
+				"Quit", #selector(quit), enabled: true, key: "q",
+				tip: "Close the menu bar app. Automatic switching stops until you open it again with  hotseat menubar  in a terminal."))
 	}
 
 	private func fillHistory(_ menu: NSMenu) {
 		let entries = runner.history(limit: 12)
 		if entries.isEmpty {
-			menu.addItem(caption("No switches yet"))
+			menu.addItem(caption("No switches yet", tip: "Once an account changes, by hand or automatically, it is listed here."))
 			return
 		}
 		for entry in entries {
 			let from = entry.from.map { shorten($0) } ?? "\u{2014}"
-			let title = "\(shorten(entry.to))  \u{2190}  \(from)"
+			let title = "\(from)  \u{2192}  \(shorten(entry.to))"
 			let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
 			item.isEnabled = false
+			let why: String
+			switch entry.reason {
+			case "auto": why = "hotseat switched automatically because a limit filled up"
+			case "manual": why = "you switched by hand"
+			case "best": why = "you chose Switch now"
+			case "rotate": why = "you asked for the next account in order"
+			case "next": why = "you asked for the next account with room"
+			default: why = entry.reason
+			}
+			item.toolTip =
+				"At \(Countdown.shortStamp(entry.at)), \(Board.providerTitles[entry.provider] ?? entry.provider) changed from \(entry.from ?? "no account") to \(entry.to): \(why)."
 			item.attributedTitle = NSAttributedString(
 				string:
 					"\(Countdown.shortStamp(entry.at))   \(Board.providerTitles[entry.provider] ?? entry.provider)   \(title)",
@@ -326,70 +437,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 	private func fillSettings(_ menu: NSMenu) {
 		guard let settings = latestSettings() else {
-			menu.addItem(caption("Unavailable"))
+			menu.addItem(caption("Settings could not be read", tip: "hotseat could not read its settings file. Run  hotseat config reset  in a terminal to restore the defaults."))
 			return
 		}
 
-		menu.addItem(caption("Menu bar"))
-		menu.addItem(toggle("Compact button", key: "titleCompact", on: settings.titleCompact))
+		menu.addItem(caption("Menu bar", tip: "How the text in your menu bar looks."))
 		menu.addItem(
 			toggle(
-				"Show the account name", key: "titleShowAccount", on: settings.titleShowAccount))
+				"Compact title", key: "titleCompact", on: settings.titleCompact,
+				tip: "Shorten the menu bar text to just the service and its fullest limit, like \u{201C}Claude 93%\u{201D}. Turn it off to see the account name and every limit."))
 		menu.addItem(
 			toggle(
-				"Show model limits", key: "titleShowModelLimits", on: settings.titleShowModelLimits))
-		let percentage = NSMenuItem(title: "Percentages", action: nil, keyEquivalent: "")
+				"Show the account name", key: "titleShowAccount", on: settings.titleShowAccount,
+				tip: "Include the name of the account in use in the menu bar text, like \u{201C}Claude \u{2014} pouya\u{201D}. Has no effect while Compact title is on."))
+		menu.addItem(
+			toggle(
+				"Show model limits", key: "titleShowModelLimits", on: settings.titleShowModelLimits,
+				tip: "Some models have their own weekly limit, like Fable. Include those in the menu bar text alongside the 5-hour and weekly limits. This is only about what is shown; whether they count for switching is the setting below."))
+		let percentage = submenuItem("Show in the title", tip: "Which percentages appear in the menu bar text.")
 		let percentageMenu = NSMenu()
 		percentageMenu.autoenablesItems = false
-		for choice in ["all", "worst", "none"] {
-			let label = choice == "all" ? "Every window" : choice == "worst" ? "Tightest only" : "Hide"
+		let percentageChoices: [(String, String, String)] = [
+			("all", "Every limit", "Show one percentage for each limit, in order: 5-hour, weekly, then any model limits, like \u{201C}87% \u{00B7} 72% \u{00B7} 95%\u{201D}."),
+			("worst", "The fullest limit only", "Show a single percentage: whichever limit is closest to running out. That is the one that will trigger a switch."),
+			("none", "No percentages", "Show only the service and account name, with no numbers at all."),
+		]
+		for (choice, label, tip) in percentageChoices {
 			percentageMenu.addItem(
-				choiceItem(label, key: "titlePercentage", value: choice, current: settings.titlePercentage))
+				choiceItem(label, key: "titlePercentage", value: choice, current: settings.titlePercentage, tip: tip))
 		}
 		percentage.submenu = percentageMenu
 		menu.addItem(percentage)
 
 		menu.addItem(.separator())
-		menu.addItem(caption("Switching"))
-		let strategy = NSMenuItem(title: "Switch to the account that", action: nil, keyEquivalent: "")
-		let strategyMenu = NSMenu()
-		strategyMenu.autoenablesItems = false
-		strategyMenu.addItem(
-			choiceItem(
-				"resets soonest", key: "autoStrategy", value: "soonest-reset",
-				current: settings.autoStrategy))
-		strategyMenu.addItem(
-			choiceItem(
-				"has the most left", key: "autoStrategy", value: "most-left",
-				current: settings.autoStrategy))
-		strategy.submenu = strategyMenu
-		menu.addItem(strategy)
-		let threshold = NSMenuItem(title: "Switch once a limit reaches", action: nil, keyEquivalent: "")
+		menu.addItem(
+			caption(
+				"Switching",
+				tip: "hotseat switches for you, always. When a limit on the account in use fills up, it moves to the account that resets soonest and still has something left. These settings decide when that happens and which limits count."))
+		let threshold = submenuItem(
+			"Switch once a limit reaches",
+			tip: "How full a limit has to get before hotseat switches you to another account. Any limit counts: the 5-hour, the weekly, or a model limit you have chosen to count below.")
 		let thresholdMenu = NSMenu()
 		thresholdMenu.autoenablesItems = false
+		let thresholdTips: [Int: String] = [
+			80: "Switch early, once any limit is 80% used. You switch more often, but you never get near running out.",
+			85: "Switch once any limit is 85% used. A little earlier than the default, for extra margin.",
+			90: "Switch once any limit is 90% used. The default: uses each account well while leaving room for a long turn before the switch lands.",
+			95: "Switch late, once any limit is 95% used. Uses each account almost fully, with little margin. A long turn can hit the limit before the switch lands.",
+			99: "Switch only at the very end, once any limit is 99% used. Squeezes everything out of each account, but a single long turn will likely hit the limit first and stop.",
+		]
 		for value in [80, 85, 90, 95, 99] {
 			thresholdMenu.addItem(
 				choiceItem(
 					"\(value)%", key: "autoThresholdPercent", value: String(value),
-					current: String(Int(settings.autoThresholdPercent))))
+					current: String(Int(settings.autoThresholdPercent)),
+					tip: thresholdTips[value] ?? ""))
 		}
 		threshold.submenu = thresholdMenu
 		menu.addItem(threshold)
-
-		menu.addItem(.separator())
-		menu.addItem(caption("Readings"))
-		let interval = NSMenuItem(title: "Check every", action: nil, keyEquivalent: "")
-		let intervalMenu = NSMenu()
-		intervalMenu.autoenablesItems = false
-		for value in [60, 180, 300, 600] {
-			let label = value < 120 ? "\(value) seconds" : "\(value / 60) minutes"
-			intervalMenu.addItem(
-				choiceItem(
-					label, key: "refreshIntervalSeconds", value: String(value),
-					current: String(Int(settings.refreshIntervalSeconds))))
+		let models = submenuItem(
+			"Also count a model\u{2019}s own limit",
+			tip: "Besides the 5-hour and weekly limits, some models have their own weekly limit, like Fable. Choose whether those count when deciding to switch. Count a model you use; ignore one you do not, or hotseat will switch you away for a limit that was never in your way.")
+		let modelsMenu = NSMenu()
+		modelsMenu.autoenablesItems = false
+		let chosen = Set(settings.autoModelLimits.map { $0.lowercased() })
+		let none = bound(
+			"None", #selector(toggleSetting(_:)), "autoModelLimits|",
+			tip: "Only the 5-hour and weekly limits decide when to switch. A model\u{2019}s own limit is still shown, but ignored. Choose this if you do not use the models that have their own limit.")
+		none.state = chosen.isEmpty ? .on : .off
+		modelsMenu.addItem(none)
+		let all = bound(
+			"Every model", #selector(toggleSetting(_:)), "autoModelLimits|all",
+			tip: "Every model\u{2019}s own limit counts. If any model you have is at its limit, hotseat switches, even when the 5-hour and weekly limits still have room.")
+		all.state = chosen.contains("all") ? .on : .off
+		modelsMenu.addItem(all)
+		let seen = Array(
+			Set((board?.orderedProviders ?? []).flatMap { $0.state.accounts.flatMap(\.modelLimitNames) })
+		).sorted()
+		if !seen.isEmpty { modelsMenu.addItem(.separator()) }
+		for name in seen {
+			// Toggling a name adds it to or removes it from the list.
+			let next = chosen.contains(name.lowercased())
+				? settings.autoModelLimits.filter { $0.lowercased() != name.lowercased() }
+				: settings.autoModelLimits.filter { $0.lowercased() != "all" } + [name]
+			let item = bound(
+				name, #selector(toggleSetting(_:)), "autoModelLimits|\(next.joined(separator: ","))",
+				tip: "Count \(name)\u{2019}s own weekly limit. If \(name) is at its limit, hotseat switches even when the 5-hour and weekly limits still have room. Choose this if you use \(name).")
+			item.state = chosen.contains(name.lowercased()) ? .on : .off
+			modelsMenu.addItem(item)
 		}
-		interval.submenu = intervalMenu
-		menu.addItem(interval)
+		models.submenu = modelsMenu
+		menu.addItem(models)
+
 	}
 
 	/// Re-reads settings so a submenu opened right after a change shows the new
@@ -401,8 +540,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 	// MARK: - Menu item builders
 
-	private func caption(_ text: String) -> NSMenuItem {
+	private func caption(_ text: String, tip: String? = nil) -> NSMenuItem {
 		let item = NSMenuItem()
+		item.toolTip = tip
 		item.attributedTitle = NSAttributedString(
 			string: text,
 			attributes: [
@@ -413,34 +553,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		return item
 	}
 
-	private func action(_ title: String, _ selector: Selector, enabled: Bool, key: String = "")
-		-> NSMenuItem
-	{
+	private func action(
+		_ title: String, _ selector: Selector, enabled: Bool, key: String = "", tip: String? = nil
+	) -> NSMenuItem {
 		let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
 		item.target = self
 		item.isEnabled = enabled
+		item.toolTip = tip
 		return item
 	}
 
-	private func bound(_ title: String, _ selector: Selector, _ payload: String) -> NSMenuItem {
+	private func bound(_ title: String, _ selector: Selector, _ payload: String, tip: String? = nil)
+		-> NSMenuItem
+	{
 		let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
 		item.target = self
 		item.isEnabled = true
 		item.representedObject = payload
+		item.toolTip = tip
 		return item
 	}
 
-	private func toggle(_ title: String, key: String, on: Bool) -> NSMenuItem {
-		let item = bound(title, #selector(toggleSetting(_:)), "\(key)|\(on ? "false" : "true")")
+	private func toggle(_ title: String, key: String, on: Bool, tip: String) -> NSMenuItem {
+		let item = bound(title, #selector(toggleSetting(_:)), "\(key)|\(on ? "false" : "true")", tip: tip)
 		item.state = on ? .on : .off
 		return item
 	}
 
-	private func choiceItem(_ title: String, key: String, value: String, current: String)
+	private func choiceItem(_ title: String, key: String, value: String, current: String, tip: String)
 		-> NSMenuItem
 	{
-		let item = bound(title, #selector(toggleSetting(_:)), "\(key)|\(value)")
+		let item = bound(title, #selector(toggleSetting(_:)), "\(key)|\(value)", tip: tip)
 		item.state = value == current ? .on : .off
+		return item
+	}
+
+	private func submenuItem(_ title: String, tip: String) -> NSMenuItem {
+		let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+		item.toolTip = tip
 		return item
 	}
 
@@ -472,12 +622,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		perform(["enable", parts[0], parts[1]])
 	}
 
-	@objc private func captureSelector(_ sender: NSMenuItem) {
-		let parts = split(sender)
-		guard parts.count == 2 else { return }
-		perform(["save", parts[0]])
-	}
-
 	/// Removal drops a stored login, so it asks first.
 	@objc private func removeSelector(_ sender: NSMenuItem) {
 		let parts = split(sender)
@@ -487,9 +631,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		alert.informativeText =
 			"Its saved login is deleted from this machine. The account itself is untouched, and you can add it again from Add an account."
 		alert.alertStyle = .warning
-		alert.addButton(withTitle: "Remove")
-		alert.addButton(withTitle: "Cancel")
-		NSApp.activate(ignoringOtherApps: true)
+		let remove = alert.addButton(withTitle: "Remove")
+		let cancel = alert.addButton(withTitle: "Cancel")
+		// Return must never delete. Cancel takes Return and Escape; Remove is a
+		// deliberate click.
+		remove.keyEquivalent = ""
+		remove.hasDestructiveAction = true
+		cancel.keyEquivalent = "\r"
+		NSApp.activate()
 		guard alert.runModal() == .alertFirstButtonReturn else { return }
 		perform(["remove", parts[0], parts[1]])
 	}
@@ -501,47 +650,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	}
 
 	@objc private func switchToBest() {
-		guard let board else { return }
-		for entry in board.orderedProviders {
-			runner.run(["best", entry.id])
+		guard let board, !isBusy else { return }
+		let providers = board.orderedProviders.map(\.id)
+		isBusy = true
+		DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+			guard let self else { return }
+			for provider in providers { self.runner.run(["best", provider]) }
+			DispatchQueue.main.async {
+				self.isBusy = false
+				self.refresh()
+			}
 		}
-		refresh()
 	}
 
 	/// Asks for a setup token, which is how an account is added without signing
 	/// the agent out of the one already in use.
 	@objc private func addFromToken() {
 		let alert = NSAlert()
-		alert.messageText = "Add another Claude account"
+		alert.messageText = "Add a Claude account from a setup token"
 		alert.informativeText =
-			"Run  hotseat add  in a terminal for the guided sign-in, or run  claude setup-token  and paste the token here. Nothing you are signed into gets signed out."
+			"Run  claude setup-token  in a terminal and paste what it prints here. Nothing you are signed in to gets signed out. A setup token has fewer permissions than a full sign-in, so for most accounts  hotseat add  in a terminal is the better way."
 		alert.addButton(withTitle: "Add")
 		alert.addButton(withTitle: "Cancel")
 		let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
 		field.placeholderString = "sk-ant-..."
 		alert.accessoryView = field
-		NSApp.activate(ignoringOtherApps: true)
+		NSApp.activate()
 		alert.window.initialFirstResponder = field
 		guard alert.runModal() == .alertFirstButtonReturn else { return }
 		let token = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard !token.isEmpty else { return }
 		DispatchQueue.global(qos: .userInitiated).async { [weak self] in
 			guard let self else { return }
-			let ok = self.runner.run(["add-token", "claude", token]) != nil
+			let ok = self.runner.run(["add-token", "claude", "-"], input: token + "\n") != nil
+			let reason = self.runner.lastError
 			DispatchQueue.main.async {
-				if !ok { self.reportTokenFailure() }
+				if !ok { self.reportTokenFailure(reason) }
 				self.refresh()
 			}
 		}
 	}
 
-	private func reportTokenFailure() {
+	private func reportTokenFailure(_ reason: String) {
 		let alert = NSAlert()
-		alert.messageText = "That token was not accepted"
-		alert.informativeText =
-			"Check that it was copied whole and has not expired, then try again."
+		alert.messageText = "The account was not added"
+		alert.informativeText = reason.isEmpty ? "Check the token was copied whole, then try again." : reason
 		alert.alertStyle = .warning
-		NSApp.activate(ignoringOtherApps: true)
+		NSApp.activate()
 		alert.runModal()
 	}
 

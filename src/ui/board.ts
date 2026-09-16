@@ -18,6 +18,8 @@ export interface BoardOptions {
 	readonly theme: Theme;
 	readonly barWidth: number;
 	readonly now: number;
+	/** Which models' own limits count, mirroring the switching setting. */
+	readonly modelLimits?: string[];
 }
 
 type Level = 'success' | 'warn' | 'danger';
@@ -54,7 +56,7 @@ export function renderBoard(state: State, options: BoardOptions): string {
 			(account) =>
 				!account.disabled &&
 				account.id !== providerState.activeAccountId &&
-				headroom(account) >= MIN_USABLE_HEADROOM,
+				headroom(account, options.modelLimits ?? []) >= MIN_USABLE_HEADROOM,
 		).length;
 		const lines = [
 			heading(t, PROVIDER_LABEL[providerId]),
@@ -92,20 +94,22 @@ function renderAccount(account: AccountState, isActive: boolean, options: BoardO
 	const head = ` ${paint(t, markColor, mark)} ${number}  ${title}${plan}`;
 
 	const windows = account.usage?.windows ?? [];
-	if (account.usage?.error) {
-		return [
-			head,
-			`   ${paint(t, 'faint', glyphs.corner)} ${paint(t, 'danger', account.usage.error)}`,
-			'',
-		];
-	}
+	const error = account.usage?.error;
 	if (windows.length === 0) {
-		return [head, `   ${paint(t, 'faint', glyphs.corner)} ${dim(t, 'no reading yet')}`, ''];
+		const said = error ? paint(t, 'danger', error) : dim(t, 'no reading yet');
+		return [head, `   ${paint(t, 'faint', glyphs.corner)} ${said}`, ''];
 	}
 	const labelWidth = Math.max(...windows.map((window) => visibleLength(window.label)));
 	const rows = windows.map((window, index) =>
-		renderWindow(window, labelWidth, index === windows.length - 1, options),
+		renderWindow(window, labelWidth, index === windows.length - 1 && !error, options),
 	);
+	// The numbers are the last good reading, so the failure sits under them
+	// rather than replacing them.
+	if (error) {
+		rows.push(
+			`   ${paint(t, 'faint', glyphs.corner)} ${paint(t, 'danger', `last read failed: ${error}`)}`,
+		);
+	}
 	return [head, ...rows, ''];
 }
 

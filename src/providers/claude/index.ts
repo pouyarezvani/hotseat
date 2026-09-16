@@ -22,6 +22,7 @@ const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const OAUTH_BETA = 'oauth-2025-04-20';
 const REFRESH_MARGIN_MS = 5 * 60_000;
+const REQUEST_TIMEOUT_MS = 20_000;
 
 interface UsageBucket {
 	utilization?: number;
@@ -128,7 +129,10 @@ export class ClaudeProvider implements Provider {
 	async identify(credential: Credential): Promise<Identity> {
 		const oauth = oauthOf(credential);
 		if (!oauth) throw new Error('credential carries no Claude OAuth tokens');
-		const response = await fetch(PROFILE_URL, { headers: headers(oauth.accessToken) });
+		const response = await fetch(PROFILE_URL, {
+			headers: headers(oauth.accessToken),
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+		});
 		if (!response.ok) throw new Error(`profile lookup failed with ${response.status}`);
 		const body = (await response.json()) as {
 			account?: { email_address?: string; email?: string };
@@ -143,7 +147,10 @@ export class ClaudeProvider implements Provider {
 		const fetchedAt = new Date().toISOString();
 		const oauth = oauthOf(credential);
 		if (!oauth) return { fetchedAt, windows: [], error: 'no Claude credential' };
-		const response = await fetch(USAGE_URL, { headers: headers(oauth.accessToken) });
+		const response = await fetch(USAGE_URL, {
+			headers: headers(oauth.accessToken),
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+		});
 		if (!response.ok) {
 			return { fetchedAt, windows: [], error: `usage request failed with ${response.status}` };
 		}
@@ -158,6 +165,7 @@ export class ClaudeProvider implements Provider {
 		if (oauth.expiresAt > Date.now() + REFRESH_MARGIN_MS) return credential;
 		const response = await fetch(TOKEN_URL, {
 			method: 'POST',
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
 				grant_type: 'refresh_token',
@@ -172,7 +180,14 @@ export class ClaudeProvider implements Provider {
 			expires_in?: number;
 		};
 		const next = structuredClone(credential);
+		// Spread the stored object, not the narrowed view of it: the scopes and
+		// anything else the sign-in granted must survive every refresh.
+		const original =
+			typeof credential.claudeAiOauth === 'object' && credential.claudeAiOauth !== null
+				? (credential.claudeAiOauth as Record<string, unknown>)
+				: {};
 		next.claudeAiOauth = {
+			...original,
 			...oauth,
 			accessToken: body.access_token,
 			refreshToken: body.refresh_token ?? oauth.refreshToken,

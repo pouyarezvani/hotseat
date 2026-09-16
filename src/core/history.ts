@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { hotseatHome } from './paths.ts';
 import type { ProviderId } from './types.ts';
 
-export type SwitchReason = 'manual' | 'auto' | 'rotate' | 'best' | 'recover';
+export type SwitchReason = 'manual' | 'auto' | 'rotate' | 'next' | 'best';
 
 export interface HistoryEntry {
 	at: string;

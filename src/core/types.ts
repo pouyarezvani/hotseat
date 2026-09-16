@@ -28,10 +28,14 @@ export interface UsageWindow {
 }
 
 export interface UsageSnapshot {
+	/** When the numbers were read. A failed read keeps the numbers and this time. */
 	fetchedAt: string;
 	windows: UsageWindow[];
 	spendPercent?: number;
+	/** What the latest read said when it failed, with the last good numbers kept. */
 	error?: string;
+	/** Reads that have failed in a row, for deciding a login is gone. */
+	failedReads?: number;
 }
 
 export type Credential = Record<string, unknown>;

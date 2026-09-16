@@ -152,10 +152,12 @@ describe('renderBoard', () => {
 });
 
 describe('headroomOf', () => {
-	test('reports the tightest window, not the average', () => {
+	test('reports the tightest counted window, not the average', () => {
 		const account = fixture().providers.claude.accounts[0];
 		if (!account) throw new Error('fixture missing account');
-		expect(headroomOf(account)).toBe(9);
+		// The weekly window at 67% binds until Fable's own limit is counted.
+		expect(headroomOf(account)).toBe(33);
+		expect(headroomOf(account, ['Fable'])).toBe(9);
 	});
 
 	test('an unmeasured account has unknown headroom, not full headroom', () => {

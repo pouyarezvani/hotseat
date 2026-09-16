@@ -16,6 +16,7 @@ const TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const ORIGINATOR = 'codex_cli_rs';
 const REFRESH_AFTER_MS = 24 * 60 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 20_000;
 
 interface CodexTokens {
 	access_token: string;
@@ -56,12 +57,13 @@ export function authPath(): string {
 }
 
 /** Turns a window's duration into the label a person uses for it. */
-export function windowLabel(seconds: number | undefined): string {
-	if (seconds === undefined) return 'limit';
-	const hours = Math.round(seconds / 3600);
+export function windowLabel(seconds: number | null | undefined): string {
+	if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return 'limit';
+	const hours = seconds / 3600;
 	if (hours >= 144) return 'week';
 	if (hours >= 24) return `${Math.round(hours / 24)}d`;
-	return `${hours}h`;
+	if (hours >= 1) return `${Math.round(hours)}h`;
+	return `${Math.max(1, Math.round(seconds / 60))}m`;
 }
 
 function toWindow(
@@ -152,6 +154,7 @@ export class CodexProvider implements Provider {
 		const tokens = tokensOf(credential);
 		if (!tokens) throw new Error('no Codex credential');
 		const response = await fetch(USAGE_URL, {
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 			headers: {
 				authorization: `Bearer ${tokens.access_token}`,
 				...(tokens.account_id ? { 'chatgpt-account-id': tokens.account_id } : {}),
@@ -170,6 +173,7 @@ export class CodexProvider implements Provider {
 		if (Number.isFinite(last) && Date.now() - last < REFRESH_AFTER_MS) return credential;
 		const response = await fetch(TOKEN_URL, {
 			method: 'POST',
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
 				client_id: CLIENT_ID,

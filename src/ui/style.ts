@@ -161,8 +161,10 @@ export function untilReset(resetsAt: string | undefined, now = Date.now()): stri
 	if (!resetsAt) return '';
 	const target = Date.parse(resetsAt);
 	if (!Number.isFinite(target)) return '';
-	const minutes = Math.round(Math.max(0, target - now) / 60_000);
-	if (minutes < 60) return `${minutes}m`;
+	// A reset already behind us means the numbers shown are from before it.
+	if (target <= now) return 'reset';
+	const minutes = Math.round((target - now) / 60_000);
+	if (minutes < 60) return `${Math.max(1, minutes)}m`;
 	const hours = Math.floor(minutes / 60);
 	if (hours < 24) return `${hours}h ${minutes % 60}m`;
 	return `${Math.floor(hours / 24)}d ${hours % 24}h`;

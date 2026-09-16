@@ -4,7 +4,10 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
-app="$here/build/Hotseat.app"
+final_app="$here/build/Hotseat.app"
+# Build beside the current app and swap at the end, so a failed build leaves
+# the previous app in place rather than nothing at all.
+app="$here/build/Hotseat.app.building"
 macos_dir="$app/Contents/MacOS"
 resources_dir="$app/Contents/Resources"
 
@@ -15,7 +18,7 @@ mkdir -p "$macos_dir" "$resources_dir"
 if [ ! -f "$here/Icon/Hotseat.icns" ] || [ "$here/Icon/MakeIcon.swift" -nt "$here/Icon/Hotseat.icns" ]; then
 	iconset="$(mktemp -d)/hotseat.iconset"
 	mkdir -p "$iconset"
-	swiftc -target arm64-apple-macos13.0 -framework AppKit -o "$iconset/../makeicon" "$here/Icon/MakeIcon.swift"
+	swiftc -target arm64-apple-macos14.0 -framework AppKit -o "$iconset/../makeicon" "$here/Icon/MakeIcon.swift"
 	"$iconset/../makeicon" "$iconset"
 	iconutil -c icns "$iconset" -o "$here/Icon/Hotseat.icns"
 	cp "$iconset/icon_512x512.png" "$here/Icon/icon.png"
@@ -35,7 +38,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>0.1.0</string>
 	<key>CFBundleVersion</key><string>1</string>
-	<key>LSMinimumSystemVersion</key><string>13.0</string>
+	<key>LSMinimumSystemVersion</key><string>14.0</string>
 	<key>LSUIElement</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -44,7 +47,7 @@ PLIST
 
 swiftc \
 	-O -whole-module-optimization \
-	-target arm64-apple-macos13.0 \
+	-target arm64-apple-macos14.0 \
 	-framework AppKit \
 	-o "$macos_dir/Hotseat" \
 	"$here/Sources/Model.swift" \
@@ -56,12 +59,14 @@ swiftc \
 # shows up on screen. This catches it at build time.
 tmp="$(mktemp -d)"
 cp "$here/Tests/RenderCheck.swift" "$tmp/main.swift"
-swiftc -target arm64-apple-macos13.0 -framework AppKit -o "$tmp/rendercheck" \
+swiftc -target arm64-apple-macos14.0 -framework AppKit -o "$tmp/rendercheck" \
 	"$here/Sources/Model.swift" "$here/Sources/AccountRowView.swift" "$tmp/main.swift"
 "$tmp/rendercheck"
 rm -rf "$tmp"
 
-codesign --force --sign - "$app" >/dev/null 2>&1 || true
+codesign --force --sign - "$app"
+rm -rf "$final_app"
+mv "$app" "$final_app"
 
-echo "built $app"
-echo "run: HOTSEAT_BIN=$root/dist/hotseat open $app"
+echo "built $final_app"
+echo "run: hotseat menubar"

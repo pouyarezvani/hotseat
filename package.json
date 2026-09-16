@@ -1,7 +1,7 @@
 {
 	"name": "hotseat",
 	"version": "0.1.0",
-	"description": "Multi-account switcher for Claude Code and Codex CLI. Keeps a bench of signed-in accounts per agent and rotates the one in the hot seat before it hits a usage limit.",
+	"description": "Keep several Claude Code and Codex accounts on one Mac, see how much of each limit is left in the menu bar, and switch automatically when the one in use runs out.",
 	"license": "MIT",
 	"type": "module",
 	"bin": {

@@ -97,25 +97,56 @@ check(
 	live.action == nil || live.action == Selector(("submenuAction:")),
 	"action is \(live.action.map(NSStringFromSelector) ?? "none")")
 
-var inertClicked = 0
+// A row with no handler must not crash on a click, and must not cancel the
+// menu it sits in either, since it has nothing to act on.
 let inert = NSMenuItem()
 let inertRow = AccountRowView(account: sampleAccount(disabled: true), isActive: false, width: 340)
 inert.view = inertRow
 inert.submenu = NSMenu()
-NSMenu().addItem(inert)
+let inertMenu = NSMenu()
+inertMenu.addItem(inert)
 inertRow.mouseUp(with: NSEvent())
-check("a row with no handler does nothing at all", inertClicked == 0)
-inertClicked += 0
+check("a row with no handler survives a click", true)
 
 // MARK: - Sizing
 
 print("sizing")
 for count in 1...4 {
 	let row = AccountRowView(account: sampleAccount(windows: count), isActive: false, width: 340)
+	// Title line, one line per limit, and padding. Exact, so a change to the
+	// drawing that is not matched in the height formula fails here.
 	check(
-		"a row with \(count) limit(s) is tall enough for them",
-		row.frame.height >= CGFloat(count) * 17,
+		"a row with \(count) limit(s) is exactly as tall as its content",
+		row.frame.height == 20 + CGFloat(count) * 17 + 10,
 		"\(Int(row.frame.height))pt")
 }
+let errored = Account(
+	id: "e", email: "e@example.com", slot: 1, alias: nil, plan: nil, disabled: false,
+	usage: UsageSnapshot(fetchedAt: "2026-09-16T12:00:00Z", windows: [], error: "could not read usage"))
+let erroredRow = AccountRowView(account: errored, isActive: false, width: 340)
+check("a row with only an error reserves a line for it", erroredRow.frame.height == 20 + 17 + 10)
+
+// MARK: - Decoding
+//
+// The board is decoded as one value, so a single non-optional field the CLI
+// no longer sends fails the whole decode, and the menu silently shows "No
+// accounts added yet" with every account still there. Settings must tolerate
+// missing and extra keys.
+
+print("decoding")
+let sparse = """
+{"version":1,"updatedAt":"2026-09-16T12:00:00Z","providers":{"claude":{"accounts":[]},"codex":{"accounts":[]}},"settings":{"titleCompact":true,"someFutureKey":42}}
+""".data(using: .utf8)!
+if let board = try? JSONDecoder().decode(Board.self, from: sparse) {
+	check("a board decodes with settings keys missing and unknown", true)
+	check("known settings keys are read", board.settings.titleCompact == true)
+	check("missing settings keys take their defaults", board.settings.autoThresholdPercent == 90)
+} else {
+	check("a board decodes with settings keys missing and unknown", false)
+}
+let noSettings = """
+{"version":1,"updatedAt":"2026-09-16T12:00:00Z","providers":{"claude":{"accounts":[]},"codex":{"accounts":[]}}}
+""".data(using: .utf8)!
+check("a board decodes with no settings at all", (try? JSONDecoder().decode(Board.self, from: noSettings)) != nil)
 
 exit(failures == 0 ? 0 : 1)

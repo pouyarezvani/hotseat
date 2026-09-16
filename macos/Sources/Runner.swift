@@ -7,42 +7,82 @@ final class Runner {
 	private let executable: String
 	private let prefix: [String]
 
+	/// What the last failed command said, for showing to the user.
+	private(set) var lastError = ""
+
 	init() {
 		if let override = ProcessInfo.processInfo.environment["HOTSEAT_BIN"], !override.isEmpty {
 			executable = override
 			prefix = []
+			return
+		}
+		// The app lives at <checkout>/macos/build/Hotseat.app and the binary at
+		// <checkout>/dist/hotseat: three levels up from the bundle, not two.
+		let checkout = Bundle.main.bundleURL
+			.deletingLastPathComponent()
+			.deletingLastPathComponent()
+			.deletingLastPathComponent()
+		let candidates = [
+			checkout.appendingPathComponent("dist/hotseat").path,
+			FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hotseat").path,
+			"/usr/local/bin/hotseat",
+			"/opt/homebrew/bin/hotseat",
+		]
+		if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+			executable = found
+			prefix = []
 		} else {
-			let bundled = Bundle.main.bundleURL
-				.deletingLastPathComponent()
-				.deletingLastPathComponent()
-				.appendingPathComponent("dist/hotseat")
-				.path
-			if FileManager.default.isExecutableFile(atPath: bundled) {
-				executable = bundled
-				prefix = []
-			} else {
-				executable = "/usr/bin/env"
-				prefix = ["hotseat"]
-			}
+			executable = "/usr/bin/env"
+			prefix = ["hotseat"]
 		}
 	}
 
+	/// Longer than any single command should take, including its own network
+	/// timeouts. A command past this is killed so a stalled connection can
+	/// never leave the app stuck with its busy flag set for good.
+	private static let timeout: TimeInterval = 90
+
 	@discardableResult
-	func run(_ arguments: [String]) -> Data? {
+	func run(_ arguments: [String], input: String? = nil) -> Data? {
 		let process = Process()
 		process.executableURL = URL(fileURLWithPath: executable)
 		process.arguments = prefix + arguments
-		let pipe = Pipe()
-		process.standardOutput = pipe
-		process.standardError = FileHandle.nullDevice
+		let out = Pipe()
+		let err = Pipe()
+		process.standardOutput = out
+		process.standardError = err
+		let stdin = Pipe()
+		process.standardInput = stdin
 		do {
 			try process.run()
 		} catch {
+			lastError = error.localizedDescription
 			return nil
 		}
-		let data = pipe.fileHandleForReading.readDataToEndOfFile()
+		// Anything secret goes over stdin, never argv, where any local process
+		// could read it from the process list.
+		if let input, let data = input.data(using: .utf8) {
+			stdin.fileHandleForWriting.write(data)
+		}
+		try? stdin.fileHandleForWriting.close()
+
+		let deadline = DispatchWorkItem { [weak process] in process?.terminate() }
+		DispatchQueue.global().asyncAfter(deadline: .now() + Self.timeout, execute: deadline)
+		// Drain both pipes before waiting, or a chatty command fills one and
+		// blocks forever on the write.
+		let stdout = out.fileHandleForReading.readDataToEndOfFile()
+		let stderr = err.fileHandleForReading.readDataToEndOfFile()
 		process.waitUntilExit()
-		return process.terminationStatus == 0 ? data : nil
+		deadline.cancel()
+		if process.terminationStatus != 0 {
+			let said = String(data: stderr, encoding: .utf8)?
+				.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+			lastError = said.isEmpty && process.terminationReason == .uncaughtSignal
+				? "hotseat did not answer in time"
+				: said
+			return nil
+		}
+		return stdout
 	}
 
 	func decode<T: Decodable>(_ type: T.Type, _ arguments: [String]) -> T? {

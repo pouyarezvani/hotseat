@@ -1,80 +1,51 @@
-import { PROVIDERS } from './collect.ts';
-import { accountsFor, loadRegistry, updateRegistry } from './registry.ts';
-import { loadSettings, type Settings, type Strategy } from './settings.ts';
-import type { AccountState, ProviderId, ProviderState } from './types.ts';
+import { liveIdentity, PROVIDERS } from './collect.ts';
+import { MIN_USABLE_HEADROOM, headroom as policyHeadroom, rankCandidates } from './policy.ts';
+import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
+import type { AccountRecord, AccountState, Provider, ProviderId, ProviderState } from './types.ts';
 import { loadCredential, storeCredential } from './vault.ts';
+
+export { MIN_USABLE_HEADROOM };
 
 export interface SwitchResult {
 	provider: ProviderId;
 	from?: string;
+	fromId?: string;
 	to: string;
+	toId: string;
 	liveSwap: boolean;
 	runningProcesses: number;
-}
-
-/** The share of every window that is still unused, worst window first. */
-export function headroom(account: AccountState): number {
-	const windows = account.usage?.windows ?? [];
-	if (windows.length === 0) return Number.NaN;
-	return 100 - Math.max(...windows.map((window) => window.percent));
-}
-
-/** When the tightest window frees up, which is what makes an account usable again. */
-export function recoveryAt(account: AccountState): number {
-	const windows = account.usage?.windows ?? [];
-	if (windows.length === 0) return Number.POSITIVE_INFINITY;
-	const worst = windows.reduce((a, b) => (a.percent >= b.percent ? a : b));
-	const at = worst.resetsAt ? Date.parse(worst.resetsAt) : Number.NaN;
-	return Number.isFinite(at) ? at : Number.POSITIVE_INFINITY;
-}
-
-export interface PickOptions {
-	strategy: Strategy;
-	hysteresisPercent: number;
-	/** Never pick this one, even if it ranks first. */
-	exclude?: string;
+	/** The target was already the login in use, so nothing was written. */
+	alreadyActive: boolean;
+	/** A login that was in use but not yet saved, kept as a new account first. */
+	savedLogin?: { email: string; slot: number };
 }
 
 /**
- * An account with a sliver of quota left is not a place to land: it would be
- * spent within a turn or two and trigger another switch. A candidate has to
- * carry at least this much of its tightest window to count as usable.
+ * Room left on the account's tightest counted window. Which windows count is
+ * the same choice the automatic switch makes, so a person reading the board
+ * and the switcher acting on it never disagree.
  */
-export const MIN_USABLE_HEADROOM = 5;
+export function headroom(account: AccountState, modelLimits: string[] = []): number {
+	return policyHeadroom(account, modelLimits) ?? Number.NaN;
+}
 
 /**
- * Chooses which account to switch to. Returns nothing when no
- * candidate is a clear enough improvement to be worth the disruption of switching.
+ * The account a deliberate "switch now" goes to: the same one automatic
+ * switching would choose, so the two never disagree.
  */
-export function pickNext(state: ProviderState, options: PickOptions): AccountState | undefined {
-	const active = state.accounts.find((account) => account.id === state.activeAccountId);
-	const activeHeadroom = active ? headroom(active) : Number.NaN;
-	const candidates = state.accounts.filter(
-		(account) =>
-			!account.disabled &&
-			account.id !== state.activeAccountId &&
-			account.id !== options.exclude &&
-			Number.isFinite(headroom(account)) &&
-			headroom(account) >= MIN_USABLE_HEADROOM,
-	);
-	if (candidates.length === 0) return undefined;
-
-	// Spend the quota that refreshes soonest, because that is the quota that is
-	// otherwise wasted. Candidates are already filtered to those with room left,
-	// so this never lands on an account that cannot be used.
-	if (options.strategy === 'soonest-reset') {
-		return [...candidates].sort(
-			(a, b) => recoveryAt(a) - recoveryAt(b) || headroom(b) - headroom(a),
-		)[0];
-	}
-	const best = [...candidates].sort((a, b) => headroom(b) - headroom(a))[0];
-	if (!best) return undefined;
-	if (
-		Number.isFinite(activeHeadroom) &&
-		headroom(best) - activeHeadroom < options.hysteresisPercent
-	) {
-		return undefined;
-	}
+export function pickBest(
+	state: ProviderState,
+	modelLimits: string[],
+	now = Date.now(),
+): AccountState | undefined {
+	const [best] = rankCandidates({
+		trigger: 'at-limit',
+		accounts: state.accounts,
+		activeId: state.activeAccountId,
+		noReturn: undefined,
+		settings: { thresholdPercent: 90, cooldownSeconds: 0, modelLimits, unhealthyTicks: 1 },
+		now,
+	});
 	return best;
 }
 
@@ -104,55 +75,90 @@ export function nextAvailable(state: ProviderState): AccountState | undefined {
  * Installs an account's stored credential as the live one. The credential is
  * refreshed first and written back to the vault, so a swap never installs a
  * token that is about to expire and never loses a rotated refresh token.
+ *
+ * The login being replaced is whichever one is actually installed, found by
+ * asking the service, not by trusting what hotseat last wrote: a sign-in done
+ * by hand in between must be saved too, or it would be lost. A login that
+ * belongs to no saved account is saved as a new one before it is replaced.
  */
 export async function activate(
 	providerId: ProviderId,
 	accountId: string,
-	settings?: Settings,
+	options: { providers?: Record<ProviderId, Provider>; now?: number } = {},
 ): Promise<SwitchResult> {
-	await (settings ?? loadSettings());
-	const provider = PROVIDERS[providerId];
-	const registry = await loadRegistry();
+	const provider = (options.providers ?? PROVIDERS)[providerId];
+	const now = options.now ?? Date.now();
+	let registry = await loadRegistry();
 	const target = accountsFor(registry, providerId).find((account) => account.id === accountId);
 	if (!target) throw new Error(`no ${provider.displayName} account with id ${accountId}`);
 
 	const stored = await loadCredential(target);
 	if (!stored) {
 		throw new Error(
-			`no stored credential for ${target.email} - run "hotseat save ${providerId}" while it is signed in`,
+			`no saved login for ${target.email} - run "hotseat save ${providerId}" while it is signed in`,
 		);
+	}
+
+	const live = await provider.readAgentCredential().catch(() => null);
+	const identity = live ? await liveIdentity(provider, live, registry) : undefined;
+	let previous: AccountRecord | undefined = identity
+		? accountsFor(registry, providerId).find(
+				(account) => account.email.toLowerCase() === identity.email.toLowerCase(),
+			)
+		: undefined;
+	let savedLogin: SwitchResult['savedLogin'];
+	if (live && identity && !previous) {
+		previous = await updateRegistry((current) =>
+			upsertAccount(current, {
+				provider: providerId,
+				email: identity.email,
+				...(identity.plan ? { plan: identity.plan } : {}),
+			}),
+		);
+		registry = await loadRegistry();
+		await storeCredential(previous, live);
+		savedLogin = { email: previous.email, slot: previous.slot };
+	}
+
+	const running = await provider.runningProcesses().catch(() => []);
+	const base = {
+		provider: providerId,
+		to: target.email,
+		toId: target.id,
+		liveSwap: provider.liveSwap,
+		runningProcesses: running.length,
+	};
+	if (previous && previous.id === target.id) {
+		// Reinstalling the vault copy over a live login would throw away any
+		// token the agent has rotated since, so an account already in use is
+		// left exactly as it is.
+		if (registry.active[providerId] !== target.id) {
+			await updateRegistry((current) => {
+				current.active[providerId] = target.id;
+			});
+		}
+		return { ...base, from: previous.email, fromId: previous.id, alreadyActive: true };
 	}
 
 	const refreshed = await provider.refreshIfNeeded(stored);
 	if (refreshed !== stored) await storeCredential(target, refreshed);
 
-	const previousId = registry.active[providerId];
-	const previous = registry.accounts.find((account) => account.id === previousId);
+	// Save the outgoing login before overwriting it, so a token the agent
+	// refreshed while that account was in use is not lost.
+	if (live && previous && !savedLogin) await storeCredential(previous, live);
 
-	// Save the outgoing account's current login before overwriting it, so a token
-	// the agent refreshed while that account was in use is not lost.
-	if (previous && previous.id !== target.id) {
-		const live = await provider.readAgentCredential().catch(() => null);
-		if (live) {
-			const identity = await provider.identify(live).catch(() => null);
-			if (identity?.email === previous.email) await storeCredential(previous, live);
-		}
-	}
-
-	const running = await provider.runningProcesses().catch(() => []);
 	await provider.writeAgentCredential(refreshed);
 
 	await updateRegistry((current) => {
 		current.active[providerId] = target.id;
 		const record = current.accounts.find((account) => account.id === target.id);
-		if (record) record.lastActivatedAt = new Date().toISOString();
+		if (record) record.lastActivatedAt = new Date(now).toISOString();
 	});
 
 	return {
-		provider: providerId,
-		...(previous ? { from: previous.email } : {}),
-		to: target.email,
-		liveSwap: provider.liveSwap,
-		runningProcesses: running.length,
+		...base,
+		...(previous ? { from: previous.email, fromId: previous.id } : {}),
+		alreadyActive: false,
+		...(savedLogin ? { savedLogin } : {}),
 	};
 }

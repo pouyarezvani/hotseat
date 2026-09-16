@@ -22,7 +22,9 @@ final class AccountRowView: NSView {
 		content = RowContentView(account: account, isActive: isActive)
 		highlight = NSVisualEffectView()
 		self.onClick = onClick
-		let lines = max(1, account.usage?.windows.count ?? 1)
+		let windows = account.usage?.windows.count ?? 0
+		let extra = (account.usage?.error != nil || windows == 0) ? 1 : 0
+		let lines = max(1, windows + extra)
 		let height = Self.titleHeight + CGFloat(lines) * Self.lineHeight + 10
 		super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
 
@@ -47,6 +49,12 @@ final class AccountRowView: NSView {
 	}
 
 	required init?(coder: NSCoder) { nil }
+
+	/// The content view sits on top and is what the mouse is over, so the
+	/// tooltip has to live there too or it never shows.
+	override var toolTip: String? {
+		didSet { content.toolTip = toolTip }
+	}
 
 	private func setHighlighted(_ value: Bool) {
 		guard highlight.isHidden == value else { return }
@@ -111,13 +119,15 @@ private final class RowContentView: NSView {
 		}
 		if let error = account.usage?.error {
 			y -= Self.lineHeight
+			let hasNumbers = !(account.usage?.windows.isEmpty ?? true)
 			draw(
-				text: error, at: NSPoint(x: Self.rowInset + 16, y: y + 2),
+				text: hasNumbers ? "last read failed: \(error)" : error,
+				at: NSPoint(x: Self.rowInset + 16, y: y + 2),
 				font: .systemFont(ofSize: 11), color: tertiaryText)
 		} else if account.usage?.windows.isEmpty ?? true {
 			y -= Self.lineHeight
 			draw(
-				text: "no usage data yet", at: NSPoint(x: Self.rowInset + 16, y: y + 2),
+				text: "no reading yet", at: NSPoint(x: Self.rowInset + 16, y: y + 2),
 				font: .systemFont(ofSize: 11), color: tertiaryText)
 		}
 	}

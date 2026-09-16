@@ -12,12 +12,16 @@ export interface AccountRecord {
 	disabled: boolean;
 	addedAt: string;
 	lastActivatedAt?: string;
+	/** The saved login: tokens and what the sign-in granted. Absent until saved. */
+	login?: Credential;
 }
 
 export interface Registry {
 	version: 1;
 	accounts: AccountRecord[];
 	active: Partial<Record<ProviderId, string>>;
+	/** Entries in the file hotseat could not read. Kept as they are, never dropped. */
+	unreadable: unknown[];
 }
 
 export interface UsageWindow {
@@ -63,7 +67,8 @@ export interface Provider {
 	runningProcesses(): Promise<RunningProcess[]>;
 }
 
-export interface AccountState extends AccountRecord {
+/** An account as shown: everything but its login, which never leaves the file. */
+export interface AccountState extends Omit<AccountRecord, 'login'> {
 	usage?: UsageSnapshot;
 }
 

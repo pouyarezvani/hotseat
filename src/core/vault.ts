@@ -1,30 +1,32 @@
-import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
-import { readJson, writeJsonAtomic } from './fs.ts';
-import { vaultDir } from './paths.ts';
+import { loadRegistry, updateRegistry } from './registry.ts';
 import type { AccountRecord, Credential } from './types.ts';
 
 /**
- * Credentials are stored per account under the account's own id, so renaming an
- * email or moving a slot never orphans a stored login.
+ * A login is part of its account's entry in accounts.json. These are the
+ * three things anything else needs to do with one.
  */
-function credentialPath(account: Pick<AccountRecord, 'id'>): string {
-	return join(vaultDir(), `${account.id}.json`);
-}
 
 export async function storeCredential(
 	account: Pick<AccountRecord, 'id'>,
 	credential: Credential,
 ): Promise<void> {
-	await writeJsonAtomic(credentialPath(account), credential, 0o600);
+	await updateRegistry((registry) => {
+		const record = registry.accounts.find((entry) => entry.id === account.id);
+		if (!record) throw new Error('that account is no longer in accounts.json');
+		record.login = structuredClone(credential);
+	});
 }
 
 export async function loadCredential(
 	account: Pick<AccountRecord, 'id'>,
 ): Promise<Credential | null> {
-	return readJson<Credential>(credentialPath(account));
+	const record = (await loadRegistry()).accounts.find((entry) => entry.id === account.id);
+	return record?.login ? structuredClone(record.login) : null;
 }
 
 export async function dropCredential(account: Pick<AccountRecord, 'id'>): Promise<void> {
-	await rm(credentialPath(account), { force: true });
+	await updateRegistry((registry) => {
+		const record = registry.accounts.find((entry) => entry.id === account.id);
+		if (record) delete record.login;
+	});
 }

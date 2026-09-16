@@ -5,12 +5,13 @@ import { hotseatHome } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry } from './registry.ts';
 import type { AccountRecord, Credential, ProviderId, Registry } from './types.ts';
 import { PROVIDER_IDS } from './types.ts';
-import { loadCredential, storeCredential } from './vault.ts';
+import { storeCredential } from './vault.ts';
 
 interface Bundle {
 	version: 1;
 	exportedAt: string;
-	accounts: (AccountRecord & { credential: Credential | null })[];
+	/** Accounts as they appear in accounts.json. Older exports carried the login as `credential`. */
+	accounts: (AccountRecord & { credential?: Credential | null })[];
 }
 
 /**
@@ -19,13 +20,13 @@ interface Bundle {
  */
 export async function exportAccounts(path: string): Promise<number> {
 	const registry = await loadRegistry();
-	const accounts: Bundle['accounts'] = [];
-	for (const account of registry.accounts) {
-		accounts.push({ ...account, credential: await loadCredential(account) });
-	}
-	const bundle: Bundle = { version: 1, exportedAt: new Date().toISOString(), accounts };
+	const bundle: Bundle = {
+		version: 1,
+		exportedAt: new Date().toISOString(),
+		accounts: registry.accounts,
+	};
 	await writeJsonAtomic(path, bundle, 0o600);
-	return accounts.length;
+	return registry.accounts.length;
 }
 
 export async function importAccounts(path: string): Promise<number> {
@@ -35,7 +36,8 @@ export async function importAccounts(path: string): Promise<number> {
 	}
 	let imported = 0;
 	for (const entry of bundle.accounts) {
-		const { credential, ...record } = entry;
+		const { credential, login, ...record } = entry;
+		const saved = login ?? credential ?? undefined;
 		const shaped =
 			typeof record === 'object' &&
 			record !== null &&
@@ -61,7 +63,7 @@ export async function importAccounts(path: string): Promise<number> {
 			registry.accounts.push(created);
 			return created;
 		});
-		if (credential) await storeCredential(account, credential);
+		if (saved) await storeCredential(account, saved);
 		imported += 1;
 	}
 	return imported;

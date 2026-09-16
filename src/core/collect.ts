@@ -182,6 +182,12 @@ export function plainError(error: unknown): string {
 	return message;
 }
 
+/** The account as it may be shown or written anywhere: without its login. */
+function shown(record: AccountRecord): Omit<AccountRecord, 'login'> {
+	const { login: _login, ...rest } = record;
+	return rest;
+}
+
 /** A reading whose every window has already reset says nothing about now. */
 function expired(snapshot: UsageSnapshot, now: number): boolean {
 	if (snapshot.windows.length === 0) return false;
@@ -234,7 +240,7 @@ export async function collectState(
 							previousPercent: cached?.previousPercent,
 							thresholdPercent: settings.autoThresholdPercent,
 						});
-				if (cached && age < due) return { ...record, usage: cached.snapshot };
+				if (cached && age < due) return { ...shown(record), usage: cached.snapshot };
 
 				const usage = await readUsage(provider, record, live, fetchedAt);
 				if (usage.windows.length > 0) {
@@ -244,7 +250,7 @@ export async function collectState(
 						attemptedAtMs: now,
 						...(usedPercent !== undefined ? { previousPercent: usedPercent } : {}),
 					};
-					return { ...record, usage };
+					return { ...shown(record), usage };
 				}
 				// A failed read replaces no numbers: usage only climbs within a
 				// window, so the last good reading stays a valid floor until that
@@ -262,7 +268,7 @@ export async function collectState(
 						? { previousPercent: cached.previousPercent }
 						: {}),
 				};
-				return { ...record, usage: snapshot };
+				return { ...shown(record), usage: snapshot };
 			}),
 		);
 

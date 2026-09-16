@@ -17,6 +17,7 @@ import {
 	accountsFor,
 	findAccount,
 	loadRegistry,
+	migrateVault,
 	removeAccount,
 	updateRegistry,
 	upsertAccount,
@@ -33,7 +34,7 @@ import {
 import { activate, nextAvailable, pickBest, rotateNext } from './core/switch.ts';
 import { exportAccounts, importAccounts, moveSlot, purge, swapSlots } from './core/transfer.ts';
 import { PROVIDER_IDS, type ProviderId } from './core/types.ts';
-import { dropCredential, storeCredential } from './core/vault.ts';
+import { storeCredential } from './core/vault.ts';
 import { credentialFromToken } from './providers/claude/index.ts';
 import { renderBoard } from './ui/board.ts';
 import { renderHelp } from './ui/help.ts';
@@ -60,6 +61,16 @@ async function resolve(providerId: ProviderId, selector: string | undefined) {
 	return account;
 }
 
+/** An entry in accounts.json that is not an account is left alone, and said. */
+function warnUnreadable(registry: Awaited<ReturnType<typeof loadRegistry>>): void {
+	const count = registry.unreadable.length;
+	if (count === 0) return;
+	const plural = count === 1 ? 'entry' : 'entries';
+	note(
+		`${count} ${plural} in accounts.json could not be read and ${count === 1 ? 'is' : 'are'} ignored. An account needs at least "provider" and "email".`,
+	);
+}
+
 async function status(json: boolean, force: boolean): Promise<number> {
 	const settings = await loadSettings();
 	const state = await collectState({ force });
@@ -67,6 +78,7 @@ async function status(json: boolean, force: boolean): Promise<number> {
 		process.stdout.write(`${JSON.stringify({ ...state, settings })}\n`);
 		return 0;
 	}
+	warnUnreadable(await loadRegistry());
 	process.stdout.write(
 		`\n${renderBoard(state, {
 			theme: theme(),
@@ -233,6 +245,7 @@ async function showConfig(json: boolean): Promise<number> {
 export async function main(argv: readonly string[]): Promise<number> {
 	const [command, ...rest] = argv;
 	try {
+		await migrateVault();
 		switch (command) {
 			case undefined:
 			case 'status':
@@ -349,7 +362,6 @@ export async function main(argv: readonly string[]): Promise<number> {
 				const providerId = parseProvider(rest[0]);
 				const account = await resolve(providerId, rest[1]);
 				const wasInUse = (await loadRegistry()).active[providerId] === account.id;
-				await dropCredential(account);
 				await updateRegistry((registry) => removeAccount(registry, account.id));
 				await publishState();
 				success(`removed ${account.email} and deleted its saved login`);
@@ -362,6 +374,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 			}
 			case 'list': {
 				const registry = await loadRegistry();
+				warnUnreadable(registry);
 				for (const providerId of PROVIDER_IDS) {
 					for (const account of accountsFor(registry, providerId)) {
 						const active = registry.active[providerId] === account.id ? '*' : ' ';

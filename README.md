@@ -215,15 +215,41 @@ Everything hotseat stores lives in `~/.hotseat`, owner-readable only:
 
 ```
 ~/.hotseat
-├── accounts.json     which accounts exist, and which is in use
+├── accounts.json     every account, its saved login, and which is in use
 ├── settings.json     your settings
 ├── state.json        the last board, which the menu bar watches
 ├── usage.json        cached readings
 ├── history.jsonl     a line per switch
 ├── auto-state.json   what the last automatic switch left behind
-├── mappings.json     folder rules
-└── vault/            one saved login per account
+└── mappings.json     folder rules
 ```
+
+### Editing the files by hand
+
+Both `accounts.json` and `settings.json` are yours to edit. `settings.json`
+holds only the keys you have changed; `hotseat config` lists every key with
+its allowed values.
+
+`accounts.json` is the one place accounts and their logins live. An entry
+needs only a service and an email; hotseat fills in the rest and writes the
+file back. A Claude login can be given as a setup token string:
+
+```json
+{
+	"version": 1,
+	"accounts": [
+		{ "provider": "claude", "email": "you@example.com", "login": "sk-ant-oat01-..." },
+		{ "provider": "codex", "email": "you@example.com" }
+	],
+	"active": {}
+}
+```
+
+Delete an entry to forget that account. An entry hotseat cannot read is left
+exactly as written and reported by `hotseat status` and `hotseat list`.
+hotseat rewrites this file whenever a token is refreshed or an account is
+switched, so make an edit and save it rather than keeping it open for long.
+The file holds live logins: keep it to yourself.
 
 ## Relaunching the menu bar app
 

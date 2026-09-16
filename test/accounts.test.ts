@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { vaultDir } from '../src/core/paths.ts';
+import { registryPath } from '../src/core/paths.ts';
 import {
 	accountsFor,
 	findAccount,
@@ -158,7 +157,7 @@ describe('saved logins', () => {
 		await withHome(async () => {
 			const account = await add('one@example.com');
 			await storeCredential(account, credential('abc'));
-			const mode = (await stat(join(vaultDir(), `${account.id}.json`))).mode & 0o777;
+			const mode = (await stat(registryPath())).mode & 0o777;
 			expect(mode).toBe(0o600);
 		});
 	});

@@ -43,7 +43,6 @@ struct Settings: Decodable {
 	let titlePercentage: String
 	let titleShowModelLimits: Bool
 	let titleShortenEmail: Bool
-	let autoEnabled: Bool
 	let autoThresholdPercent: Double
 	let autoStrategy: String
 	let refreshIntervalSeconds: Double

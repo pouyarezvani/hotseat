@@ -73,11 +73,10 @@ sessions are still open on the old account.
 
 ## Switching automatically
 
-```sh
-hotseat config set autoEnabled true
-hotseat auto                # watches and switches; Ctrl-C to stop
-hotseat auto --once         # one check, for a cron job or a launch agent
-```
+This is what the app is for, so it is always on. While the menu bar app is
+running, every refresh is also a switching pass. If you would rather not run
+the menu bar app, `hotseat auto` runs the same loop in a terminal, and
+`hotseat auto --once` does one pass for a cron job.
 
 When the account in use crosses the threshold, hotseat moves to **the account
 whose quota resets soonest among those with real room left**. That spends the
@@ -167,7 +166,6 @@ An export contains live logins. Keep it private and delete it when done.
 | `titlePercentage` | `all` | `all`, `worst`, or `none` |
 | `titleShowModelLimits` | `true` | include per-model weekly limits |
 | `titleShortenEmail` | `true` | show the part before the @ |
-| `autoEnabled` | `false` | switch automatically |
 | `autoThresholdPercent` | `90` | switch once a window passes this |
 | `autoIntervalSeconds` | `120` | seconds between checks |
 | `autoCooldownSeconds` | `300` | minimum gap between switches |

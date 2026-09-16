@@ -16,8 +16,6 @@ export interface Settings {
 	titleShowModelLimits: boolean;
 	/** Shorten an account to the part before the @ in titles. */
 	titleShortenEmail: boolean;
-	/** Rotate automatically as an account approaches its limit. */
-	autoEnabled: boolean;
 	/** Rotate once the seated account passes this share of any window. */
 	autoThresholdPercent: number;
 	/** Seconds between auto-rotation checks. */
@@ -46,7 +44,6 @@ export const DEFAULTS: Settings = {
 	titlePercentage: 'all',
 	titleShowModelLimits: true,
 	titleShortenEmail: true,
-	autoEnabled: false,
 	autoThresholdPercent: 90,
 	autoIntervalSeconds: 120,
 	autoCooldownSeconds: 300,

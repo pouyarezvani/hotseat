@@ -19,12 +19,12 @@ describe('defaults', () => {
 		});
 	});
 
-	test('switching automatically is off until asked for', () => {
-		expect(DEFAULTS.autoEnabled).toBe(false);
-	});
-
 	test('the default strategy spends the quota that resets soonest', () => {
 		expect(DEFAULTS.autoStrategy).toBe('soonest-reset');
+	});
+
+	test('there is no way to turn switching off, because switching is the point', () => {
+		expect(SETTING_KEYS as string[]).not.toContain('autoEnabled');
 	});
 });
 
@@ -38,9 +38,9 @@ describe('changing a setting', () => {
 
 	test('only the changed key is written, so later defaults still reach you', async () => {
 		await withHome(async () => {
-			await setSetting('autoEnabled', 'true');
+			await setSetting('barWidth', '20');
 			const stored = await readJson<Record<string, unknown>>(settingsPath());
-			expect(Object.keys(stored ?? {}).sort()).toEqual(['autoEnabled', 'version']);
+			expect(Object.keys(stored ?? {}).sort()).toEqual(['barWidth', 'version']);
 		});
 	});
 
@@ -54,10 +54,10 @@ describe('changing a setting', () => {
 
 	test('two changes both survive', async () => {
 		await withHome(async () => {
-			await setSetting('autoEnabled', 'true');
+			await setSetting('autoThresholdPercent', '85');
 			await setSetting('barWidth', '20');
 			const settings = await loadSettings();
-			expect(settings.autoEnabled).toBe(true);
+			expect(settings.autoThresholdPercent).toBe(85);
 			expect(settings.barWidth).toBe(20);
 		});
 	});
@@ -74,9 +74,9 @@ describe('rejecting bad values', () => {
 	});
 
 	test('a yes-or-no key refuses anything else', () => {
-		expect(() => coerce('autoEnabled', 'yes')).toThrow(/true or false/);
-		expect(coerce('autoEnabled', 'true')).toBe(true);
-		expect(coerce('autoEnabled', 'false')).toBe(false);
+		expect(() => coerce('titleCompact', 'yes')).toThrow(/true or false/);
+		expect(coerce('titleCompact', 'true')).toBe(true);
+		expect(coerce('titleCompact', 'false')).toBe(false);
 	});
 
 	test('a choice key refuses an unknown choice and names the valid ones', () => {
@@ -88,7 +88,7 @@ describe('rejecting bad values', () => {
 	});
 
 	test('an unknown key is not a setting', () => {
-		expect(isSettingKey('autoEnabled')).toBe(true);
+		expect(isSettingKey('autoThresholdPercent')).toBe(true);
 		expect(isSettingKey('nonsense')).toBe(false);
 	});
 
@@ -109,10 +109,10 @@ describe('surviving a damaged settings file', () => {
 		await withHome(async () => {
 			await Bun.write(
 				settingsPath(),
-				JSON.stringify({ version: 1, autoEnabled: 'sure', barWidth: 'wide' }),
+				JSON.stringify({ version: 1, titleCompact: 'sure', barWidth: 'wide' }),
 			);
 			const settings = await loadSettings();
-			expect(settings.autoEnabled).toBe(DEFAULTS.autoEnabled);
+			expect(settings.titleCompact).toBe(DEFAULTS.titleCompact);
 			expect(settings.barWidth).toBe(DEFAULTS.barWidth);
 		});
 	});

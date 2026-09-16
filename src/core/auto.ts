@@ -96,9 +96,6 @@ export function decide(
 export async function tick(): Promise<TickReport[]> {
 	const settings = await loadSettings();
 	const reports: TickReport[] = [];
-	if (!settings.autoEnabled) {
-		return [{ provider: 'claude', outcome: 'idle', detail: 'automatic switching is off' }];
-	}
 	const state = await collectState();
 	const auto = await loadAutoState();
 	const now = Date.now();

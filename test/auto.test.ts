@@ -51,7 +51,7 @@ function state(accounts: AccountState[], activeAccountId?: string): State {
 	};
 }
 
-const settings: Settings = { ...DEFAULTS, autoEnabled: true };
+const settings: Settings = { ...DEFAULTS };
 
 describe('holding still', () => {
 	test('holds while the account in use is under the threshold', () => {

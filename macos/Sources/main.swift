@@ -85,11 +85,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 	// MARK: - Data
 
+	/// Each refresh is also a switching pass. The app is what keeps the accounts
+	/// rotating, so a user who has it running needs nothing else.
 	@objc private func refresh() {
 		guard !isBusy else { return }
 		isBusy = true
 		DispatchQueue.global(qos: .utility).async { [weak self] in
 			guard let self else { return }
+			self.runner.run(["auto", "--once"])
 			let loaded = self.runner.board()
 			let spans = self.runner.title()
 			DispatchQueue.main.async {
@@ -348,11 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 		menu.addItem(.separator())
 		menu.addItem(caption("Switching"))
-		menu.addItem(
-			toggle("Switch for me automatically", key: "autoEnabled", on: settings.autoEnabled))
-		// Indented to show they belong to the toggle above, but left usable so the
-		// rules can be set before automatic switching is turned on.
-		let strategy = NSMenuItem(title: "\u{2003}pick the account that", action: nil, keyEquivalent: "")
+		let strategy = NSMenuItem(title: "Switch to the account that", action: nil, keyEquivalent: "")
 		let strategyMenu = NSMenu()
 		strategyMenu.autoenablesItems = false
 		strategyMenu.addItem(
@@ -365,7 +364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 				current: settings.autoStrategy))
 		strategy.submenu = strategyMenu
 		menu.addItem(strategy)
-		let threshold = NSMenuItem(title: "\u{2003}switch once a limit hits", action: nil, keyEquivalent: "")
+		let threshold = NSMenuItem(title: "Switch once a limit reaches", action: nil, keyEquivalent: "")
 		let thresholdMenu = NSMenu()
 		thresholdMenu.autoenablesItems = false
 		for value in [80, 85, 90, 95, 99] {

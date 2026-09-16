@@ -27,7 +27,7 @@ const GROUPS: Group[] = [
 			{ usage: 'best <service>', what: 'switch to the one with the most left' },
 			{ usage: 'rotate <service>', what: 'switch to the next in order' },
 			{ usage: 'next <service>', what: 'switch to the next with room' },
-			{ usage: 'auto', what: 'keep switching as limits fill up' },
+			{ usage: 'auto', what: 'run the switching loop in this terminal instead of the menu bar' },
 		],
 	},
 	{

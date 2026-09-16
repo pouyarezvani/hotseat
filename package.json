@@ -1,0 +1,43 @@
+{
+	"name": "hotseat",
+	"version": "0.1.0",
+	"description": "Multi-account switcher for Claude Code and Codex CLI. Keeps a bench of signed-in accounts per agent and rotates the one in the hot seat before it hits a usage limit.",
+	"license": "MIT",
+	"type": "module",
+	"bin": {
+		"hotseat": "./bin/hotseat.ts"
+	},
+	"files": [
+		"bin",
+		"src",
+		"README.md",
+		"LICENSE"
+	],
+	"engines": {
+		"bun": ">=1.2"
+	},
+	"scripts": {
+		"dev": "bun run bin/hotseat.ts",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit",
+		"lint": "biome check .",
+		"format": "biome format --write .",
+		"build": "bun build bin/hotseat.ts --compile --outfile dist/hotseat"
+	},
+	"keywords": [
+		"claude-code",
+		"codex",
+		"account-switcher",
+		"rate-limit",
+		"cli"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/pouyarezvani/hotseat"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.2.0",
+		"@types/bun": "latest",
+		"typescript": "^5.9.0"
+	}
+}

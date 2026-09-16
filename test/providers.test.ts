@@ -66,10 +66,12 @@ describe('waiting on the keychain', () => {
 	test('a call that does not come back in time is cut off and named', async () => {
 		const { settleWithin } = await import('../src/providers/claude/keychain.ts');
 		const slow = Bun.spawn(['/bin/sleep', '5'], { stdout: 'ignore', stderr: 'ignore' });
+		const started = Date.now();
 		await expect(settleWithin(slow, 100, 'the keychain')).rejects.toThrow(
 			/the keychain did not answer within 0.1s/,
 		);
-		expect(slow.killed).toBe(true);
+		await slow.exited;
+		expect(Date.now() - started).toBeLessThan(2000);
 	});
 
 	test('a call that comes back in time is left alone', async () => {

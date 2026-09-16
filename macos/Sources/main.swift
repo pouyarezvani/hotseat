@@ -54,6 +54,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		ProcessInfo.processInfo.environment["HOTSEAT_HOME"]
 		?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hotseat").path
 
+	/// When and how big state.json last was, which is what a real change moves.
+	private var lastPublished = ""
+
+	private static func publishedStamp() -> String {
+		let path = (homePath as NSString).appendingPathComponent("state.json")
+		guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) else { return "" }
+		let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+		let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+		return "\(modified):\(size)"
+	}
+
 	private func watchState() {
 		let home = Self.homePath
 		try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
@@ -62,8 +73,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		watchedDescriptor = descriptor
 		let source = DispatchSource.makeFileSystemObjectSource(
 			fileDescriptor: descriptor, eventMask: [.write], queue: .main)
+		lastPublished = Self.publishedStamp()
 		source.setEventHandler { [weak self] in
 			guard let self else { return }
+			// The folder changes on every refresh the app itself runs, because the
+			// CLI writes its caches there. Only a new board, which the CLI
+			// publishes when something was changed from a terminal, is worth a
+			// reload; reacting to the caches made the app refresh without end.
+			let stamp = Self.publishedStamp()
+			guard stamp != self.lastPublished else { return }
+			self.lastPublished = stamp
 			// A burst of writes is one change.
 			self.pendingReload?.cancel()
 			let reload = DispatchWorkItem { [weak self] in self?.refresh() }

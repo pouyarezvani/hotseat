@@ -102,6 +102,23 @@ async function loadCache(): Promise<UsageCache> {
 }
 
 /**
+ * Forgets what was last read for an account, so its next read happens at
+ * once. A new login makes the old reading, and any failure recorded against
+ * the old login, say nothing about the account any more.
+ */
+export async function forgetReading(accountId: string): Promise<void> {
+	const lock = await acquireLock(hotseatHome(), 10_000, 'usage.lock');
+	try {
+		const cache = await loadCache();
+		if (!(accountId in cache.entries)) return;
+		delete cache.entries[accountId];
+		await writeJsonAtomic(usageCachePath(), cache, 0o600);
+	} finally {
+		await lock.release();
+	}
+}
+
+/**
  * Whatever changes when a login is replaced or its token rotated. The whole
  * credential is hashed rather than one field so no service-specific shape has
  * to be known here.
@@ -211,7 +228,7 @@ async function readUsage(
 				usage: {
 					fetchedAt,
 					windows: [],
-					error: 'the saved login no longer works - run hotseat add to sign in again',
+					error: 'the saved login no longer works - sign in to it again',
 				},
 				failure: { kind: 'auth', deadLogin },
 			};
@@ -222,10 +239,7 @@ async function readUsage(
 		} catch (error) {
 			if (classify(error) === 'auth') {
 				return failed(
-					new ServiceError(
-						'the saved login no longer works - run hotseat add to sign in again',
-						401,
-					),
+					new ServiceError('the saved login no longer works - sign in to it again', 401),
 					fingerprint(stored),
 				);
 			}

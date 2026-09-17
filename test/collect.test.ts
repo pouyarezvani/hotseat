@@ -258,9 +258,7 @@ describe('what counts as a login that stopped working', () => {
 			);
 			const state = await collectState({ providers, now: T });
 			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
-			expect(usage?.error).toBe(
-				'the saved login no longer works - run hotseat add to sign in again',
-			);
+			expect(usage?.error).toBe('the saved login no longer works - sign in to it again');
 			expect(usage?.errorKind).toBe('auth');
 			const refreshes = providers.claude.calls.refresh;
 			await collectState({ providers, now: T + CANDIDATE_MS + 1 });

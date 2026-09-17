@@ -394,6 +394,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			providerId == "claude"
 			? "Open Claude sessions, including ones in your editor, pick this up on their own within a moment."
 			: "Open Codex sessions keep the old account until they restart."
+		let signIn = bound(
+			"Sign in again\u{2026}", #selector(signInSelector(_:)), selector,
+			tip: "Open your browser to sign in to this account again, the same way adding it did. Use this when its saved login has stopped working. Nothing else is signed out, and the account you are using stays as it is.")
+		// A login that stopped working is the one thing to do here, so it leads.
+		let needsSignIn = account.usage?.error?.contains("no longer works") ?? false
+		if needsSignIn {
+			menu.addItem(signIn)
+			menu.addItem(.separator())
+		}
 		if !isActive && !account.disabled {
 			menu.addItem(
 				bound(
@@ -409,6 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 				tip: account.disabled
 					? "Put this account back into automatic switching, so hotseat may move to it when another account runs out."
 					: "Take this account out of automatic switching. hotseat will never move to it on its own. It stays saved, and you can still switch to it by hand."))
+		if !needsSignIn { menu.addItem(signIn) }
 		menu.addItem(
 			bound(
 				"Remove account", #selector(removeSelector(_:)), selector,
@@ -775,6 +785,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			showSwitch(provider: parts[0], accountId: account.id)
 		}
 		perform(["switch", parts[0], parts[1]])
+	}
+
+	/// A sign-in waits on a person in a browser, so it runs beside the regular
+	/// refreshes instead of holding them up, and says how it ended.
+	@objc private func signInSelector(_ sender: NSMenuItem) {
+		let parts = split(sender)
+		guard parts.count == 2 else { return }
+		let email = board?.providers[parts[0]]?.accounts.first(where: { String($0.slot) == parts[1] })?.email ?? "the account"
+		DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+			guard let self else { return }
+			let signer = Runner()
+			let ok = signer.run(["signin", parts[0], parts[1]], timeout: Runner.signInTimeout) != nil
+			let reason = signer.lastError
+			DispatchQueue.main.async {
+				if ok {
+					let content = UNMutableNotificationContent()
+					content.title = "Signed in to \(email) again"
+					content.body = "Its saved login was replaced. Nothing else was signed out."
+					UNUserNotificationCenter.current().add(
+						UNNotificationRequest(identifier: "hotseat.signin.\(Date().timeIntervalSince1970)", content: content, trigger: nil))
+				} else {
+					self.report(failure: ["signin", parts[0], parts[1]], reason: reason)
+				}
+				self.refresh()
+			}
+		}
 	}
 
 	@objc private func disableSelector(_ sender: NSMenuItem) {

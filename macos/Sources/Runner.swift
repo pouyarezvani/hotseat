@@ -40,10 +40,13 @@ final class Runner {
 	/// Longer than any single command should take, including its own network
 	/// timeouts. A command past this is killed so a stalled connection can
 	/// never leave the app stuck with its busy flag set for good.
-	private static let timeout: TimeInterval = 90
+	static let timeout: TimeInterval = 90
+
+	/// A sign-in waits on a person and a browser, so it gets far longer.
+	static let signInTimeout: TimeInterval = 300
 
 	@discardableResult
-	func run(_ arguments: [String], input: String? = nil) -> Data? {
+	func run(_ arguments: [String], input: String? = nil, timeout: TimeInterval = Runner.timeout) -> Data? {
 		let process = Process()
 		process.executableURL = URL(fileURLWithPath: executable)
 		process.arguments = prefix + arguments
@@ -67,7 +70,7 @@ final class Runner {
 		try? stdin.fileHandleForWriting.close()
 
 		let deadline = DispatchWorkItem { [weak process] in process?.terminate() }
-		DispatchQueue.global().asyncAfter(deadline: .now() + Self.timeout, execute: deadline)
+		DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
 		// Drain both pipes before waiting, or a chatty command fills one and
 		// blocks forever on the write.
 		let stdout = out.fileHandleForReading.readDataToEndOfFile()

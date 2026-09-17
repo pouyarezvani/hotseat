@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { credentialFromToken } from '../providers/claude/index.ts';
 import { oauthOf } from '../providers/claude/keychain.ts';
 import { loginIsolated } from '../providers/claude/login.ts';
-import { collectState, PROVIDERS } from './collect.ts';
+import { collectState, forgetReading, PROVIDERS } from './collect.ts';
 import { readJson, writeJsonAtomic } from './fs.ts';
+import { cleanUpEvenIfInterrupted } from './interrupt.ts';
 import { statePath } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
 import type { AccountRecord, Credential, Provider, ProviderId } from './types.ts';
@@ -16,8 +17,9 @@ export async function enroll(
 	providerId: ProviderId,
 	credential: Credential,
 	fallbackEmail?: string,
+	options: { providers?: Record<ProviderId, Provider>; now?: number } = {},
 ): Promise<AccountRecord> {
-	const provider = PROVIDERS[providerId];
+	const provider = (options.providers ?? PROVIDERS)[providerId];
 	const identity = await provider.identify(credential).catch(() => null);
 	const email = identity?.email ?? fallbackEmail;
 	if (!email) {
@@ -31,10 +33,43 @@ export async function enroll(
 		}),
 	);
 	await storeCredential(account, credential);
+	// Whatever was read, or failed, with the old login no longer applies.
+	await forgetReading(account.id);
 	// Publish the new picture immediately so the menu bar reflects the account
 	// as soon as it exists, rather than at its next scheduled read.
-	await publishState({ force: true });
+	await publishState({ force: true, ...options });
 	return account;
+}
+
+/**
+ * Signs in to an account again through the browser, as adding it did, and
+ * puts the new login in place of the one that stopped working. The sign-in
+ * runs against a scratch folder, so nothing in use is signed out. Whoever
+ * actually signed in is who gets saved: signing in as a different account
+ * saves that one and leaves the account asked about untouched.
+ */
+export async function signInAgain(input: {
+	providerId: ProviderId;
+	account: Pick<AccountRecord, 'id' | 'email' | 'slot'>;
+	login?: (email: string) => Promise<Credential>;
+	providers?: Record<ProviderId, Provider>;
+	now?: number;
+}): Promise<{ signedInAs: string; matched: boolean; slot: number }> {
+	const login =
+		input.login ??
+		(input.providerId === 'claude'
+			? (email: string) => loginClaudeIsolated(email)
+			: () => loginCodexIsolated());
+	const credential = await login(input.account.email);
+	const saved = await enroll(input.providerId, credential, undefined, {
+		...(input.providers ? { providers: input.providers } : {}),
+		...(input.now !== undefined ? { now: input.now } : {}),
+	});
+	return {
+		signedInAs: saved.email,
+		matched: saved.id === input.account.id,
+		slot: saved.slot,
+	};
 }
 
 /**
@@ -80,8 +115,8 @@ export async function enrollFromToken(
 }
 
 /** A full Claude sign-in, isolated so the current login is left alone. */
-export function loginClaudeIsolated(): Promise<Credential> {
-	return loginIsolated();
+export function loginClaudeIsolated(email?: string): Promise<Credential> {
+	return loginIsolated(email);
 }
 
 /**
@@ -92,19 +127,24 @@ export function loginClaudeIsolated(): Promise<Credential> {
  */
 export async function loginCodexIsolated(): Promise<Credential> {
 	const home = await mkdtemp(join(tmpdir(), 'hotseat-codex-'));
-	try {
-		const child = Bun.spawn(['codex', 'login'], {
-			env: { ...process.env, CODEX_HOME: home },
-			stdin: 'inherit',
-			stdout: 'inherit',
-			stderr: 'inherit',
-		});
-		const code = await child.exited;
-		if (code !== 0) throw new Error(`the Codex sign-in ended with status ${code}`);
-		const credential = await readJson<Credential>(join(home, 'auth.json'));
-		if (!credential) throw new Error('the Codex sign-in produced no credential');
-		return credential;
-	} finally {
-		await rm(home, { recursive: true, force: true });
-	}
+	let child: ReturnType<typeof Bun.spawn> | undefined;
+	return cleanUpEvenIfInterrupted(
+		async () => {
+			child?.kill();
+			await rm(home, { recursive: true, force: true });
+		},
+		async () => {
+			child = Bun.spawn(['codex', 'login'], {
+				env: { ...process.env, CODEX_HOME: home },
+				stdin: process.stdin.isTTY ? 'inherit' : 'ignore',
+				stdout: 'inherit',
+				stderr: 'inherit',
+			});
+			const code = await child.exited;
+			if (code !== 0) throw new Error(`the Codex sign-in ended with status ${code}`);
+			const credential = await readJson<Credential>(join(home, 'auth.json'));
+			if (!credential) throw new Error('the Codex sign-in produced no credential');
+			return credential;
+		},
+	);
 }

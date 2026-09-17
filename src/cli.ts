@@ -11,6 +11,7 @@ import {
 	loginClaudeIsolated,
 	loginCodexIsolated,
 	publishState,
+	signInAgain,
 } from './core/enroll.ts';
 import { readHistory, recordSwitch, type SwitchReason } from './core/history.ts';
 import { listMappings, mappingFor, removeMapping, setMapping } from './core/mappings.ts';
@@ -303,6 +304,23 @@ export async function main(argv: readonly string[]): Promise<number> {
 				});
 				success(`added ${account.email} as Claude account ${account.slot}`);
 				return 0;
+			}
+			case 'signin': {
+				const providerId = parseProvider(rest[0]);
+				const account = await resolve(providerId, rest[1]);
+				const name = PROVIDERS[providerId].displayName;
+				process.stderr.write(
+					`Your browser will open. Sign in as ${account.email}. Nothing is signed out.\n`,
+				);
+				const result = await signInAgain({ providerId, account });
+				if (result.matched) {
+					success(`signed in to ${result.signedInAs} again`);
+					return 0;
+				}
+				problem(
+					`you signed in as ${result.signedInAs}, not ${account.email} - saved that as ${name} account ${result.slot}; ${account.email} still needs signing in`,
+				);
+				return 1;
 			}
 			case 'switch': {
 				const providerId = parseProvider(rest[0]);

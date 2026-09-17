@@ -38,6 +38,10 @@ const GROUPS: Group[] = [
 		entries: [
 			{ usage: 'add', what: 'sign in to another account and add it' },
 			{ usage: 'add <service>', what: 'add the account signed in right now' },
+			{
+				usage: 'signin <service> <account>',
+				what: 'sign in to it again, when its login stops working',
+			},
 			{ usage: 'remove <service> <account>', what: 'forget it and delete its saved login' },
 			{
 				usage: 'disable | enable <service> <account>',

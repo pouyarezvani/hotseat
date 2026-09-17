@@ -175,6 +175,7 @@ Add `--json` to `status`, `title` or `history` for machine-readable output.
 | `hotseat add <service>` | add the account signed in right now |
 | `hotseat add-token claude [token]` | add a Claude account from a setup token (fewer permissions) |
 | `hotseat save <service>` | re-save the login signed in right now |
+| `hotseat signin <service> <account>` | sign in to it again through the browser, when its login stops working |
 | `hotseat remove <service> <account>` | forget it and delete its saved login |
 | `hotseat disable <service> <account>` | skip it when switching automatically |
 | `hotseat enable <service> <account>` | include it again |

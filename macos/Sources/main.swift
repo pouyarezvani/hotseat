@@ -115,11 +115,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			guard let self else { return }
 			let reports = self.runner.decode([TickReport].self, ["auto", "--once", "--json"]) ?? []
 			let loaded = self.runner.board()
-			let spans = self.runner.title()
 			DispatchQueue.main.async {
 				self.isBusy = false
 				self.board = loaded
-				self.render(spans: spans)
+				self.renderTitle()
 				self.announce(reports)
 				self.rescheduleTimer()
 				self.drainQueue()
@@ -197,6 +196,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	}
 
 	// MARK: - Title
+
+	/// Draws the title from the board the app is holding, with no round trip.
+	private func renderTitle() {
+		render(spans: board.map { TitleBuilder.spans(for: $0) } ?? [])
+	}
+
+	/// Shows a switch the moment it is asked for. The switch itself takes about
+	/// a second, and waiting for it made every click feel ignored.
+	private func showSwitch(provider: String, accountId: String) {
+		guard let board else { return }
+		self.board = board.activating(provider: provider, accountId: accountId)
+		renderTitle()
+	}
 
 	private func render(spans: [TitleSpan]) {
 		guard let button = statusItem.button else { return }
@@ -349,7 +361,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			account: account,
 			isActive: isActive,
 			width: Self.menuWidth,
-			onClick: canSwitch ? { [weak self] in self?.perform(["switch", provider, slot]) } : nil)
+			onClick: canSwitch
+				? { [weak self] in
+					self?.showSwitch(provider: provider, accountId: account.id)
+					self?.perform(["switch", provider, slot])
+				} : nil)
 		let bars =
 			"Each bar is one of this account's limits and how much of it is used. The time on the right is when that limit resets."
 		let tip: String
@@ -755,6 +771,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	@objc private func seatSelector(_ sender: NSMenuItem) {
 		let parts = split(sender)
 		guard parts.count == 2 else { return }
+		if let account = board?.providers[parts[0]]?.accounts.first(where: { String($0.slot) == parts[1] }) {
+			showSwitch(provider: parts[0], accountId: account.id)
+		}
 		perform(["switch", parts[0], parts[1]])
 	}
 

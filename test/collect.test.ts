@@ -7,6 +7,7 @@ import {
 	fingerprint,
 	plainError,
 } from '../src/core/collect.ts';
+import { publishState } from '../src/core/enroll.ts';
 import { ServiceError } from '../src/core/errors.ts';
 import { updateRegistry, upsertAccount } from '../src/core/registry.ts';
 import { prepareSession, sessionDir } from '../src/core/session.ts';
@@ -487,6 +488,30 @@ describe("the agent's own reading of the account in use", () => {
 				state.providers.claude.accounts.find((account) => account.id === a.id)?.usage?.windows[0]
 					?.percent,
 			).toBe(50);
+		});
+	});
+});
+
+describe('publishing the board after a change', () => {
+	test('reads nothing that is not due, so a switch is not held up by the network', async () => {
+		await withHome(async (home) => {
+			const { providers, a } = await world();
+			await collectState({ providers, now: T });
+			const reads = providers.claude.calls.fetchUsage;
+			await publishState({ providers, now: T + 61_000 });
+			expect(providers.claude.calls.fetchUsage).toBe(reads);
+			const published = await Bun.file(join(home, 'state.json')).json();
+			expect(published.providers.claude.activeAccountId).toBe(a.id);
+		});
+	});
+
+	test('reads every account again when asked to, as adding an account does', async () => {
+		await withHome(async () => {
+			const { providers } = await world();
+			await collectState({ providers, now: T });
+			const reads = providers.claude.calls.fetchUsage;
+			await publishState({ providers, now: T + 61_000, force: true });
+			expect(providers.claude.calls.fetchUsage).toBe(reads + 2);
 		});
 	});
 });

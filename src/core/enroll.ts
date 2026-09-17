@@ -8,7 +8,7 @@ import { collectState, PROVIDERS } from './collect.ts';
 import { readJson, writeJsonAtomic } from './fs.ts';
 import { statePath } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
-import type { AccountRecord, Credential, ProviderId } from './types.ts';
+import type { AccountRecord, Credential, Provider, ProviderId } from './types.ts';
 import { storeCredential } from './vault.ts';
 
 /** Saves a credential under the account it belongs to, creating it if new. */
@@ -33,13 +33,20 @@ export async function enroll(
 	await storeCredential(account, credential);
 	// Publish the new picture immediately so the menu bar reflects the account
 	// as soon as it exists, rather than at its next scheduled read.
-	await publishState();
+	await publishState({ force: true });
 	return account;
 }
 
-/** Writes the current board to disk, which is what watchers react to. */
-export async function publishState(): Promise<void> {
-	await writeJsonAtomic(statePath(), await collectState({ force: true }), 0o600);
+/**
+ * Writes the current board to disk, which is what watchers react to. Nothing
+ * is read from the network that is not already due, so a switch or a settings
+ * change is never held up by it; adding an account asks for a fresh read of
+ * everything, because its numbers should appear at once.
+ */
+export async function publishState(
+	options: { force?: boolean; providers?: Record<ProviderId, Provider>; now?: number } = {},
+): Promise<void> {
+	await writeJsonAtomic(statePath(), await collectState(options), 0o600);
 }
 
 /**

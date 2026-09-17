@@ -91,7 +91,6 @@ final class Runner {
 	}
 
 	func board() -> Board? { decode(Board.self, ["status", "--json"]) }
-	func title() -> [TitleSpan] { decode([TitleSpan].self, ["title", "--json"]) ?? [] }
 	func history(limit: Int) -> [HistoryEntry] {
 		decode([HistoryEntry].self, ["history", "--json", "--limit", String(limit)]) ?? []
 	}

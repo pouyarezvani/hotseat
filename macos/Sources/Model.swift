@@ -53,7 +53,7 @@ struct Account: Decodable {
 }
 
 struct ProviderState: Decodable {
-	let activeAccountId: String?
+	var activeAccountId: String?
 	let accounts: [Account]
 }
 
@@ -133,7 +133,7 @@ struct Notice: Equatable {
 
 struct Board: Decodable {
 	let updatedAt: String
-	let providers: [String: ProviderState]
+	var providers: [String: ProviderState]
 	/// Missing settings fall back to defaults rather than failing the board.
 	let settings: Settings
 
@@ -144,6 +144,18 @@ struct Board: Decodable {
 		updatedAt = try c.decode(String.self, forKey: .updatedAt)
 		providers = try c.decode([String: ProviderState].self, forKey: .providers)
 		settings = try c.decodeIfPresent(Settings.self, forKey: .settings) ?? Settings()
+	}
+
+	/// The board as it will look once a switch to this account lands. Shown the
+	/// moment the account is clicked, so the menu bar answers at once; the real
+	/// board replaces it when the switch finishes, or puts it back if it fails.
+	func activating(provider: String, accountId: String) -> Board {
+		guard let state = providers[provider],
+			state.accounts.contains(where: { $0.id == accountId })
+		else { return self }
+		var copy = self
+		copy.providers[provider]?.activeAccountId = accountId
+		return copy
 	}
 
 	static let providerOrder = ["claude", "codex"]
@@ -171,6 +183,58 @@ struct TitleSpan: Decodable {
 	let text: String
 	let percent: Double?
 	let provider: String?
+}
+
+/// Builds the menu bar title from the board, the same way the CLI's own
+/// `title` command does, so the app can redraw the instant something changes
+/// instead of asking the CLI and waiting. The CLI's tests and the app's checks
+/// pin the same strings.
+enum TitleBuilder {
+	private static let dot = " \u{00B7} "
+	private static let separator = " \u{2022} "
+
+	static func spans(for board: Board) -> [TitleSpan] {
+		let settings = board.settings
+		var spans: [TitleSpan] = []
+		for entry in board.orderedProviders {
+			guard let active = entry.state.accounts.first(where: { $0.id == entry.state.activeAccountId })
+			else { continue }
+			if !spans.isEmpty {
+				spans.append(TitleSpan(text: settings.titleCompact ? "  " : "   ", percent: nil, provider: nil))
+			}
+			let gap = settings.titleCompact ? " " : separator
+			spans.append(TitleSpan(text: entry.title, percent: nil, provider: entry.id))
+			if settings.titleShowAccount && !settings.titleCompact {
+				let name = active.alias
+					?? (settings.titleShortenEmail
+						? String(active.email.split(separator: "@").first ?? Substring(active.email))
+						: active.email)
+				spans.append(TitleSpan(text: separator + name, percent: nil, provider: nil))
+			}
+			if settings.titlePercentage == "none" { continue }
+			let all = active.usage?.windows ?? []
+			let windows = settings.titleShowModelLimits
+				? all : all.filter { !$0.key.hasPrefix("weekly_scoped:") }
+			guard let worst = windows.map(\.percent).max() else { continue }
+			spans.append(TitleSpan(text: gap, percent: nil, provider: nil))
+			if settings.titlePercentage == "worst" || settings.titleCompact {
+				spans.append(TitleSpan(text: "", percent: worst, provider: nil))
+				continue
+			}
+			for (index, window) in windows.enumerated() {
+				if index > 0 { spans.append(TitleSpan(text: dot, percent: nil, provider: nil)) }
+				spans.append(TitleSpan(text: "", percent: window.percent, provider: nil))
+			}
+		}
+		return spans
+	}
+
+	/// The title as plain text, which is what the checks compare.
+	static func text(_ spans: [TitleSpan]) -> String {
+		spans.map { span in
+			span.percent.map { "\(Int($0.rounded()))%" } ?? span.text
+		}.joined()
+	}
 }
 
 enum Severity {

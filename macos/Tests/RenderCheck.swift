@@ -201,4 +201,39 @@ let decoded = try? JSONDecoder().decode(
 	Settings.self, from: "{\"autoThresholdFiveHour\": 95}".data(using: .utf8)!)
 check("the per-window limits decode with defaults", decoded?.autoThresholdFiveHour == 95 && decoded?.autoThresholdWeekly == 0)
 
+// MARK: - Title
+//
+// The app builds its own title from the board, so a click can show in the
+// menu bar at once instead of after a round trip to the CLI. The strings are
+// the same ones the CLI's own title tests pin, so the two cannot drift.
+
+print("title")
+func boardFixture(_ settings: String) -> Board {
+	let json = """
+	{"version":1,"updatedAt":"2026-09-16T12:00:00Z","settings":\(settings),"providers":{
+	"claude":{"activeAccountId":"a","accounts":[
+	{"id":"a","email":"pouya@example.com","slot":1,"disabled":false,"usage":{"fetchedAt":"x","windows":[
+	{"key":"five_hour","label":"5h","percent":32},{"key":"seven_day","label":"week","percent":8},{"key":"weekly_scoped:fable","label":"Fable","percent":13}]}},
+	{"id":"a2","email":"other@example.com","alias":"work","slot":2,"disabled":false,"usage":{"fetchedAt":"x","windows":[
+	{"key":"five_hour","label":"5h","percent":5}]}}]},
+	"codex":{"activeAccountId":"b","accounts":[
+	{"id":"b","email":"someone@example.com","slot":1,"disabled":false,"usage":{"fetchedAt":"x","windows":[
+	{"key":"secondary","label":"week","percent":69}]}}]}}}
+	"""
+	return try! JSONDecoder().decode(Board.self, from: json.data(using: .utf8)!)
+}
+func titleOf(_ board: Board) -> String { TitleBuilder.text(TitleBuilder.spans(for: board)) }
+
+check("the full title", titleOf(boardFixture("{}")) == "Claude • pouya • 32% · 8% · 13%   Codex • someone • 69%", titleOf(boardFixture("{}")))
+check("the compact title", titleOf(boardFixture("{\"titleCompact\":true}")) == "Claude 32%  Codex 69%", titleOf(boardFixture("{\"titleCompact\":true}")))
+check("the fullest limit only", titleOf(boardFixture("{\"titlePercentage\":\"worst\"}")) == "Claude • pouya • 32%   Codex • someone • 69%")
+check("no percentages", titleOf(boardFixture("{\"titlePercentage\":\"none\"}")) == "Claude • pouya   Codex • someone")
+check("without model limits", titleOf(boardFixture("{\"titleShowModelLimits\":false}")) == "Claude • pouya • 32% · 8%   Codex • someone • 69%")
+check("the whole address when asked", titleOf(boardFixture("{\"titleShortenEmail\":false}")).hasPrefix("Claude • pouya@example.com"))
+let afterClick = boardFixture("{}").activating(provider: "claude", accountId: "a2")
+check("a click shows in the title at once, by the name you gave it", titleOf(afterClick) == "Claude • work • 5%   Codex • someone • 69%", titleOf(afterClick))
+check("a click on an account that is not there changes nothing", titleOf(boardFixture("{}").activating(provider: "claude", accountId: "nope")) == titleOf(boardFixture("{}")))
+let marked = TitleBuilder.spans(for: boardFixture("{}")).compactMap(\.provider)
+check("the service spans are marked, so the compact title can show their marks", marked == ["claude", "codex"])
+
 exit(failures == 0 ? 0 : 1)

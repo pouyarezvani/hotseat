@@ -198,7 +198,7 @@ async function capture(providerId: ProviderId, announce: boolean): Promise<numbe
 	await updateRegistry((registry) => {
 		registry.active[providerId] = account.id;
 	});
-	await publishState();
+	await publishState({ force: true });
 	if (announce) {
 		success(`saved ${identity.email} as ${provider.displayName} account ${account.slot}`);
 	}

@@ -269,7 +269,7 @@ describe('every menu item explains itself on hover', () => {
 
 	test('an account row shows its tooltip on the view the mouse is over', () => {
 		expect(row).toContain('override var toolTip');
-		expect(row).toContain('content.toolTip = toolTip');
+		expect(row).toContain('set { content.toolTip = newValue }');
 	});
 
 	/**
@@ -372,5 +372,17 @@ describe('the menu bar hears what the automatic pass did', () => {
 		const auto = cli.slice(cli.indexOf("case 'auto'"), cli.indexOf("case 'move'"));
 		expect(auto).toContain("rest.includes('--json')");
 		expect(auto).toContain('JSON.stringify(reports)');
+	});
+});
+
+describe('hovering an account row', () => {
+	test('a report of the mouse leaving is checked against where the cursor is', () => {
+		const exited = row.slice(row.indexOf('override func mouseExited'));
+		expect(exited.slice(0, exited.indexOf('\n\t}\n'))).toContain('if isMouseInside() { return }');
+	});
+
+	test('only the tracking area the row added is ever removed', () => {
+		expect(row).not.toContain('for area in trackingAreas');
+		expect(row).toContain('if let tracking { removeTrackingArea(tracking) }');
 	});
 });

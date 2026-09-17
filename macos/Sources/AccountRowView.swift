@@ -46,33 +46,62 @@ final class AccountRowView: NSView {
 		content.frame = bounds
 		content.autoresizingMask = [.width, .height]
 		addSubview(content)
+		isMouseInside = { [weak self] in self?.cursorIsOverRow() ?? false }
 	}
 
 	required init?(coder: NSCoder) { nil }
 
 	/// The content view sits on top and is what the mouse is over, so the
-	/// tooltip has to live there too or it never shows.
+	/// tooltip lives there, and only there: a second one on the row itself
+	/// would be a second thing appearing and disappearing under the cursor.
 	override var toolTip: String? {
-		didSet { content.toolTip = toolTip }
+		get { content.toolTip }
+		set { content.toolTip = newValue }
 	}
 
+	private(set) var isHighlighted = false
+
 	private func setHighlighted(_ value: Bool) {
-		guard highlight.isHidden == value else { return }
+		guard isHighlighted != value else { return }
+		isHighlighted = value
 		highlight.isHidden = !value
 		content.isHighlighted = value
 	}
 
+	/// Whether the cursor is over the row right now, asked of the window rather
+	/// than inferred from events. Replaceable, so the checks can stand in for a
+	/// cursor they cannot move.
+	var isMouseInside: () -> Bool = { false }
+
+	private func cursorIsOverRow() -> Bool {
+		guard let window else { return false }
+		return bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+	}
+
 	override func mouseEntered(with event: NSEvent) { setHighlighted(true) }
-	override func mouseExited(with event: NSEvent) { setHighlighted(false) }
+	override func mouseMoved(with event: NSEvent) { setHighlighted(true) }
+
+	/// A tooltip showing over the row makes AppKit report the mouse as gone
+	/// while it has not moved, so a report of leaving only counts when the
+	/// cursor really is outside.
+	override func mouseExited(with event: NSEvent) {
+		if isMouseInside() { return }
+		setHighlighted(false)
+	}
+
+	private var tracking: NSTrackingArea?
 
 	override func updateTrackingAreas() {
 		super.updateTrackingAreas()
-		for area in trackingAreas { removeTrackingArea(area) }
-		addTrackingArea(
-			NSTrackingArea(
-				rect: bounds,
-				options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-				owner: self))
+		// Only the area this view added: AppKit keeps its own here too, for
+		// tooltips, and removing those is part of what made the row flicker.
+		if let tracking { removeTrackingArea(tracking) }
+		let area = NSTrackingArea(
+			rect: bounds,
+			options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+			owner: self)
+		addTrackingArea(area)
+		tracking = area
 	}
 
 	override func mouseUp(with event: NSEvent) {

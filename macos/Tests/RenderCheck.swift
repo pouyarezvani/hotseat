@@ -108,6 +108,27 @@ inertMenu.addItem(inert)
 inertRow.mouseUp(with: NSEvent())
 check("a row with no handler survives a click", true)
 
+// MARK: - Hovering
+//
+// A tooltip appearing over the row makes AppKit report the mouse as having
+// left it, while the cursor has not moved. Taking those reports at face value
+// made the highlight flicker as the cursor crossed the text.
+
+print("hovering")
+let hovered = AccountRowView(account: sampleAccount(), isActive: false, width: 340)
+hovered.mouseEntered(with: NSEvent())
+check("entering the row highlights it", hovered.isHighlighted)
+hovered.isMouseInside = { true }
+hovered.mouseExited(with: NSEvent())
+check("a report of leaving while the cursor is still inside is ignored", hovered.isHighlighted)
+hovered.isMouseInside = { false }
+hovered.mouseExited(with: NSEvent())
+check("really leaving the row clears the highlight", !hovered.isHighlighted)
+hovered.mouseMoved(with: NSEvent())
+check("moving inside the row highlights it, however the cursor got there", hovered.isHighlighted)
+hovered.toolTip = "a tip"
+check("the tooltip lives on the view the cursor is over, and nowhere else", hovered.toolTip == "a tip" && hovered.subviews.last?.toolTip == "a tip")
+
 // MARK: - Sizing
 
 print("sizing")

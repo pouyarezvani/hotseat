@@ -90,6 +90,13 @@ export interface SessionSupport {
 	forget(dir: string): Promise<void>;
 }
 
+/** A usage reading the agent itself keeps, for the account it is signed in as. */
+export interface LocalReading {
+	accountId?: string;
+	fetchedAtMs: number;
+	windows: UsageWindow[];
+}
+
 export interface Provider {
 	readonly id: ProviderId;
 	readonly displayName: string;
@@ -105,6 +112,8 @@ export interface Provider {
 	expiresAt?(credential: Credential): number | undefined;
 	/** Tells the agent's own records who is signed in now. */
 	recordIdentity?(identity: Identity): Promise<void>;
+	/** The agent's own latest reading of the account it is signed in as, if it keeps one. */
+	localReading?(): Promise<LocalReading | null>;
 }
 
 /** An account as shown: everything but its login, which never leaves the file. */

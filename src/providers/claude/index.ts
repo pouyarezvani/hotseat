@@ -1,7 +1,9 @@
 import { retryAfterMs, ServiceError } from '../../core/errors.ts';
+import { readJsonLoose } from '../../core/fs.ts';
 import type {
 	Credential,
 	Identity,
+	LocalReading,
 	Provider,
 	RunningProcess,
 	UsageSnapshot,
@@ -113,6 +115,35 @@ export function credentialFromToken(token: string): Credential {
 	};
 }
 
+/**
+ * Claude Code keeps the reading behind its own usage banner in its config
+ * file, refreshed as it works. For the account in use that is fresher than
+ * anything hotseat could ask for, and costs no request.
+ */
+export function localReadingFrom(config: Record<string, unknown>): LocalReading | null {
+	const cached = config.cachedUsageUtilization;
+	if (typeof cached !== 'object' || cached === null) return null;
+	const entry = cached as {
+		fetchedAtMs?: unknown;
+		accountUuid?: unknown;
+		utilization?: { five_hour?: UsageBucket | null; seven_day?: UsageBucket | null } | null;
+	};
+	if (typeof entry.fetchedAtMs !== 'number' || !Number.isFinite(entry.fetchedAtMs)) return null;
+	const windows = mapUsage(
+		{
+			five_hour: entry.utilization?.five_hour ?? null,
+			seven_day: entry.utilization?.seven_day ?? null,
+		},
+		new Date(entry.fetchedAtMs).toISOString(),
+	).windows;
+	if (windows.length === 0) return null;
+	return {
+		...(typeof entry.accountUuid === 'string' ? { accountId: entry.accountUuid } : {}),
+		fetchedAtMs: entry.fetchedAtMs,
+		windows,
+	};
+}
+
 export class ClaudeProvider implements Provider {
 	readonly id = 'claude' as const;
 	readonly displayName = 'Claude';
@@ -166,6 +197,11 @@ export class ClaudeProvider implements Provider {
 	/** Claude Code shows who is signed in from its own config file, which a switch must keep true. */
 	recordIdentity(identity: Identity): Promise<void> {
 		return updateOauthAccount(claudeConfigPath(), identity);
+	}
+
+	async localReading(): Promise<LocalReading | null> {
+		const config = await readJsonLoose<Record<string, unknown>>(claudeConfigPath());
+		return config ? localReadingFrom(config) : null;
 	}
 
 	async fetchUsage(credential: Credential): Promise<UsageSnapshot> {

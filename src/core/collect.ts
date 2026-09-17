@@ -83,6 +83,9 @@ interface LiveIdentity {
 	fingerprint: string;
 	email: string;
 	plan?: string;
+	accountId?: string;
+	/** This answer came from asking the service, so it is as complete as it gets. */
+	asked?: true;
 }
 
 interface UsageCache {
@@ -121,8 +124,15 @@ export async function liveIdentity(
 ): Promise<Identity | undefined> {
 	const print = fingerprint(installed);
 	const remembered = cache?.identities[provider.id];
-	if (remembered && remembered.fingerprint === print) {
-		return { email: remembered.email, ...(remembered.plan ? { plan: remembered.plan } : {}) };
+	// An answer an older hotseat remembered, before it knew to keep the account
+	// id, is asked for once more: that id is how the agent's own reading is
+	// matched to the account. An answer this version asked for is never re-asked.
+	if (remembered && remembered.fingerprint === print && remembered.asked) {
+		return {
+			email: remembered.email,
+			...(remembered.plan ? { plan: remembered.plan } : {}),
+			...(remembered.accountId ? { accountId: remembered.accountId } : {}),
+		};
 	}
 	const asked = await provider.identify(installed).catch(() => undefined);
 	if (asked) {
@@ -130,10 +140,15 @@ export async function liveIdentity(
 			cache.identities[provider.id] = {
 				fingerprint: print,
 				email: asked.email,
+				asked: true,
 				...(asked.plan ? { plan: asked.plan } : {}),
+				...(asked.accountId ? { accountId: asked.accountId } : {}),
 			};
 		}
 		return asked;
+	}
+	if (remembered && remembered.fingerprint === print) {
+		return { email: remembered.email, ...(remembered.plan ? { plan: remembered.plan } : {}) };
 	}
 	const lastInstalled = registry.accounts.find(
 		(account) => account.id === registry.active[provider.id],
@@ -323,10 +338,16 @@ export async function collectState(
 				}
 			}
 		}
-		let live: { credential: Credential; email: string } | null = null;
+		let live: { credential: Credential; email: string; accountId?: string } | null = null;
 		if (installed) {
 			const identity = await liveIdentity(provider, installed, registry, cache);
-			if (identity) live = { credential: installed, email: identity.email };
+			if (identity) {
+				live = {
+					credential: installed,
+					email: identity.email,
+					...(identity.accountId ? { accountId: identity.accountId } : {}),
+				};
+			}
 		}
 
 		const accounts = await Promise.all(
@@ -427,6 +448,37 @@ export async function collectState(
 		const active = live
 			? accounts.find((account) => account.email.toLowerCase() === live?.email.toLowerCase())
 			: undefined;
+		// The agent's own reading of the account in use, when it is newer than
+		// ours: what its banner shows, at no request. The model limits it does
+		// not report stay from the last full reading.
+		const local = active && live ? await provider.localReading?.().catch(() => null) : null;
+		const entry = active ? cache.entries[active.id] : undefined;
+		if (
+			active &&
+			local &&
+			entry &&
+			local.fetchedAtMs > entry.fetchedAtMs &&
+			(local.accountId === undefined || local.accountId === live?.accountId)
+		) {
+			const localKeys = new Set(local.windows.map((window) => window.key));
+			const kept = entry.snapshot.windows.filter((window) => !localKeys.has(window.key));
+			const snapshot: UsageSnapshot = {
+				fetchedAt: new Date(local.fetchedAtMs).toISOString(),
+				windows: [...local.windows, ...kept],
+			};
+			const before =
+				entry.snapshot.windows.length > 0
+					? Math.max(...entry.snapshot.windows.map((window) => window.percent))
+					: undefined;
+			cache.entries[active.id] = {
+				snapshot,
+				fetchedAtMs: local.fetchedAtMs,
+				attemptedAtMs: entry.attemptedAtMs,
+				...(before !== undefined ? { previousPercent: before } : {}),
+			};
+			touched.add(active.id);
+			active.usage = snapshot;
+		}
 		providers[id] = { accounts, ...(active ? { activeAccountId: active.id } : {}) };
 	}
 

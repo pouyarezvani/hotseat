@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { ACTIVE_CALM_MS, CANDIDATE_MS, collectState, plainError } from '../src/core/collect.ts';
+import { join } from 'node:path';
+import {
+	ACTIVE_CALM_MS,
+	CANDIDATE_MS,
+	collectState,
+	fingerprint,
+	plainError,
+} from '../src/core/collect.ts';
 import { ServiceError } from '../src/core/errors.ts';
 import { updateRegistry, upsertAccount } from '../src/core/registry.ts';
 import { prepareSession, sessionDir } from '../src/core/session.ts';
@@ -355,6 +362,131 @@ describe('an account open in another terminal', () => {
 			expect(usage?.windows[0]?.percent).toBe(33);
 			expect(providers.claude.refreshesOf.get('B') ?? 0).toBe(0);
 			expect(providers.claude.refreshesOf.get('B-session') ?? 0).toBe(0);
+		});
+	});
+});
+
+describe("the agent's own reading of the account in use", () => {
+	test('is used when it is newer than ours, without a request, keeping the model limits we read', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			providers.claude.identities.set('A', {
+				email: 'a@example.com',
+				plan: 'max',
+				accountId: 'acc-a',
+			});
+			providers.claude.readings.set('A', () => ({
+				...reading(98),
+				windows: [
+					...reading(98).windows,
+					{ key: 'weekly_scoped:fable', label: 'Fable', percent: 39 },
+				],
+			}));
+			await collectState({ providers, now: T });
+			const reads = providers.claude.readsOf.get('A') ?? 0;
+			providers.claude.local = {
+				accountId: 'acc-a',
+				fetchedAtMs: T + 30_000,
+				windows: [
+					{
+						key: 'five_hour',
+						label: '5h',
+						percent: 99,
+						resetsAt: new Date(T + 3_600_000).toISOString(),
+					},
+					{
+						key: 'seven_day',
+						label: 'week',
+						percent: 23,
+						resetsAt: new Date(T + 5 * 86_400_000).toISOString(),
+					},
+				],
+			};
+			const state = await collectState({ providers, now: T + 40_000 });
+			const usage = state.providers.claude.accounts.find((account) => account.id === a.id)?.usage;
+			expect(usage?.windows.map((window) => [window.label, window.percent])).toEqual([
+				['5h', 99],
+				['week', 23],
+				['Fable', 39],
+			]);
+			expect(usage?.fetchedAt).toBe(new Date(T + 30_000).toISOString());
+			expect(providers.claude.readsOf.get('A')).toBe(reads);
+		});
+	});
+
+	test('an answer remembered by an older hotseat is asked once more, then left alone', async () => {
+		await withHome(async (home) => {
+			const { providers, a } = await world();
+			providers.claude.identities.set('A', { email: 'a@example.com', accountId: 'acc-a' });
+			// What an older hotseat wrote: no account id, and no record of having asked for one.
+			await Bun.write(
+				join(home, 'usage.json'),
+				JSON.stringify({
+					version: 2,
+					entries: {},
+					identities: { claude: { fingerprint: fingerprint(cred('A')), email: 'a@example.com' } },
+				}),
+			);
+			await collectState({ providers, now: T });
+			expect(providers.claude.calls.identify).toBe(1);
+			providers.claude.local = {
+				accountId: 'acc-a',
+				fetchedAtMs: T + 30_000,
+				windows: [
+					{
+						key: 'five_hour',
+						label: '5h',
+						percent: 77,
+						resetsAt: new Date(T + 3_600_000).toISOString(),
+					},
+				],
+			};
+			const state = await collectState({ providers, now: T + 40_000 });
+			expect(
+				state.providers.claude.accounts.find((account) => account.id === a.id)?.usage?.windows[0]
+					?.percent,
+			).toBe(77);
+			await collectState({ providers, now: T + 50_000 });
+			expect(providers.claude.calls.identify).toBe(1);
+		});
+	});
+
+	test('a service that never names the account is not asked over and over', async () => {
+		await withHome(async () => {
+			const { providers } = await world();
+			providers.claude.identities.set('A', { email: 'a@example.com' });
+			await collectState({ providers, now: T });
+			await collectState({ providers, now: T + 10_000 });
+			await collectState({ providers, now: T + 20_000 });
+			expect(providers.claude.calls.identify).toBe(1);
+		});
+	});
+
+	test('is ignored when it is older than ours, or about someone else', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			providers.claude.identities.set('A', { email: 'a@example.com', accountId: 'acc-a' });
+			await collectState({ providers, now: T });
+			providers.claude.local = {
+				accountId: 'acc-a',
+				fetchedAtMs: T - 30_000,
+				windows: [{ key: 'five_hour', label: '5h', percent: 1 }],
+			};
+			let state = await collectState({ providers, now: T + 10_000 });
+			expect(
+				state.providers.claude.accounts.find((account) => account.id === a.id)?.usage?.windows[0]
+					?.percent,
+			).toBe(50);
+			providers.claude.local = {
+				accountId: 'acc-someone-else',
+				fetchedAtMs: T + 30_000,
+				windows: [{ key: 'five_hour', label: '5h', percent: 1 }],
+			};
+			state = await collectState({ providers, now: T + 40_000 });
+			expect(
+				state.providers.claude.accounts.find((account) => account.id === a.id)?.usage?.windows[0]
+					?.percent,
+			).toBe(50);
 		});
 	});
 });

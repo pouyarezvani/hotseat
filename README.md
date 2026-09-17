@@ -236,6 +236,12 @@ read every minute while it is near the threshold and climbing, every three
 minutes otherwise, and the others every five. A failed read keeps the last good
 numbers on screen, marked, until that window resets.
 
+Between those reads, the account in use follows the agent's own numbers.
+Claude Code keeps the reading behind its usage banner in its config file and
+refreshes it as it works, so whenever that reading is newer than hotseat's,
+hotseat shows it. It matches on the account the reading belongs to, so a
+reading left over from before a switch is ignored, and it costs no request.
+
 Everything hotseat stores lives in `~/.hotseat`, owner-readable only:
 
 ```

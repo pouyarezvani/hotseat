@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import type {
 	Credential,
 	Identity,
+	LocalReading,
 	Provider,
 	ProviderId,
 	RunningProcess,
@@ -44,6 +45,8 @@ export class FakeProvider implements Provider {
 	readonly runningIn = new Set<string>();
 	readonly forgotten: string[] = [];
 	readonly recorded: Identity[] = [];
+	/** What the fake agent's own config file says it last saw, if anything. */
+	local: LocalReading | null = null;
 	/** What fetchUsage throws for a token, when a test wants a specific failure. */
 	readonly failures = new Map<string, Error>();
 	session: SessionSupport;
@@ -79,6 +82,10 @@ export class FakeProvider implements Provider {
 
 	async recordIdentity(identity: Identity): Promise<void> {
 		this.recorded.push(identity);
+	}
+
+	async localReading(): Promise<LocalReading | null> {
+		return this.local;
 	}
 
 	async readAgentCredential(): Promise<Credential | null> {

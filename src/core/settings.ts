@@ -92,10 +92,13 @@ export async function loadSettings(): Promise<Settings> {
 		const bound = BOUNDS[key];
 		if (bound) {
 			const value = merged[key];
+			const fallback = DEFAULTS[key];
 			const clamped: number =
 				typeof value === 'number' && Number.isFinite(value)
 					? Math.min(bound.max, Math.max(bound.min, value))
-					: DEFAULTS[key];
+					: typeof fallback === 'number'
+						? fallback
+						: bound.min;
 			Object.assign(merged, {
 				[key]: isPerWindowThreshold(key) && clamped > 0 && clamped < 50 ? 0 : clamped,
 			});

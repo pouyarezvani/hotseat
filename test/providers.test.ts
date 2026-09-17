@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { ClaudeProvider } from '../src/providers/claude/index.ts';
+import { ClaudeProvider, localReadingFrom } from '../src/providers/claude/index.ts';
 import { windowLabel } from '../src/providers/codex/index.ts';
 
 describe('how Codex windows are named', () => {
@@ -78,5 +78,50 @@ describe('waiting on the keychain', () => {
 		const { settleWithin } = await import('../src/providers/claude/keychain.ts');
 		const quick = Bun.spawn(['/usr/bin/true'], { stdout: 'ignore', stderr: 'ignore' });
 		expect(await settleWithin(quick, 2000, 'the keychain')).toBe(0);
+	});
+});
+
+describe("Claude Code's own cached reading", () => {
+	test('is read from its config file with the account it belongs to', () => {
+		const reading = localReadingFrom({
+			cachedUsageUtilization: {
+				fetchedAtMs: 1_789_603_209_730,
+				accountUuid: 'acc-1',
+				utilization: {
+					five_hour: { utilization: 99, resets_at: '2026-09-17T01:30:00.652046+00:00' },
+					seven_day: { utilization: 23, resets_at: '2026-09-22T05:00:00.652066+00:00' },
+					seven_day_opus: null,
+					nimbus_quill: { utilization: 0, resets_at: null },
+				},
+			},
+		});
+		expect(reading).toEqual({
+			accountId: 'acc-1',
+			fetchedAtMs: 1_789_603_209_730,
+			windows: [
+				{
+					key: 'five_hour',
+					label: '5h',
+					percent: 99,
+					resetsAt: '2026-09-17T01:30:00.652046+00:00',
+				},
+				{
+					key: 'seven_day',
+					label: 'week',
+					percent: 23,
+					resetsAt: '2026-09-22T05:00:00.652066+00:00',
+				},
+			],
+		});
+	});
+
+	test('is nothing when the file has no such entry, or a torn one', () => {
+		expect(localReadingFrom({})).toBeNull();
+		expect(localReadingFrom({ cachedUsageUtilization: { fetchedAtMs: 'x' } })).toBeNull();
+		expect(
+			localReadingFrom({
+				cachedUsageUtilization: { fetchedAtMs: 1, accountUuid: 'a', utilization: {} },
+			}),
+		).toBeNull();
 	});
 });

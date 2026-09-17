@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readJsonLoose, writeJsonAtomic } from '../../core/fs.ts';
-import type { SessionSupport } from '../../core/types.ts';
+import type { Identity, SessionSupport } from '../../core/types.ts';
 import {
 	deleteKeychain,
 	isolateAccountKeys,

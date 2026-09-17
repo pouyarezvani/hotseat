@@ -67,6 +67,13 @@ hotseat next claude         # the next one that still has room
 
 Clicking an account in the menu does the same thing.
 
+**A choice you make by hand is respected.** Whatever was already over its
+limit on the account you picked does not count as a reason to move you off it
+again: you saw it and chose it anyway. Everything else still does, so a limit
+that fills up after you switch will move you, and a login that stops working
+always will. The forgiveness lasts until that window resets or you switch
+again.
+
 **A Claude switch lands immediately**, including in a session that is already
 open, because Claude Code re-reads its credential as it works. **A Codex switch
 needs a restart**: a running Codex session is pinned to the account it started

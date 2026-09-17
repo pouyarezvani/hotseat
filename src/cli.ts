@@ -1,4 +1,9 @@
-import { loop as autoLoop, tick as autoTick, rememberManualSwitch } from './core/auto.ts';
+import {
+	loop as autoLoop,
+	tick as autoTick,
+	forgivenNames,
+	rememberManualSwitch,
+} from './core/auto.ts';
 import { collectState, PROVIDERS } from './core/collect.ts';
 import {
 	enroll,
@@ -18,7 +23,6 @@ import {
 	startMenuBar,
 	stopMenuBar,
 } from './core/menubar.ts';
-import { bindingRecoveryAt, headroom as policyHeadroom } from './core/policy.ts';
 import {
 	accountsFor,
 	findAccount,
@@ -105,7 +109,7 @@ async function seat(
 	const provider = PROVIDERS[providerId];
 	const settings = await loadSettings();
 	const before = await collectState();
-	const leaving = before.providers[providerId].accounts.find(
+	const _leaving = before.providers[providerId].accounts.find(
 		(account) => account.id === before.providers[providerId].activeAccountId,
 	);
 	const result = await activate(providerId, accountId);
@@ -126,19 +130,25 @@ async function seat(
 		to: result.to,
 		reason,
 	});
-	const leftHeadroom = leaving ? policyHeadroom(leaving, settings.autoModelLimits) : undefined;
-	await rememberManualSwitch({
+	const memory = await rememberManualSwitch({
 		provider: providerId,
+		state: before.providers[providerId],
 		...(result.fromId ? { fromId: result.fromId } : {}),
 		toId: result.toId,
-		...(leftHeadroom !== undefined ? { leftHeadroom } : {}),
-		...(leaving
-			? { leftRecoveryAt: bindingRecoveryAt(leaving, settings.autoModelLimits, now) }
-			: {}),
+		settings,
 		now,
 	});
+	const arriving = before.providers[providerId].accounts.find(
+		(account) => account.id === result.toId,
+	);
+	const forgiven = forgivenNames(memory, arriving);
 	await publishState();
 	success(`${provider.displayName} is now using ${result.to}`);
+	if (forgiven.length > 0) {
+		note(
+			`${forgiven.join(' and ')} ${forgiven.length === 1 ? 'is' : 'are'} already full here - hotseat will stay put rather than moving you back.`,
+		);
+	}
 	if (result.runningProcesses > 0) {
 		const count = result.runningProcesses;
 		const plural = count === 1 ? 'session' : 'sessions';

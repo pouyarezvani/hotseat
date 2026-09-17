@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { tick } from '../src/core/auto.ts';
+import { forgivenNames, rememberManualSwitch, tick } from '../src/core/auto.ts';
 import { collectState } from '../src/core/collect.ts';
 import { ServiceError } from '../src/core/errors.ts';
 import { readHistory } from '../src/core/history.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
 import { prepareSession, sessionDir } from '../src/core/session.ts';
+import { loadSettings, setSetting } from '../src/core/settings.ts';
 import { activate } from '../src/core/switch.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
 import { dropCredential, loadCredential, storeCredential } from '../src/core/vault.ts';
@@ -276,6 +277,63 @@ describe('when the first choice cannot be used', () => {
 			providers.claude.failures.set('C', new ServiceError('usage request failed with 401', 401));
 			const reports = await tick({ providers, now: T });
 			expect(reports[0]).toMatchObject({ outcome: 'switched', to: 'b@example.com' });
+		});
+	});
+});
+
+describe('a switch you made by hand', () => {
+	test('is not undone by the automatic pass that follows it', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			// b is out of room on a model limit you count, and you pick it anyway.
+			providers.claude.readings.set('B', () => ({
+				fetchedAt: new Date(T).toISOString(),
+				windows: [
+					{
+						key: 'five_hour',
+						label: '5h',
+						percent: 14,
+						resetsAt: new Date(T + 3_600_000).toISOString(),
+					},
+					{
+						key: 'seven_day',
+						label: 'week',
+						percent: 67,
+						resetsAt: new Date(T + 14 * 3_600_000).toISOString(),
+					},
+					{
+						key: 'weekly_scoped:fable',
+						label: 'Fable',
+						percent: 100,
+						resetsAt: new Date(T + 14 * 3_600_000).toISOString(),
+					},
+				],
+			}));
+			await setSetting('autoModelLimits', 'fable');
+			const settings = await loadSettings();
+			const state = await collectState({ providers, now: T });
+			const target = state.providers.claude.accounts.find((account) => account.id === b.id);
+
+			await activate('claude', b.id, { providers, now: T });
+			const memory = await rememberManualSwitch({
+				provider: 'claude',
+				state: state.providers.claude,
+				fromId: a.id,
+				toId: b.id,
+				settings,
+				now: T,
+			});
+			expect(memory.forgiven).toEqual([
+				{ key: 'weekly_scoped:fable', resetsAt: new Date(T + 14 * 3_600_000).toISOString() },
+			]);
+			expect(forgivenNames(memory, target)).toEqual(['Fable']);
+
+			const reports = await tick({ providers, now: T + 1000 });
+			// The full model limit is left out, so the weekly window is judged,
+			// and you stay where you put yourself.
+			expect(reports[0]?.outcome).toBe('holding');
+			expect(reports[0]?.detail).toBe('at 67%, below the 90% limit');
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('B');
 		});
 	});
 });

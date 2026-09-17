@@ -13,10 +13,11 @@ import {
 	rankCandidates,
 	type SwitchMemory,
 	type Trigger,
+	windowsOverThreshold,
 } from './policy.ts';
 import { loadSettings, type Settings } from './settings.ts';
 import { activate } from './switch.ts';
-import type { Provider, ProviderId, ProviderState } from './types.ts';
+import type { AccountState, Provider, ProviderId, ProviderState } from './types.ts';
 
 export type TickOutcome = 'switched' | 'holding' | 'blocked';
 
@@ -132,24 +133,42 @@ export function decide(
  */
 export async function rememberManualSwitch(input: {
 	provider: ProviderId;
+	/** The board as it was before the switch, which is what the choice was made on. */
+	state: ProviderState;
 	fromId?: string;
 	toId: string;
-	leftHeadroom?: number;
-	leftRecoveryAt?: number;
+	settings: Settings;
 	now?: number;
-}): Promise<void> {
+}): Promise<SwitchMemory> {
 	const now = input.now ?? Date.now();
-	await rememberFor(input.provider, {
+	const policy = policyOf(input.settings);
+	const leaving = input.state.accounts.find((account) => account.id === input.fromId);
+	const arriving = input.state.accounts.find((account) => account.id === input.toId);
+	const leftHeadroom = leaving ? headroom(leaving, policy.modelLimits) : undefined;
+	const leftRecovery = leaving ? bindingRecoveryAt(leaving, policy.modelLimits, now) : undefined;
+	// Whatever was already over its limit on the account chosen is not a
+	// reason to move off it again: it was on screen, and chosen anyway.
+	const forgiven = arriving ? windowsOverThreshold(arriving, policy) : [];
+	const memory: SwitchMemory = {
 		lastSwitchAt: now,
 		lastSwitchTo: input.toId,
 		...(input.fromId ? { lastSwitchFrom: input.fromId } : {}),
-		leftHeadroom: input.leftHeadroom ?? null,
+		leftHeadroom: leftHeadroom ?? null,
 		leftRecoveryAt:
-			input.leftRecoveryAt !== undefined && Number.isFinite(input.leftRecoveryAt)
-				? input.leftRecoveryAt
-				: null,
+			leftRecovery !== undefined && Number.isFinite(leftRecovery) ? leftRecovery : null,
 		leftTrigger: 'proactive',
-	});
+		...(forgiven.length > 0 ? { forgiven } : {}),
+	};
+	await rememberFor(input.provider, memory);
+	return memory;
+}
+
+/** The names of the limits forgiven by a memory, for telling the person. */
+export function forgivenNames(memory: SwitchMemory, account: AccountState | undefined): string[] {
+	const forgiven = memory.forgiven ?? [];
+	return (account?.usage?.windows ?? [])
+		.filter((window) => forgiven.some((entry) => entry.key === window.key))
+		.map((window) => window.label);
 }
 
 /** One pass over every enabled service. Returns what it did, for logging. */

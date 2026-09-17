@@ -13,6 +13,7 @@ import {
 	relevantWindows,
 	type SwitchMemory,
 	weeklyResetAt,
+	windowsOverThreshold,
 } from '../src/core/policy.ts';
 import type { AccountState, ProviderState, UsageWindow } from '../src/core/types.ts';
 
@@ -640,5 +641,102 @@ describe('where an escape lands', () => {
 			now: NOW,
 		});
 		expect(best?.id).toBe('fine');
+	});
+});
+
+describe('an account you picked by hand', () => {
+	const settings: PolicySettings = {
+		thresholdPercent: 90,
+		cooldownSeconds: 300,
+		modelLimits: ['fable'],
+		unhealthyTicks: 3,
+	};
+
+	const picked = account('picked', {
+		fiveHour: [14, 1],
+		weekly: [67, 14],
+		models: { fable: [100, 14] },
+	});
+	const chosen = (extra: Partial<SwitchMemory> = {}): SwitchMemory => ({
+		lastSwitchAt: NOW - 60_000,
+		lastSwitchTo: 'picked',
+		lastSwitchFrom: 'other',
+		leftTrigger: 'proactive',
+		forgiven: windowsOverThreshold(picked, settings),
+		...extra,
+	});
+
+	/** Long enough ago that the cooldown after a switch has passed. */
+	const settled = (): SwitchMemory => chosen({ lastSwitchAt: NOW - 10 * 60_000 });
+
+	test('a limit that was already full when you picked it does not move you off it', () => {
+		expect(windowsOverThreshold(picked, settings)).toEqual([
+			{ key: 'weekly_scoped:fable', resetsAt: inHours(14) },
+		]);
+		const verdict = decideTrigger(picked, settings, settled(), 0, NOW);
+		expect(verdict.trigger).toBeUndefined();
+		// Fable is left out, so the weekly window is what is judged.
+		expect(verdict.hold).toBe('at 67%, below the 90% limit');
+	});
+
+	test('an account whose every limit was already full is stayed on, and says why', () => {
+		const spent = account('picked', { weekly: [100, 14], models: { fable: [100, 14] } });
+		const memory = chosen({
+			lastSwitchAt: NOW - 10 * 60_000,
+			forgiven: windowsOverThreshold(spent, settings),
+		});
+		const verdict = decideTrigger(spent, settings, memory, 0, NOW);
+		expect(verdict.trigger).toBeUndefined();
+		expect(verdict.hold).toBe(
+			'staying on the account you chose; week and fable were already full when you chose it',
+		);
+	});
+
+	test('the choice is respected straight away, before any cooldown could lapse', () => {
+		expect(decideTrigger(picked, settings, chosen(), 0, NOW).trigger).toBeUndefined();
+	});
+
+	test('a different limit filling up afterwards still moves you', () => {
+		const later = account('picked', {
+			fiveHour: [96, 1],
+			weekly: [67, 14],
+			models: { fable: [100, 14] },
+		});
+		expect(decideTrigger(later, settings, settled(), 0, NOW).trigger).toBe('proactive');
+	});
+
+	test('the same window read again, with the clock a shade different, is still forgiven', () => {
+		// The service reports its reset time to the microsecond, and two reads
+		// of the same window do not agree to the last digit.
+		const jittered: AccountState = {
+			...picked,
+			usage: {
+				fetchedAt: inHours(0),
+				windows: (picked.usage?.windows ?? []).map((window) =>
+					window.key === 'weekly_scoped:fable'
+						? { ...window, resetsAt: new Date(Date.parse(inHours(14)) + 900).toISOString() }
+						: window,
+				),
+			},
+		};
+		expect(decideTrigger(jittered, settings, settled(), 0, NOW).trigger).toBeUndefined();
+	});
+
+	test('once that window resets, it counts again', () => {
+		const after = account('picked', {
+			fiveHour: [14, 1],
+			weekly: [67, 14],
+			models: { fable: [95, 200] },
+		});
+		expect(decideTrigger(after, settings, settled(), 0, NOW).trigger).toBe('proactive');
+	});
+
+	test('the forgiveness belongs to that account only', () => {
+		const somewhere = account('elsewhere', { weekly: [99, 14] }, 2);
+		expect(decideTrigger(somewhere, settings, settled(), 0, NOW).trigger).toBe('proactive');
+	});
+
+	test('a login that stops answering still moves you, chosen or not', () => {
+		expect(decideTrigger(picked, settings, settled(), 3, NOW).trigger).toBe('failover');
 	});
 });

@@ -27,6 +27,15 @@ export interface PolicySettings {
 	unhealthyTicks: number;
 }
 
+/**
+ * A window that was already full when an account was chosen by hand. Kept
+ * with its reset time, so the forgiveness lapses when the window rolls over.
+ */
+export interface ForgivenWindow {
+	key: string;
+	resetsAt?: string;
+}
+
 /** What the last switch left behind, so the next one cannot undo it blindly. */
 export interface SwitchMemory {
 	lastSwitchAt?: number;
@@ -35,6 +44,11 @@ export interface SwitchMemory {
 	leftHeadroom?: number | null;
 	leftRecoveryAt?: number | null;
 	leftTrigger?: Trigger;
+	/**
+	 * Limits that were already over when this account was chosen by hand. You
+	 * knew, and chose it anyway, so they are not a reason to move you off it.
+	 */
+	forgiven?: ForgivenWindow[];
 }
 
 /** Seconds an account's reset must beat another's by to count as sooner. */
@@ -95,18 +109,66 @@ export function windowThreshold(
 	return settings.thresholdPercent;
 }
 
-/** The counted window closest to, or furthest past, its own limit. */
+/**
+ * How far two reset times may differ and still be the same window. The
+ * service reports them to the microsecond and no two reads agree exactly,
+ * while a real reset moves the time by hours.
+ */
+const SAME_WINDOW_MS = 5 * 60_000;
+
+function sameReset(a: string | undefined, b: string | undefined): boolean {
+	if (a === undefined || b === undefined) return a === b;
+	const left = Date.parse(a);
+	const right = Date.parse(b);
+	if (!Number.isFinite(left) || !Number.isFinite(right)) return a === b;
+	return Math.abs(left - right) <= SAME_WINDOW_MS;
+}
+
+/** Whether this window, in the same period, was forgiven when the account was chosen. */
+function isForgiven(window: UsageWindow, forgiven: ForgivenWindow[] | undefined): boolean {
+	return (forgiven ?? []).some(
+		(entry) => entry.key === window.key && sameReset(entry.resetsAt, window.resetsAt),
+	);
+}
+
+/**
+ * The counted window closest to, or furthest past, its own limit. Windows
+ * forgiven when the account was chosen are left out, so a limit that was
+ * already full does not send you straight back where you came from.
+ */
 export function tightest(
 	account: AccountState,
 	settings: PolicySettings,
+	forgiven?: ForgivenWindow[],
 ): { window: UsageWindow; threshold: number } | undefined {
 	let best: { window: UsageWindow; threshold: number } | undefined;
 	for (const window of relevantWindows(account, settings.modelLimits)) {
+		if (isForgiven(window, forgiven)) continue;
 		const threshold = windowThreshold(window, settings);
 		if (!best || window.percent - threshold > best.window.percent - best.threshold)
 			best = { window, threshold };
 	}
 	return best;
+}
+
+/** Every counted window already at or over its own limit, to forgive later. */
+export function windowsOverThreshold(
+	account: AccountState,
+	settings: PolicySettings,
+): ForgivenWindow[] {
+	return relevantWindows(account, settings.modelLimits)
+		.filter((window) => window.percent >= windowThreshold(window, settings))
+		.map((window) => ({
+			key: window.key,
+			...(window.resetsAt ? { resetsAt: window.resetsAt } : {}),
+		}));
+}
+
+/** What those windows are called, for saying why hotseat is staying put. */
+function namesOf(account: AccountState, forgiven: ForgivenWindow[]): string[] {
+	return (account.usage?.windows ?? [])
+		.filter((window) => isForgiven(window, forgiven))
+		.map((window) => window.label);
 }
 
 /** Whether any counted window has reached its own limit. */
@@ -197,19 +259,39 @@ export function decideTrigger(
 	now: number,
 ): Verdict {
 	let trigger: Trigger;
-	const found = active ? tightest(active, settings) : undefined;
+	// Forgiveness belongs to the account it was granted for, and only while
+	// that account is still the one in use.
+	const forgiven =
+		active !== undefined && memory.lastSwitchTo === active.id ? memory.forgiven : undefined;
+	const found = active ? tightest(active, settings, forgiven) : undefined;
 	// A login that keeps being refused is treated as gone, whatever its last
 	// good numbers said: the numbers may be hours old and the token revoked.
 	if (unhealthyTicks >= settings.unhealthyTicks && settings.unhealthyTicks > 0) {
 		trigger = 'failover';
+	} else if (
+		active !== undefined &&
+		found === undefined &&
+		forgiven !== undefined &&
+		relevantWindows(active, settings.modelLimits).length > 0
+	) {
+		const names = namesOf(active, forgiven);
+		const which = names.length === 1 ? `${names[0]} was` : `${names.join(' and ')} were`;
+		return { hold: `staying on the account you chose; ${which} already full when you chose it` };
 	} else if (found) {
 		const used = found.window.percent;
 		if (used < found.threshold) {
 			// Floored, so a reading a hair under the limit never prints as at it.
 			return { hold: `at ${Math.floor(used)}%, below the ${found.threshold}% limit` };
 		}
-		trigger =
-			(headroom(active as AccountState, settings.modelLimits) ?? 1) <= 0 ? 'at-limit' : 'proactive';
+		// Out of room means out on the windows that still count: a limit you
+		// forgave when you chose this account is not what stops it working.
+		const counted = active
+			? relevantWindows(active, settings.modelLimits).filter(
+					(window) => !isForgiven(window, forgiven),
+				)
+			: [];
+		const room = counted.length > 0 ? 100 - Math.max(...counted.map((w) => w.percent)) : 1;
+		trigger = room <= 0 ? 'at-limit' : 'proactive';
 	} else {
 		return {
 			hold: `no reading on the account in use, ${unhealthyTicks + 1} of ${settings.unhealthyTicks} before failing over`,

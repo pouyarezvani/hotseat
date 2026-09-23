@@ -7,8 +7,19 @@ final class Runner {
 	private let executable: String
 	private let prefix: [String]
 
-	/// What the last failed command said, for showing to the user.
+	/// What the last failed command said, for showing to the user: its own last
+	/// line, not everything it printed. A sign-in, for one, prints the agent's
+	/// whole browser walkthrough before hotseat says anything.
 	private(set) var lastError = ""
+
+	/// Whether the last command was cut off for taking too long.
+	private(set) var timedOut = false
+
+	/// A runner for one particular program, which is how the checks exercise it.
+	init(executable: String) {
+		self.executable = executable
+		prefix = []
+	}
 
 	init() {
 		if let override = ProcessInfo.processInfo.environment["HOTSEAT_BIN"], !override.isEmpty {
@@ -69,20 +80,32 @@ final class Runner {
 		}
 		try? stdin.fileHandleForWriting.close()
 
-		let deadline = DispatchWorkItem { [weak process] in process?.terminate() }
-		DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
+		timedOut = false
+		let expired = DispatchWorkItem { [weak self, weak process] in
+			self?.timedOut = true
+			process?.terminate()
+		}
+		DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: expired)
 		// Drain both pipes before waiting, or a chatty command fills one and
 		// blocks forever on the write.
 		let stdout = out.fileHandleForReading.readDataToEndOfFile()
 		let stderr = err.fileHandleForReading.readDataToEndOfFile()
 		process.waitUntilExit()
-		deadline.cancel()
+		expired.cancel()
 		if process.terminationStatus != 0 {
-			let said = String(data: stderr, encoding: .utf8)?
-				.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-			lastError = said.isEmpty && process.terminationReason == .uncaughtSignal
-				? "hotseat did not answer in time"
-				: said
+			if timedOut {
+				let minutes = Int((timeout / 60).rounded())
+				lastError = minutes >= 1
+					? "It did not finish within \(minutes) minute\(minutes == 1 ? "" : "s"), so nothing changed."
+					: "It did not finish in time, so nothing changed."
+				return nil
+			}
+			let said = String(data: stderr, encoding: .utf8) ?? ""
+			let last = said.split(whereSeparator: \.isNewline)
+				.map { $0.trimmingCharacters(in: .whitespaces) }
+				.last { !$0.isEmpty } ?? ""
+			// The CLI marks its own failure with a cross; the mark is for a terminal.
+			lastError = last.hasPrefix("\u{2717}") ? String(last.dropFirst()).trimmingCharacters(in: .whitespaces) : last
 			return nil
 		}
 		return stdout

@@ -186,9 +186,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		}
 	}
 
-	private func report(failure arguments: [String], reason: String) {
+	private func report(failure arguments: [String], reason: String, title: String = "That did not work") {
 		let alert = NSAlert()
-		alert.messageText = "That did not work"
+		alert.messageText = title
 		alert.informativeText = reason.isEmpty ? "hotseat \(arguments.joined(separator: " ")) failed." : reason
 		alert.alertStyle = .warning
 		NSApp.activate()
@@ -797,7 +797,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			guard let self else { return }
 			let signer = Runner()
 			let ok = signer.run(["signin", parts[0], parts[1]], timeout: Runner.signInTimeout) != nil
-			let reason = signer.lastError
+			let reason = signer.timedOut
+				? "The sign-in was not finished in the browser within 5 minutes, so nothing changed. Try again, and finish signing in to \(email) in the browser window that opens."
+				: signer.lastError
 			DispatchQueue.main.async {
 				if ok {
 					let content = UNMutableNotificationContent()
@@ -806,7 +808,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 					UNUserNotificationCenter.current().add(
 						UNNotificationRequest(identifier: "hotseat.signin.\(Date().timeIntervalSince1970)", content: content, trigger: nil))
 				} else {
-					self.report(failure: ["signin", parts[0], parts[1]], reason: reason)
+					self.report(failure: ["signin", parts[0], parts[1]], reason: reason, title: "\(email) was not signed in")
 				}
 				self.refresh()
 			}

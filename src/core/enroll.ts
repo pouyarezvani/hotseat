@@ -61,6 +61,18 @@ export async function signInAgain(input: {
 			? (email: string) => loginClaudeIsolated(email)
 			: () => loginCodexIsolated());
 	const credential = await login(input.account.email);
+	// Signing in again to the account in use is how a failed login gets fixed,
+	// so the new login is put in use too; the agent would otherwise go on with
+	// the one that failed. It goes in before it is saved, so the saved copy
+	// and the installed one are the same the moment the board is published.
+	const provider = (input.providers ?? PROVIDERS)[input.providerId];
+	const who = await provider.identify(credential).catch(() => null);
+	const registry = await loadRegistry();
+	const inUse = registry.accounts.find((entry) => entry.id === registry.active[input.providerId]);
+	if (who && inUse && who.email.toLowerCase() === inUse.email.toLowerCase()) {
+		await provider.writeAgentCredential(credential);
+		await provider.recordIdentity?.(who).catch(() => undefined);
+	}
 	const saved = await enroll(input.providerId, credential, undefined, {
 		...(input.providers ? { providers: input.providers } : {}),
 		...(input.now !== undefined ? { now: input.now } : {}),

@@ -9,11 +9,11 @@ import {
 } from '../src/core/collect.ts';
 import { publishState } from '../src/core/enroll.ts';
 import { ServiceError } from '../src/core/errors.ts';
-import { updateRegistry, upsertAccount } from '../src/core/registry.ts';
+import { loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
 import { prepareSession, sessionDir } from '../src/core/session.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
 import { loadCredential, storeCredential } from '../src/core/vault.ts';
-import { cred, type FakeProvider, fakeProviders } from './fake-provider.ts';
+import { cred, type FakeProvider, fakeProviders, tokenOf } from './fake-provider.ts';
 import { withHome } from './helpers.ts';
 
 const T = Date.parse('2026-09-16T12:00:00Z');
@@ -510,6 +510,106 @@ describe('publishing the board after a change', () => {
 			const reads = providers.claude.calls.fetchUsage;
 			await publishState({ providers, now: T + 61_000, force: true });
 			expect(providers.claude.calls.fetchUsage).toBe(reads + 2);
+		});
+	});
+});
+
+describe('the saved copy of the account in use', () => {
+	test('is kept current as the agent rotates its token, so it never goes stale', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			await collectState({ providers, now: T });
+			// The agent refreshes its login, which replaces the refresh token.
+			providers.claude.installed = cred('A-rotated', 200);
+			providers.claude.identities.set('A-rotated', { email: 'a@example.com' });
+			providers.claude.readings.set('A-rotated', () => reading(55));
+			await collectState({ providers, now: T + ACTIVE_CALM_MS + 1 });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-rotated');
+		});
+	});
+
+	test('is not replaced by an installed login older than it', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			await storeCredential(a, cred('A-signed-in-again', 300));
+			providers.claude.installed = cred('A-old', 100);
+			providers.claude.identities.set('A-old', { email: 'a@example.com' });
+			providers.claude.readings.set('A-old', () => reading(55));
+			await collectState({ providers, now: T });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-signed-in-again');
+		});
+	});
+});
+
+describe('when the login in use cannot be confirmed', () => {
+	/** The agent rotated the login since hotseat saved it, and the service cannot be asked whose it is. */
+	async function unconfirmed(): Promise<Awaited<ReturnType<typeof world>>> {
+		const base = await world();
+		await updateRegistry((registry) => {
+			registry.active.claude = base.a.id;
+		});
+		await collectState({ providers: base.providers, now: T });
+		base.providers.claude.installed = cred('A-rotated', 200);
+		base.providers.claude.identifyFails = true;
+		// The saved copy's refresh token has been used up by the agent's rotation.
+		base.providers.claude.refreshFailures.set(
+			'A',
+			new ServiceError('token refresh failed with 400 invalid_grant', 400),
+		);
+		return base;
+	}
+
+	test('the account last put in use is not read or refreshed from its saved copy', async () => {
+		await withHome(async () => {
+			const { providers } = await unconfirmed();
+			await collectState({ providers, now: T + CANDIDATE_MS + 1 });
+			expect(providers.claude.refreshesOf.get('A') ?? 0).toBe(0);
+			expect(providers.claude.readsOf.get('A') ?? 0).toBe(1);
+		});
+	});
+
+	test('it stays shown in use with its last numbers, and nothing is marked as a dead login', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await unconfirmed();
+			const state = await collectState({ providers, now: T + CANDIDATE_MS + 1 });
+			expect(state.providers.claude.activeAccountId).toBe(a.id);
+			const usage = state.providers.claude.accounts.find((x) => x.id === a.id)?.usage;
+			expect(usage?.windows.map((w) => w.percent)).toEqual([50, 25]);
+			expect(usage?.errorKind).not.toBe('auth');
+			expect(usage?.failedReads).toBeUndefined();
+			expect(usage?.error).toBe('could not confirm which login is in use - trying again shortly');
+			// Every other account is read as usual.
+			const other = state.providers.claude.accounts.find((x) => x.id === b.id)?.usage;
+			expect(other?.error).toBeUndefined();
+		});
+	});
+
+	test('once it can be confirmed again, it is read with the installed login and its saved copy catches up', async () => {
+		await withHome(async () => {
+			const { providers, a } = await unconfirmed();
+			await collectState({ providers, now: T + CANDIDATE_MS + 1 });
+			providers.claude.identifyFails = false;
+			providers.claude.identities.set('A-rotated', { email: 'a@example.com' });
+			providers.claude.readings.set('A-rotated', () => reading(61));
+			const state = await collectState({ providers, now: T + 2 * CANDIDATE_MS + 2 });
+			const usage = state.providers.claude.accounts.find((x) => x.id === a.id)?.usage;
+			expect(usage?.windows[0]?.percent).toBe(61);
+			expect(usage?.error).toBeUndefined();
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-rotated');
+		});
+	});
+
+	test('an installed login matching any saved copy is recognised without asking, not only the last one put in use', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			await updateRegistry((registry) => {
+				registry.active.claude = b.id;
+			});
+			providers.claude.identifyFails = true;
+			const state = await collectState({ providers, now: T });
+			expect(state.providers.claude.activeAccountId).toBe(
+				(await loadRegistry()).accounts.find((x) => x.email === 'a@example.com')?.id,
+			);
 		});
 	});
 });

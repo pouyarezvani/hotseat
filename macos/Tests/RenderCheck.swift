@@ -257,4 +257,18 @@ check("a click on an account that is not there changes nothing", titleOf(boardFi
 let marked = TitleBuilder.spans(for: boardFixture("{}")).compactMap(\.provider)
 check("the service spans are marked, so the compact title can show their marks", marked == ["claude", "codex"])
 
+// MARK: - Commands that fail
+//
+// What a failed command says is what the person reads in the alert. A command
+// cut off for taking too long must say so, not replay whatever it printed.
+
+print("failing commands")
+let slow = Runner(executable: "/bin/sleep")
+check("a command that runs too long is cut off", slow.run(["5"], timeout: 0.5) == nil)
+check("and says it did not finish in time", slow.timedOut && slow.lastError.contains("did not finish"), slow.lastError)
+let noisy = Runner(executable: "/bin/sh")
+check("a command that fails is reported as failed", noisy.run(["-c", "echo 'Opening browser' >&2; echo 'step two' >&2; echo '\u{2717} the sign-in ended with status 1' >&2; exit 1"]) == nil)
+check("and what it says is its own last line, not everything it printed", noisy.lastError == "the sign-in ended with status 1", noisy.lastError)
+check("a failure that is not a timeout is not called one", !noisy.timedOut)
+
 exit(failures == 0 ? 0 : 1)

@@ -4,7 +4,7 @@ import { classify, ServiceError } from './errors.ts';
 import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
 import { hotseatHome, usageCachePath } from './paths.ts';
 import { accountsFor, loadRegistry } from './registry.ts';
-import { sessionLogin, sessionRunning } from './session.ts';
+import { adoptIfNewer, sessionLogin, sessionRunning } from './session.ts';
 import { loadSettings } from './settings.ts';
 import type {
 	AccountRecord,
@@ -167,16 +167,15 @@ export async function liveIdentity(
 	if (remembered && remembered.fingerprint === print) {
 		return { email: remembered.email, ...(remembered.plan ? { plan: remembered.plan } : {}) };
 	}
-	const lastInstalled = registry.accounts.find(
-		(account) => account.id === registry.active[provider.id],
-	);
-	if (!lastInstalled) return undefined;
-	const saved = await loadCredential(lastInstalled).catch(() => null);
-	if (!saved || fingerprint(saved) !== print) return undefined;
-	return {
-		email: lastInstalled.email,
-		...(lastInstalled.plan ? { plan: lastInstalled.plan } : {}),
-	};
+	// No answer from the service: the installed login is still known when it is
+	// exactly one of the saved copies, which hotseat keeps current below.
+	for (const account of accountsFor(registry, provider.id)) {
+		const saved = await loadCredential(account).catch(() => null);
+		if (saved && fingerprint(saved) === print) {
+			return { email: account.email, ...(account.plan ? { plan: account.plan } : {}) };
+		}
+	}
+	return undefined;
 }
 
 /** What one read attempt came back with, or why it did not. */
@@ -353,6 +352,11 @@ export async function collectState(
 			}
 		}
 		let live: { credential: Credential; email: string; accountId?: string } | null = null;
+		// A login is installed but nobody can say whose: the account hotseat last
+		// put in use almost certainly still holds it, so it is neither read nor
+		// refreshed from its saved copy, whose refresh token the agent may have
+		// already used up. It keeps its last numbers until it can be confirmed.
+		let unconfirmedId: string | undefined;
 		if (installed) {
 			const identity = await liveIdentity(provider, installed, registry, cache);
 			if (identity) {
@@ -361,6 +365,14 @@ export async function collectState(
 					email: identity.email,
 					...(identity.accountId ? { accountId: identity.accountId } : {}),
 				};
+				// The agent replaces its refresh token as it works. Keeping the saved
+				// copy current means it is never the stale one when it is needed.
+				const owner = records.find(
+					(record) => record.email.toLowerCase() === identity.email.toLowerCase(),
+				);
+				if (owner) await adoptIfNewer(provider, owner, installed).catch(() => false);
+			} else {
+				unconfirmedId = records.find((record) => record.id === registry.active[id])?.id;
 			}
 		}
 
@@ -381,6 +393,16 @@ export async function collectState(
 							previousPercent: cached?.previousPercent,
 							thresholdPercent: settings.autoThresholdPercent,
 						});
+				if (record.id === unconfirmedId) {
+					const snapshot: UsageSnapshot = {
+						...(good ? cached.snapshot : { fetchedAt, windows: [] }),
+						error: 'could not confirm which login is in use - trying again shortly',
+						errorKind: 'other',
+					};
+					delete snapshot.failedReads;
+					delete snapshot.retryAt;
+					return { ...shown(record), usage: snapshot };
+				}
 				if (cached && age < due) return { ...shown(record), usage: cached.snapshot };
 				const retryAt = cached?.snapshot.retryAt ? Date.parse(cached.snapshot.retryAt) : Number.NaN;
 				if (cached && Number.isFinite(retryAt) && retryAt > now)
@@ -461,7 +483,7 @@ export async function collectState(
 
 		const active = live
 			? accounts.find((account) => account.email.toLowerCase() === live?.email.toLowerCase())
-			: undefined;
+			: accounts.find((account) => account.id === unconfirmedId);
 		// The agent's own reading of the account in use, when it is newer than
 		// ours: what its banner shows, at no request. The model limits it does
 		// not report stay from the last full reading.

@@ -62,7 +62,7 @@ swiftc \
 tmp="$(mktemp -d)"
 cp "$here/Tests/RenderCheck.swift" "$tmp/main.swift"
 swiftc -target arm64-apple-macos14.0 -framework AppKit -o "$tmp/rendercheck" \
-	"$here/Sources/Model.swift" "$here/Sources/Logo.swift" "$here/Sources/AccountRowView.swift" "$tmp/main.swift"
+	"$here/Sources/Model.swift" "$here/Sources/Logo.swift" "$here/Sources/Runner.swift" "$here/Sources/AccountRowView.swift" "$tmp/main.swift"
 HOTSEAT_LOGOS="$here/Logos" "$tmp/rendercheck"
 rm -rf "$tmp"
 

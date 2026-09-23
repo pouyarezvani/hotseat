@@ -126,6 +126,45 @@ describe('signing in to an account again', () => {
 	});
 });
 
+describe('signing in again to the account in use', () => {
+	test('puts the new login in use too, so the agent stops using the one that failed', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			await updateRegistry((registry) => {
+				registry.active.claude = a.id;
+			});
+			providers.claude.identities.set('A-new', { email: 'a@example.com' });
+			providers.claude.readings.set('A-new', () => reading(10));
+			const result = await signInAgain({
+				providerId: 'claude',
+				account: a,
+				providers,
+				now: T,
+				login: async () => cred('A-new'),
+			});
+			expect(result.matched).toBe(true);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A-new');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-new');
+		});
+	});
+
+	test('leaves the login in use alone when signing in again to a different account', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.identities.set('B-new', { email: 'b@example.com' });
+			providers.claude.readings.set('B-new', () => reading(10));
+			await signInAgain({
+				providerId: 'claude',
+				account: b,
+				providers,
+				now: T,
+				login: async () => cred('B-new'),
+			});
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+});
+
 describe('the Claude sign-in command', () => {
 	test('asks for a subscription sign-in with the address filled in', () => {
 		expect(loginArgs('b@example.com')).toEqual([

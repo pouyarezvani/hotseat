@@ -13,6 +13,9 @@ import {
 import { keychainServiceFor } from './login.ts';
 import { claudeSessions } from './sessions.ts';
 
+/** Two copies whose sign-ins end this close together come from the same sign-in. */
+const SAME_SIGN_IN_MS = 60_000;
+
 /** Claude Code's everyday folder, never the one a session is running in. */
 export function claudeHome(): string {
 	return join(homedir(), '.claude');
@@ -96,12 +99,21 @@ export const claudeSession: SessionSupport = {
 		const found = await readKeychain(keychainServiceFor(dir)).catch(() => null);
 		return found ? isolateAccountKeys(found) : null;
 	},
-	issuedAt(credential) {
-		// The sign-in's own expiry marks its generation; the access token's
-		// expiry only says which copy was refreshed last, which an old sign-in
-		// can win while a newer one sits saved.
-		const oauth = oauthOf(credential);
-		return oauth?.refreshTokenExpiresAt ?? oauth?.expiresAt ?? 0;
+	compareAge(a, b) {
+		// A sign-in's end marks its generation, so a later sign-in wins even over
+		// an older one renewed since. Within one sign-in that end drifts by a
+		// second or so on every renewal, so there the copy renewed last wins.
+		const first = oauthOf(a);
+		const second = oauthOf(b);
+		const ends = [first?.refreshTokenExpiresAt, second?.refreshTokenExpiresAt];
+		if (
+			ends[0] !== undefined &&
+			ends[1] !== undefined &&
+			Math.abs(ends[0] - ends[1]) > SAME_SIGN_IN_MS
+		) {
+			return ends[0] - ends[1];
+		}
+		return (first?.expiresAt ?? 0) - (second?.expiresAt ?? 0);
 	},
 	seed(dir) {
 		return seedClaudeConfig(dir, claudeConfigPath());

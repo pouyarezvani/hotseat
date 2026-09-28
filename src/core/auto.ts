@@ -15,9 +15,11 @@ import {
 	type Trigger,
 	windowsOverThreshold,
 } from './policy.ts';
+import { accountsFor, loadRegistry } from './registry.ts';
 import { loadSettings, type Settings } from './settings.ts';
 import { activate } from './switch.ts';
 import type { AccountState, Provider, ProviderId, ProviderState } from './types.ts';
+import { fullyAwake } from './wake.ts';
 
 export type TickOutcome = 'switched' | 'holding' | 'blocked';
 
@@ -173,11 +175,30 @@ export function forgivenNames(memory: SwitchMemory, account: AccountState | unde
 
 /** One pass over every enabled service. Returns what it did, for logging. */
 export async function tick(
-	options: { providers?: Record<ProviderId, Provider>; now?: number } = {},
+	options: {
+		providers?: Record<ProviderId, Provider>;
+		now?: number;
+		awake?: () => Promise<boolean>;
+	} = {},
 ): Promise<TickReport[]> {
 	const settings = await loadSettings();
 	const policy = policyOf(settings);
 	const reports: TickReport[] = [];
+	// A pass while the lid is closed reads nothing and moves nothing: the Mac
+	// may sleep again mid-request, and nobody is using an agent anyway.
+	if (!(await (options.awake ?? fullyAwake)())) {
+		const registry = await loadRegistry();
+		return (Object.keys(PROVIDERS) as ProviderId[])
+			.filter(
+				(provider) =>
+					settings.autoProviders.includes(provider) && accountsFor(registry, provider).length >= 2,
+			)
+			.map((provider) => ({
+				provider,
+				outcome: 'holding',
+				detail: 'the Mac is asleep - waiting until it wakes',
+			}));
+	}
 	const state = await collectState(options);
 	const auto = await loadAutoState();
 	const now = options.now ?? Date.now();

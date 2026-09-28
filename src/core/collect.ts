@@ -4,6 +4,7 @@ import { classify, ServiceError } from './errors.ts';
 import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
 import { hotseatHome, usageCachePath } from './paths.ts';
 import { accountsFor, loadRegistry } from './registry.ts';
+import { RenewalFailed, renewInstalled, renewSaved } from './renew.ts';
 import { adoptIfNewer, sessionLogin, sessionRunning } from './session.ts';
 import { loadSettings } from './settings.ts';
 import type {
@@ -19,6 +20,7 @@ import type {
 	UsageSnapshot,
 } from './types.ts';
 import { loadCredential, storeCredential } from './vault.ts';
+import { fullyAwake } from './wake.ts';
 
 export const PROVIDERS: Record<ProviderId, Provider> = {
 	claude: new ClaudeProvider(),
@@ -78,6 +80,9 @@ interface CacheEntry {
 
 /** How long to wait after being told to slow down, when the service does not say. */
 export const THROTTLE_BACKOFF_MS = 10 * 60_000;
+
+/** Shown on a login due for renewal while the Mac is only half awake. */
+const WAITING_FOR_WAKE = 'waiting for the Mac to wake before renewing this login';
 
 interface LiveIdentity {
 	fingerprint: string;
@@ -194,9 +199,11 @@ async function readUsage(
 	provider: Provider,
 	account: AccountRecord,
 	live: { credential: Credential; email: string } | null,
-	fetchedAt: string,
+	now: number,
 	deadLogin: string | undefined,
+	awake: () => Promise<boolean>,
 ): Promise<Attempt> {
+	const fetchedAt = new Date(now).toISOString();
 	const failed = (error: unknown, deadLoginNow?: string): Attempt => ({
 		usage: { fetchedAt, windows: [], error: plainError(error) },
 		failure: {
@@ -232,20 +239,27 @@ async function readUsage(
 				failure: { kind: 'auth', deadLogin },
 			};
 		}
-		let refreshed: Credential;
+		if (!(await awake())) {
+			// A login still valid is read as it is; one due for renewal waits for
+			// the Mac to wake fully, where the new token cannot be lost.
+			const expires = provider.expiresAt?.(stored);
+			if (expires !== undefined && expires <= now) return failed(new Error(WAITING_FOR_WAKE));
+			return { usage: await provider.fetchUsage(stored) };
+		}
+		let renewed: Credential | null;
 		try {
-			refreshed = await provider.refreshIfNeeded(stored);
+			renewed = await renewSaved(provider, account);
 		} catch (error) {
-			if (classify(error) === 'auth') {
+			if (error instanceof RenewalFailed && classify(error) === 'auth') {
 				return failed(
 					new ServiceError('the saved login no longer works - sign in to it again', 401),
-					fingerprint(stored),
+					fingerprint(error.login),
 				);
 			}
 			return failed(error);
 		}
-		if (refreshed !== stored) await storeCredential(account, refreshed);
-		return { usage: await provider.fetchUsage(refreshed) };
+		if (!renewed) return { usage: { fetchedAt, windows: [], error: 'no saved login' } };
+		return { usage: await provider.fetchUsage(renewed) };
 	} catch (error) {
 		return failed(error);
 	}
@@ -311,7 +325,12 @@ function expired(snapshot: UsageSnapshot, now: number): boolean {
  * many accounts you have.
  */
 export async function collectState(
-	options: { force?: boolean; providers?: Record<ProviderId, Provider>; now?: number } = {},
+	options: {
+		force?: boolean;
+		providers?: Record<ProviderId, Provider>;
+		now?: number;
+		awake?: () => Promise<boolean>;
+	} = {},
 ): Promise<State> {
 	const settings = await loadSettings();
 	const registry = await loadRegistry();
@@ -322,32 +341,42 @@ export async function collectState(
 	const providers = {} as Record<ProviderId, ProviderState>;
 
 	const touched = new Set<string>();
+	let awakeNow: Promise<boolean> | undefined;
+	const awake = (): Promise<boolean> => {
+		awakeNow ??= (options.awake ?? fullyAwake)();
+		return awakeNow;
+	};
 
 	for (const id of Object.keys(providerSet) as ProviderId[]) {
 		const provider = providerSet[id];
 		const records = accountsFor(registry, id);
 		let installed = await provider.readAgentCredential().catch(() => null);
-		let liveWaitsForAgent = false;
+		let liveAwaitsRenewal: string | undefined;
 		if (installed) {
 			// On an idle machine nobody refreshes the installed login, so it
-			// expires and reads as refused. With no agent running, hotseat
-			// refreshes it; with one running, that agent will on its next turn.
-			const expires = provider.expiresAt?.(installed);
-			if (expires !== undefined && expires <= now) {
+			// expires and reads as refused. With an agent running, that agent
+			// renews it on its next turn; otherwise hotseat does, once the Mac
+			// is fully awake.
+			const expired = (credential: Credential): boolean => {
+				const expires = provider.expiresAt?.(credential);
+				return expires !== undefined && expires <= now;
+			};
+			if (expired(installed)) {
 				const running = await provider.runningProcesses().catch(() => []);
-				if (running.length === 0) {
-					const refreshed = await provider.refreshIfNeeded(installed).catch(() => null);
-					if (refreshed && refreshed !== installed) {
-						await provider.writeAgentCredential(refreshed).catch(() => undefined);
-						installed = refreshed;
-						const who = await provider.identify(refreshed).catch(() => undefined);
+				if (running.length > 0) {
+					liveAwaitsRenewal =
+						'the login in use has expired; the running agent will refresh it on its next turn';
+				} else if (!(await awake())) {
+					liveAwaitsRenewal = WAITING_FOR_WAKE;
+				} else {
+					const renewed = await renewInstalled(provider, expired, async (next) => {
+						const who = await provider.identify(next).catch(() => undefined);
 						const owner = who
 							? records.find((record) => record.email.toLowerCase() === who.email.toLowerCase())
 							: undefined;
-						if (owner) await storeCredential(owner, refreshed);
-					}
-				} else {
-					liveWaitsForAgent = true;
+						if (owner) await storeCredential(owner, next);
+					}).catch(() => null);
+					if (renewed) installed = renewed;
 				}
 			}
 		}
@@ -408,13 +437,12 @@ export async function collectState(
 				if (cached && Number.isFinite(retryAt) && retryAt > now)
 					return { ...shown(record), usage: cached.snapshot };
 
-				if (isActive && liveWaitsForAgent) {
-					// Nothing to read with: the token has expired and its owner
-					// is about to renew it. Neither a failure nor a reason to move.
+				if (isActive && liveAwaitsRenewal) {
+					// Nothing to read with: the token has expired and will be
+					// renewed soon. Neither a failure nor a reason to move.
 					const snapshot: UsageSnapshot = {
 						...(good ? cached.snapshot : { fetchedAt, windows: [] }),
-						error:
-							'the login in use has expired; the running agent will refresh it on its next turn',
+						error: liveAwaitsRenewal,
 						errorKind: 'other',
 					};
 					cache.entries[record.id] = {
@@ -429,7 +457,7 @@ export async function collectState(
 					return { ...shown(record), usage: snapshot };
 				}
 
-				const attempt = await readUsage(provider, record, live, fetchedAt, cached?.deadLogin);
+				const attempt = await readUsage(provider, record, live, now, cached?.deadLogin, awake);
 				touched.add(record.id);
 				const usage = attempt.usage;
 				if (usage.windows.length > 0 && !attempt.failure) {

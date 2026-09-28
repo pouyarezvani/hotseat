@@ -11,6 +11,8 @@ struct UsageSnapshot: Decodable {
 	let fetchedAt: String
 	let windows: [UsageWindow]
 	let error: String?
+	/// "auth" when the service refused the login, which no switch can use.
+	var errorKind: String? = nil
 }
 
 struct Account: Decodable {

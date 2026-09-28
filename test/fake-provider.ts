@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { ServiceError } from '../src/core/errors.ts';
 import type {
 	Credential,
 	Identity,
@@ -13,6 +14,10 @@ import type {
 /** A credential is just a token here, plus when it was issued and when it expires when that matters. */
 export function cred(token: string, issued = 0, expires = 0): Credential {
 	return { token, ...(issued > 0 ? { issued } : {}), ...(expires > 0 ? { expires } : {}) };
+}
+
+function issuedOf(credential: Credential): number {
+	return typeof credential.issued === 'number' ? credential.issued : 0;
 }
 
 export function tokenOf(credential: Credential): string {
@@ -37,6 +42,13 @@ export class FakeProvider implements Provider {
 	identifyFails = false;
 	/** When set, every refresh rotates the token by appending this. */
 	rotate = '';
+	/**
+	 * Like the real services: once a refresh rotates a token, the old one is
+	 * refused, so presenting it again fails exactly as a spent token would.
+	 */
+	spends = false;
+	/** How long the service takes to answer a refresh, so two can overlap. */
+	refreshDelayMs = 0;
 	running: RunningProcess[] = [];
 	/** Where the fake agent keeps its everyday setup; a test points this somewhere. */
 	home = '';
@@ -65,7 +77,7 @@ export class FakeProvider implements Provider {
 				const file = Bun.file(join(dir, 'login.json'));
 				return (await file.exists()) ? ((await file.json()) as Credential) : null;
 			},
-			issuedAt: (credential) => (typeof credential.issued === 'number' ? credential.issued : 0),
+			compareAge: (a, b) => issuedOf(a) - issuedOf(b),
 			seed: async (dir) => {
 				this.seeded.push(dir);
 			},
@@ -121,10 +133,17 @@ export class FakeProvider implements Provider {
 	async refreshIfNeeded(credential: Credential): Promise<Credential> {
 		this.calls.refresh += 1;
 		this.refreshesOf.set(tokenOf(credential), (this.refreshesOf.get(tokenOf(credential)) ?? 0) + 1);
+		if (this.refreshDelayMs > 0) await Bun.sleep(this.refreshDelayMs);
 		const failure = this.refreshFailures.get(tokenOf(credential));
 		if (failure) throw failure;
 		if (!this.rotate) return credential;
 		const next = cred(tokenOf(credential) + this.rotate, 0, 0);
+		if (this.spends) {
+			this.refreshFailures.set(
+				tokenOf(credential),
+				new ServiceError('token refresh failed with 400: invalid_grant', 400),
+			);
+		}
 		this.identities.set(tokenOf(next), this.identities.get(tokenOf(credential)) ?? { email: '?' });
 		const reading = this.readings.get(tokenOf(credential));
 		if (reading) this.readings.set(tokenOf(next), reading);

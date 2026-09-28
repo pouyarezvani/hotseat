@@ -1,6 +1,7 @@
 import { liveIdentity, PROVIDERS } from './collect.ts';
 import { MIN_USABLE_HEADROOM, headroom as policyHeadroom, rankCandidates } from './policy.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
+import { renewSaved } from './renew.ts';
 import { adoptIfNewer, freshestLogin, sessionRunning } from './session.ts';
 import type { AccountRecord, AccountState, Provider, ProviderId, ProviderState } from './types.ts';
 import { storeCredential } from './vault.ts';
@@ -156,8 +157,7 @@ export async function activate(
 		);
 	}
 
-	const refreshed = await provider.refreshIfNeeded(stored);
-	if (refreshed !== stored) await storeCredential(target, refreshed);
+	const refreshed = (await renewSaved(provider, target)) ?? stored;
 
 	// Save the outgoing login before overwriting it, so a token the agent
 	// refreshed while that account was in use is not lost. Never over a

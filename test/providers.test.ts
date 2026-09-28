@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { ClaudeProvider, localReadingFrom } from '../src/providers/claude/index.ts';
+import { claudeSession } from '../src/providers/claude/session.ts';
 import { windowLabel } from '../src/providers/codex/index.ts';
 
 describe('how Codex windows are named', () => {
@@ -123,5 +124,32 @@ describe("Claude Code's own cached reading", () => {
 				cachedUsageUtilization: { fetchedAtMs: 1, accountUuid: 'a', utilization: {} },
 			}),
 		).toBeNull();
+	});
+});
+
+describe('telling which copy of a Claude login is newer', () => {
+	const DAY = 86_400_000;
+	const at = Date.parse('2026-09-28T09:00:00Z');
+	function login(expiresAt: number, refreshTokenExpiresAt: number): Record<string, unknown> {
+		return {
+			claudeAiOauth: { accessToken: 'a', refreshToken: 'r', expiresAt, refreshTokenExpiresAt },
+		};
+	}
+
+	test("the copy Claude Code renewed last is newer, though its sign-in's end moved a second earlier", () => {
+		const saved = login(at - 2 * DAY, at + 23 * DAY + 1000);
+		const renewedByAgent = login(at + 8 * 3_600_000, at + 23 * DAY);
+		expect(claudeSession.compareAge(renewedByAgent, saved)).toBeGreaterThan(0);
+		expect(claudeSession.compareAge(saved, renewedByAgent)).toBeLessThan(0);
+	});
+
+	test('a later sign-in is newer than an older one renewed more recently', () => {
+		const olderSignInRenewed = login(at + 8 * 3_600_000, at + 10 * DAY);
+		const laterSignIn = login(at + 3_600_000, at + 30 * DAY);
+		expect(claudeSession.compareAge(laterSignIn, olderSignInRenewed)).toBeGreaterThan(0);
+	});
+
+	test('the same copy is the same age', () => {
+		expect(claudeSession.compareAge(login(at, at + DAY), login(at, at + DAY))).toBe(0);
 	});
 });

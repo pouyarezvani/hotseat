@@ -1,4 +1,4 @@
-import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -65,50 +65,78 @@ export async function acquireLock(dir: string, timeoutMs = 10_000, name = 'lock'
 	const path = join(dir, name);
 	const deadline = Date.now() + timeoutMs;
 	const own = `${process.pid} ${await startedAt(process.pid)}`;
-	for (;;) {
-		try {
-			const handle = await open(path, 'wx', 0o600);
-			await handle.writeFile(own);
-			await handle.close();
-			return {
-				release: async () => {
-					// Only ever remove a lock this process wrote.
-					const holder = await Bun.file(path)
-						.text()
-						.catch(() => '');
-					if (holder === own) await rm(path, { force: true });
-				},
-			};
-		} catch (error) {
-			if (!isEexist(error)) throw error;
-			if (await staleLock(path)) {
-				await rm(path, { force: true });
-				continue;
+	// The lock appears already naming its holder: written aside, then linked
+	// into place, which fails if the lock exists. Created empty and filled
+	// after, a lock is briefly nameless, and another caller reading it then
+	// takes it for abandoned and holds it too.
+	const draft = `${path}.${process.pid}.${crypto.randomUUID()}`;
+	await writeFile(draft, own, { mode: 0o600 });
+	try {
+		for (;;) {
+			try {
+				await link(draft, path);
+				return {
+					release: async () => {
+						// Only ever remove a lock this process wrote.
+						const holder = await Bun.file(path)
+							.text()
+							.catch(() => '');
+						if (holder === own) await rm(path, { force: true });
+					},
+				};
+			} catch (error) {
+				if (!isEexist(error)) throw error;
+				const stale = await staleLock(path);
+				if (stale !== null) {
+					await removeIfUnchanged(path, stale);
+					continue;
+				}
+				if (Date.now() > deadline) throw new Error(`timed out waiting for lock at ${path}`);
+				await Bun.sleep(25);
 			}
-			if (Date.now() > deadline) throw new Error(`timed out waiting for lock at ${path}`);
-			await Bun.sleep(50);
 		}
+	} finally {
+		await rm(draft, { force: true });
 	}
+}
+
+/**
+ * Removes an abandoned lock, unless someone replaced it since it was judged
+ * abandoned: that lock is live, so it goes back where it was.
+ */
+async function removeIfUnchanged(path: string, seen: string): Promise<void> {
+	const aside = `${path}.stale.${process.pid}.${crypto.randomUUID()}`;
+	try {
+		await rename(path, aside);
+	} catch {
+		return;
+	}
+	const moved = await Bun.file(aside)
+		.text()
+		.catch(() => seen);
+	if (moved !== seen) await link(aside, path).catch(() => undefined);
+	await rm(aside, { force: true });
 }
 
 function isEexist(error: unknown): boolean {
 	return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST';
 }
 
-async function staleLock(path: string): Promise<boolean> {
+async function staleLock(path: string): Promise<string | null> {
 	const text = await Bun.file(path)
 		.text()
-		.catch(() => '');
+		.catch(() => null);
+	if (text === null) return null;
 	const [pidText, ...rest] = text.trim().split(' ');
 	const pid = Number.parseInt(pidText ?? '', 10);
-	if (!Number.isFinite(pid) || pid <= 0) return true;
+	if (!Number.isFinite(pid) || pid <= 0) return text;
 	try {
 		process.kill(pid, 0);
 	} catch (error) {
 		// Not ours to signal, but alive all the same.
-		if ((error as { code?: string }).code !== 'EPERM') return true;
+		if ((error as { code?: string }).code !== 'EPERM') return text;
 	}
 	const started = rest.join(' ');
-	if (started.length === 0) return false;
-	return (await startedAt(pid)) !== started;
+	if (started.length === 0) return null;
+	return (await startedAt(pid)) !== started ? text : null;
 }

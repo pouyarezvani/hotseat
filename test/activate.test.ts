@@ -337,3 +337,23 @@ describe('a switch you made by hand', () => {
 		});
 	});
 });
+
+describe('switching while the Mac sleeps', () => {
+	test('a pass while the Mac is only half awake reads nothing and switches nothing', async () => {
+		await withHome(async () => {
+			const { providers } = await world();
+			providers.claude.readings.set('A', () => reading(95));
+			const reports = await tick({ providers, now: T, awake: async () => false });
+			expect(reports).toEqual([
+				expect.objectContaining({
+					provider: 'claude',
+					outcome: 'holding',
+					detail: 'the Mac is asleep - waiting until it wakes',
+				}),
+			]);
+			expect(providers.claude.calls.fetchUsage).toBe(0);
+			expect(providers.claude.calls.refresh).toBe(0);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+});

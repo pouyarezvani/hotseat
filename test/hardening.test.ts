@@ -58,6 +58,26 @@ describe('the lock', () => {
 	});
 });
 
+describe('the lock under contention', () => {
+	test('is held by one caller at a time, however many ask at once', async () => {
+		await withHome(async (home) => {
+			let inside = 0;
+			let most = 0;
+			await Promise.all(
+				Array.from({ length: 12 }, async () => {
+					const lock = await acquireLock(home, 20_000, 'contended.lock');
+					inside += 1;
+					most = Math.max(most, inside);
+					await Bun.sleep(5);
+					inside -= 1;
+					await lock.release();
+				}),
+			);
+			expect(most).toBe(1);
+		});
+	});
+});
+
 describe('naming and adding accounts', () => {
 	test('a numeric or duplicate name is refused', async () => {
 		await withHome(async () => {

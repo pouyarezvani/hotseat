@@ -111,6 +111,19 @@ describe('renderBoard', () => {
 		expect(stripAnsi(renderBoard(state, options))).toContain('nothing to switch to');
 	});
 
+	test('does not count an account whose saved login the service refused', () => {
+		const state = fixture();
+		const spare = state.providers.claude.accounts[1];
+		if (!spare) throw new Error('fixture missing account');
+		spare.usage = {
+			fetchedAt: '2026-09-16T12:00:00Z',
+			windows: [{ key: 'five_hour', label: '5h', percent: 0 }],
+			error: 'the saved login no longer works - sign in to it again',
+			errorKind: 'auth',
+		};
+		expect(stripAnsi(renderBoard(state, options))).toContain('nothing to switch to');
+	});
+
 	test('does not count a disabled account', () => {
 		const state = fixture();
 		const spare = state.providers.claude.accounts[1];

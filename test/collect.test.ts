@@ -613,3 +613,76 @@ describe('when the login in use cannot be confirmed', () => {
 		});
 	});
 });
+
+describe('renewing a saved login', () => {
+	const halfAwake = async (): Promise<boolean> => false;
+
+	test('never starts while the Mac is only half awake, where its answer could be lost', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			await storeCredential(b, cred('B', 0, T - MIN));
+			providers.claude.rotate = '+';
+			const state = await collectState({ providers, now: T, awake: halfAwake });
+			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+			expect(providers.claude.refreshesOf.get('B')).toBeUndefined();
+			expect(usage?.errorKind).not.toBe('auth');
+			expect(usage?.failedReads).toBeUndefined();
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('B');
+		});
+	});
+
+	test('a login still valid is read while the Mac is half awake, without renewing it', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			await storeCredential(b, cred('B', 0, T + 60 * MIN));
+			providers.claude.rotate = '+';
+			const state = await collectState({ providers, now: T, awake: halfAwake });
+			const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+			expect(providers.claude.refreshesOf.get('B')).toBeUndefined();
+			expect(providers.claude.readsOf.get('B')).toBe(1);
+			expect(usage?.windows[0]?.percent).toBe(10);
+		});
+	});
+
+	test('resumes once the Mac is fully awake', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			await storeCredential(b, cred('B', 0, T - MIN));
+			providers.claude.rotate = '+';
+			await collectState({ providers, now: T, awake: halfAwake });
+			await collectState({ providers, now: T + CANDIDATE_MS + 1, awake: async () => true });
+			expect(providers.claude.refreshesOf.get('B')).toBe(1);
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('B+');
+		});
+	});
+
+	test('is done by one process at a time, so none presents a token another already spent', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.rotate = '+';
+			providers.claude.spends = true;
+			providers.claude.refreshDelayMs = 60;
+			const states = await Promise.all([
+				collectState({ force: true, providers, now: T }),
+				collectState({ force: true, providers, now: T }),
+			]);
+			expect(providers.claude.refreshesOf.get('B')).toBe(1);
+			for (const state of states) {
+				const usage = state.providers.claude.accounts.find((account) => account.id === b.id)?.usage;
+				expect(usage?.errorKind).not.toBe('auth');
+			}
+			expect(tokenOf((await loadCredential(b)) ?? {})).toStartWith('B+');
+		});
+	});
+
+	test('the login in use is not renewed by hotseat while the Mac is half awake', async () => {
+		await withHome(async () => {
+			const { providers } = await world();
+			providers.claude.installed = cred('A', 0, T - MIN);
+			providers.claude.rotate = '+';
+			await collectState({ providers, now: T, awake: halfAwake });
+			expect(providers.claude.refreshesOf.get('A')).toBeUndefined();
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+});

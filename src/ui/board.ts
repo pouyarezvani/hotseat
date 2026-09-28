@@ -56,6 +56,7 @@ export function renderBoard(state: State, options: BoardOptions): string {
 			(account) =>
 				!account.disabled &&
 				account.id !== providerState.activeAccountId &&
+				account.usage?.errorKind !== 'auth' &&
 				headroom(account, options.modelLimits ?? []) >= MIN_USABLE_HEADROOM,
 		).length;
 		const lines = [

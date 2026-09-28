@@ -35,8 +35,7 @@ export async function adoptIfNewer(
 	candidate: Credential,
 ): Promise<boolean> {
 	const saved = await loadCredential(account);
-	if (saved && provider.session.issuedAt(candidate) < provider.session.issuedAt(saved))
-		return false;
+	if (saved && provider.session.compareAge(candidate, saved) < 0) return false;
 	if (saved && JSON.stringify(saved) === JSON.stringify(candidate)) return false;
 	await storeCredential(account, candidate);
 	return true;
@@ -74,8 +73,7 @@ export async function freshestLogin(
 	const saved = await loadCredential(account);
 	const inSession = await sessionLogin(provider, account);
 	if (!inSession) return saved;
-	if (saved && provider.session.issuedAt(inSession) <= provider.session.issuedAt(saved))
-		return saved;
+	if (saved && provider.session.compareAge(inSession, saved) <= 0) return saved;
 	const who = await provider.identify(inSession).catch(() => undefined);
 	if (who?.email.toLowerCase() !== account.email.toLowerCase()) return saved;
 	await storeCredential(account, inSession);

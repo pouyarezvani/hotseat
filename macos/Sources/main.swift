@@ -26,6 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	private var board: Board?
 	private var timer: Timer?
 	private var isBusy = false
+	/// Between the Mac going to sleep and waking fully. The brief wakes a
+	/// closed lid makes in between are not full wakes, and a pass there could
+	/// renew a login and fall asleep before the new token comes back.
+	private var isAsleep = false
 	/// An action asked for while a refresh was in flight. It runs when the
 	/// refresh finishes, rather than being dropped on the floor.
 	private var queued: [[String]] = []
@@ -45,8 +49,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		menu.autoenablesItems = false
 		statusItem.menu = menu
 		UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+		let workspace = NSWorkspace.shared.notificationCenter
+		workspace.addObserver(
+			self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
+		workspace.addObserver(
+			self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
 		refresh()
 		watchState()
+	}
+
+	@objc private func willSleep() {
+		isAsleep = true
+		timer?.invalidate()
+		timer = nil
+	}
+
+	@objc private func didWake() {
+		isAsleep = false
+		refresh()
 	}
 
 	/// Watches the folder hotseat writes to, so a change made anywhere, such as
@@ -109,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	/// Each refresh is also a switching pass. The app is what keeps the accounts
 	/// rotating, so a user who has it running needs nothing else.
 	@objc private func refresh() {
-		guard !isBusy else { return }
+		guard !isBusy, !isAsleep else { return }
 		isBusy = true
 		DispatchQueue.global(qos: .utility).async { [weak self] in
 			guard let self else { return }
@@ -325,6 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		let models = board?.settings.autoModelLimits ?? []
 		let spare = state.accounts.filter { account in
 			guard !account.disabled, account.id != state.activeAccountId else { return false }
+			guard account.usage?.errorKind != "auth" else { return false }
 			guard let room = account.headroom(countingModels: models) else { return false }
 			return room >= Account.minimumUsableHeadroom
 		}.count

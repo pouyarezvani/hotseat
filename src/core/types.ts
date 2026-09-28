@@ -80,8 +80,8 @@ export interface SessionSupport {
 	writeLogin(dir: string, credential: Credential): Promise<void>;
 	/** The login the agent left in that folder, if any. */
 	readLogin(dir: string): Promise<Credential | null>;
-	/** When a login was issued, so a fresher copy can be told from a staler one. */
-	issuedAt(credential: Credential): number;
+	/** Which of two copies of a login is fresher: above zero when the first is, below when the second is. */
+	compareAge(a: Credential, b: Credential): number;
 	/** Anything else the folder needs before the agent will start there. */
 	seed?(dir: string): Promise<void>;
 	/** Whether an agent is running out of that folder right now. */

@@ -58,6 +58,12 @@ export function authPath(): string {
 	return join(home && home.length > 0 ? home : join(homedir(), '.codex'), 'auth.json');
 }
 
+function lastRefresh(credential: Credential): number {
+	const stamp =
+		typeof credential.last_refresh === 'string' ? Date.parse(credential.last_refresh) : Number.NaN;
+	return Number.isFinite(stamp) ? stamp : 0;
+}
+
 export const codexSession: SessionSupport = {
 	homeVariable: 'CODEX_HOME',
 	sharedHome: () => join(homedir(), '.codex'),
@@ -76,12 +82,8 @@ export const codexSession: SessionSupport = {
 	defaultCommand: 'codex',
 	writeLogin: (dir, credential) => writeJsonAtomic(join(dir, 'auth.json'), credential),
 	readLogin: (dir) => readJson<Credential>(join(dir, 'auth.json')),
-	issuedAt(credential) {
-		const stamp =
-			typeof credential.last_refresh === 'string'
-				? Date.parse(credential.last_refresh)
-				: Number.NaN;
-		return Number.isFinite(stamp) ? stamp : 0;
+	compareAge(a, b) {
+		return lastRefresh(a) - lastRefresh(b);
 	},
 	// Codex leaves no record of which home a running process uses, so a
 	// session is never known to be running; nothing outside the folder to forget.

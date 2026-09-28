@@ -197,6 +197,12 @@ describe('the ready count agrees with what switching would do', () => {
 		expect(body).toContain('activeAccountId');
 		expect(body).toContain('minimumUsableHeadroom');
 	});
+	test('the count leaves out an account whose login the service refused, as the switcher does', () => {
+		const header = menu.slice(menu.indexOf('func providerHeader'));
+		const body = header.slice(0, header.indexOf('private func accountItem'));
+		expect(body).toContain('account.usage?.errorKind != "auth"');
+		expect(model).toMatch(/var errorKind: String\?/);
+	});
 });
 
 /**
@@ -384,5 +390,19 @@ describe('hovering an account row', () => {
 	test('only the tracking area the row added is ever removed', () => {
 		expect(row).not.toContain('for area in trackingAreas');
 		expect(row).toContain('if let tracking { removeTrackingArea(tracking) }');
+	});
+});
+
+describe('the menu bar rests while the Mac sleeps', () => {
+	test('its passes stop when the Mac goes to sleep and start again only on a full wake', () => {
+		expect(menu).toContain('NSWorkspace.willSleepNotification');
+		expect(menu).toContain('NSWorkspace.didWakeNotification');
+		const sleep = menu.slice(menu.indexOf('@objc private func willSleep'));
+		expect(sleep.slice(0, sleep.indexOf('\n\t}\n'))).toContain('timer?.invalidate()');
+	});
+
+	test('no pass starts while it is asleep, even one already scheduled', () => {
+		const refresh = menu.slice(menu.indexOf('@objc private func refresh()'));
+		expect(refresh.slice(0, refresh.indexOf('\n\t}\n'))).toContain('guard !isBusy, !isAsleep');
 	});
 });

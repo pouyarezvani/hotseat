@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { agentCommand } from '../../core/agent-command.ts';
 import { readJson } from '../../core/fs.ts';
 import { cleanUpEvenIfInterrupted } from '../../core/interrupt.ts';
 import type { Credential } from '../../core/types.ts';
@@ -33,15 +34,18 @@ export async function loginIsolated(email?: string): Promise<Credential> {
 	const configDir = await mkdtemp(join(tmpdir(), 'hotseat-claude-'));
 	const service = keychainServiceFor(configDir);
 	let child: ReturnType<typeof Bun.spawn> | undefined;
+	const lookup = new AbortController();
 	return cleanUpEvenIfInterrupted(
 		async () => {
+			lookup.abort();
 			child?.kill();
 			await deleteKeychain(service).catch(() => undefined);
 			await rm(configDir, { recursive: true, force: true });
 		},
 		async () => {
-			child = Bun.spawn(['claude', ...loginArgs(email)], {
-				env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+			const claude = await agentCommand('claude', { signal: lookup.signal });
+			child = Bun.spawn([claude.executable, ...loginArgs(email)], {
+				env: { ...claude.env, CLAUDE_CONFIG_DIR: configDir },
 				// With no terminal, as when the menu bar starts this, the browser
 				// flow still completes on its own; there is just nobody to paste a code.
 				stdin: process.stdin.isTTY ? 'inherit' : 'ignore',

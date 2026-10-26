@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { credentialFromToken } from '../providers/claude/index.ts';
 import { oauthOf } from '../providers/claude/keychain.ts';
 import { loginIsolated } from '../providers/claude/login.ts';
+import { agentCommand } from './agent-command.ts';
 import { collectState, forgetReading, PROVIDERS } from './collect.ts';
 import { readJson, writeJsonAtomic } from './fs.ts';
 import { cleanUpEvenIfInterrupted } from './interrupt.ts';
@@ -140,14 +141,17 @@ export function loginClaudeIsolated(email?: string): Promise<Credential> {
 export async function loginCodexIsolated(): Promise<Credential> {
 	const home = await mkdtemp(join(tmpdir(), 'hotseat-codex-'));
 	let child: ReturnType<typeof Bun.spawn> | undefined;
+	const lookup = new AbortController();
 	return cleanUpEvenIfInterrupted(
 		async () => {
+			lookup.abort();
 			child?.kill();
 			await rm(home, { recursive: true, force: true });
 		},
 		async () => {
-			child = Bun.spawn(['codex', 'login'], {
-				env: { ...process.env, CODEX_HOME: home },
+			const codex = await agentCommand('codex', { signal: lookup.signal });
+			child = Bun.spawn([codex.executable, 'login'], {
+				env: { ...codex.env, CODEX_HOME: home },
 				stdin: process.stdin.isTTY ? 'inherit' : 'ignore',
 				stdout: 'inherit',
 				stderr: 'inherit',

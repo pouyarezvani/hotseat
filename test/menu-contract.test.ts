@@ -14,6 +14,8 @@ const menu = await read('macos/Sources/main.swift');
 const model = await read('macos/Sources/Model.swift');
 const row = await read('macos/Sources/AccountRowView.swift');
 const cli = await read('src/cli.ts');
+const build = await read('macos/build.sh');
+const loginItem = await read('macos/Sources/LoginItem.swift').catch(() => '');
 
 /** Every command the CLI answers to, taken from its own dispatch. */
 const commands = new Set(
@@ -404,5 +406,56 @@ describe('the menu bar rests while the Mac sleeps', () => {
 	test('no pass starts while it is asleep, even one already scheduled', () => {
 		const refresh = menu.slice(menu.indexOf('@objc private func refresh()'));
 		expect(refresh.slice(0, refresh.indexOf('\n\t}\n'))).toContain('guard !isBusy, !isAsleep');
+	});
+});
+
+describe('starting at login belongs to the app', () => {
+	test('the app carries its own launch agent, so macOS shows it with the app name and icon', () => {
+		expect(build).toContain('Contents/Library/LaunchAgents');
+		expect(build).toContain('dev.hotseat.login.plist');
+		expect(build).toContain('<key>BundleProgram</key><string>Contents/MacOS/Hotseat</string>');
+		expect(build).toContain('<key>Label</key><string>dev.hotseat.login</string>');
+		expect(build).toContain('"$here/Sources/LoginItem.swift"');
+	});
+
+	test('the app registers that agent itself, before it starts any interface', () => {
+		expect(loginItem).toContain('SMAppService.agent(plistName: "dev.hotseat.login.plist")');
+		const entry = menu.slice(menu.indexOf('let app = NSApplication.shared'));
+		const before = menu.slice(0, menu.indexOf('let app = NSApplication.shared'));
+		expect(before).toContain('"--login-item"');
+		expect(entry).not.toContain('"--login-item"');
+	});
+});
+
+describe('the app keeps its login item working', () => {
+	test('turning it on waits for the old registration to finish stopping before registering again', () => {
+		expect(loginItem).toContain('service.unregister { error in');
+		const on = loginItem.slice(loginItem.indexOf('case "on":'), loginItem.indexOf('case "off":'));
+		expect(on.indexOf('waitFor')).toBeGreaterThan(-1);
+		expect(on.indexOf('waitFor')).toBeLessThan(on.indexOf('try service.register()'));
+	});
+
+	test('a login item turned off in System Settings is reported as needing approval, not as a failure', () => {
+		expect(loginItem).toContain('kSMErrorLaunchDeniedByUser');
+		expect(loginItem).toContain('service.status == .requiresApproval');
+	});
+
+	test('a rebuild registers again only when it was already on', () => {
+		const after = build.slice(build.indexOf('mv "$app" "$final_app"'));
+		expect(after).toContain('--login-item status');
+		expect(after).toMatch(/= "enabled" \]; then[\s\S]*--login-item on/);
+	});
+});
+
+describe('signing the app', () => {
+	test('a build signs with an Apple Development certificate when this Mac has one, so login items survive rebuilds', () => {
+		expect(build).toContain('security find-identity -v -p codesigning');
+		expect(build).toContain('Apple Development');
+		expect(build).toContain('codesign --force --sign "$identity" "$app"');
+	});
+
+	test('without one it still builds, signed ad hoc, and says what that costs', () => {
+		expect(build).toContain('identity="-"');
+		expect(build).toContain('starting at login stops working after each rebuild');
 	});
 });

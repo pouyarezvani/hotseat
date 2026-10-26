@@ -932,6 +932,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	@objc private func quit() { NSApp.terminate(nil) }
 }
 
+if let flag = CommandLine.arguments.firstIndex(of: "--login-item") {
+	let request = CommandLine.arguments.indices.contains(flag + 1) ? CommandLine.arguments[flag + 1] : "status"
+	exit(LoginItem.run(request))
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()

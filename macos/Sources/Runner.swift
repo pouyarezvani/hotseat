@@ -21,24 +21,29 @@ final class Runner {
 		prefix = []
 	}
 
+	/// Where the CLI may be, in order: beside the app, as an install lays them
+	/// out; in the checkout the app was built in (<checkout>/macos/build/Hotseat.app
+	/// beside <checkout>/dist/hotseat); then the usual install folders.
+	static func candidates(bundle: URL, home: URL) -> [String] {
+		let folder = bundle.deletingLastPathComponent()
+		let checkout = folder.deletingLastPathComponent().deletingLastPathComponent()
+		return [
+			folder.appendingPathComponent("hotseat").path,
+			checkout.appendingPathComponent("dist/hotseat").path,
+			home.appendingPathComponent(".local/bin/hotseat").path,
+			"/usr/local/bin/hotseat",
+			"/opt/homebrew/bin/hotseat",
+		]
+	}
+
 	init() {
 		if let override = ProcessInfo.processInfo.environment["HOTSEAT_BIN"], !override.isEmpty {
 			executable = override
 			prefix = []
 			return
 		}
-		// The app lives at <checkout>/macos/build/Hotseat.app and the binary at
-		// <checkout>/dist/hotseat: three levels up from the bundle, not two.
-		let checkout = Bundle.main.bundleURL
-			.deletingLastPathComponent()
-			.deletingLastPathComponent()
-			.deletingLastPathComponent()
-		let candidates = [
-			checkout.appendingPathComponent("dist/hotseat").path,
-			FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hotseat").path,
-			"/usr/local/bin/hotseat",
-			"/opt/homebrew/bin/hotseat",
-		]
+		let candidates = Runner.candidates(
+			bundle: Bundle.main.bundleURL, home: FileManager.default.homeDirectoryForCurrentUser)
 		if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
 			executable = found
 			prefix = []

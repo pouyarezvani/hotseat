@@ -46,6 +46,29 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# The launch agent the app registers for itself to start at login
+# (hotseat menubar install).
+agents_dir="$app/Contents/Library/LaunchAgents"
+mkdir -p "$agents_dir"
+cat > "$agents_dir/dev.hotseat.login.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>dev.hotseat.login</string>
+	<key>BundleProgram</key><string>Contents/MacOS/Hotseat</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>Hotseat</string>
+	</array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><false/>
+	<key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>
+PLIST
+plutil -lint -s "$agents_dir/dev.hotseat.login.plist"
+
 swiftc \
 	-O -whole-module-optimization \
 	-target arm64-apple-macos14.0 \
@@ -55,6 +78,7 @@ swiftc \
 	"$here/Sources/Logo.swift" \
 	"$here/Sources/Runner.swift" \
 	"$here/Sources/AccountRowView.swift" \
+	"$here/Sources/LoginItem.swift" \
 	"$here/Sources/main.swift"
 
 # Render check: a highlight added as a subview paints over the row, which only
@@ -66,9 +90,23 @@ swiftc -target arm64-apple-macos14.0 -framework AppKit -o "$tmp/rendercheck" \
 HOTSEAT_LOGOS="$here/Logos" "$tmp/rendercheck"
 rm -rf "$tmp"
 
-codesign --force --sign - "$app"
+# Signs with this Mac's Apple Development certificate when there is one,
+# otherwise ad hoc.
+identity="$(security find-identity -v -p codesigning | awk '/"Apple Development/ { print $2; exit }')"
+if [ -z "$identity" ]; then
+	identity="-"
+	echo "note: no Apple Development certificate on this Mac, so the app is signed ad hoc and" >&2
+	echo "      starting at login stops working after each rebuild. Add your Apple ID in" >&2
+	echo "      Xcode > Settings > Accounts, then Manage Certificates > + > Apple Development." >&2
+fi
+codesign --force --sign "$identity" "$app"
 rm -rf "$final_app"
 mv "$app" "$final_app"
+
+# A login item that was on is registered again for the new build.
+if [ "$("$final_app/Contents/MacOS/Hotseat" --login-item status 2>/dev/null)" = "enabled" ]; then
+	"$final_app/Contents/MacOS/Hotseat" --login-item on >/dev/null
+fi
 
 echo "built $final_app"
 echo "run: hotseat menubar"

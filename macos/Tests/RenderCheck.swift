@@ -271,4 +271,19 @@ check("a command that fails is reported as failed", noisy.run(["-c", "echo 'Open
 check("and what it says is its own last line, not everything it printed", noisy.lastError == "the sign-in ended with status 1", noisy.lastError)
 check("a failure that is not a timeout is not called one", !noisy.timedOut)
 
+// The CLI the app runs: beside the app first, as an install lays them out,
+// then the checkout the app was built in, then the usual install folders.
+let home = URL(fileURLWithPath: "/Users/someone")
+let installed = Runner.candidates(bundle: URL(fileURLWithPath: "/opt/tools/Hotseat.app"), home: home)
+check(
+	"an app installed beside its CLI runs that CLI first",
+	installed.first == "/opt/tools/hotseat", installed.first ?? "none")
+let fromCheckout = Runner.candidates(
+	bundle: URL(fileURLWithPath: "/src/hotseat/macos/build/Hotseat.app"), home: home)
+check(
+	"an app built in a checkout runs that checkout's CLI before any installed one",
+	(fromCheckout.firstIndex(of: "/src/hotseat/dist/hotseat") ?? Int.max)
+		< (fromCheckout.firstIndex(of: "/Users/someone/.local/bin/hotseat") ?? -1),
+	fromCheckout.joined(separator: ", "))
+
 exit(failures == 0 ? 0 : 1)

@@ -19,7 +19,7 @@ import {
 	findApp,
 	installLoginItem,
 	isRunning,
-	loginItemInstalled,
+	loginItemStatus,
 	removeLoginItem,
 	startMenuBar,
 	stopMenuBar,
@@ -449,7 +449,6 @@ export async function main(argv: readonly string[]): Promise<number> {
 					problem('could not find Hotseat.app - build it with: bash macos/build.sh');
 					return 1;
 				}
-				const binary = process.execPath;
 				if (rest[0] === 'stop') {
 					if (!(await isRunning())) {
 						note('the menu bar app was not running');
@@ -461,13 +460,18 @@ export async function main(argv: readonly string[]): Promise<number> {
 				}
 				if (rest[0] === 'install') {
 					await stopMenuBar();
-					const path = await installLoginItem(app, binary);
+					const status = await installLoginItem(app);
+					if (status === 'requires approval') {
+						note(
+							'allow Hotseat in System Settings > General > Login Items & Extensions, and it will start when you log in',
+						);
+						return 0;
+					}
 					success('the menu bar app will now start when you log in');
-					note(path);
 					return 0;
 				}
 				if (rest[0] === 'uninstall') {
-					const existed = await removeLoginItem();
+					const existed = await removeLoginItem(app);
 					await stopMenuBar();
 					success(
 						existed ? 'it will no longer start at login' : 'it was not set to start at login',
@@ -476,7 +480,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 				}
 				if (rest[0] === 'status') {
 					say(`running:  ${(await isRunning()) ? 'yes' : 'no'}`);
-					say(`at login: ${(await loginItemInstalled()) ? 'yes' : 'no'}`);
+					say(`at login: ${await loginItemStatus(app)}`);
 					say(`app:      ${app}`);
 					return 0;
 				}

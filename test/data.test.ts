@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test';
-import { mkdtemp, stat } from 'node:fs/promises';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readHistory, recordSwitch } from '../src/core/history.ts';
@@ -25,6 +25,19 @@ import { credential, withHome } from './helpers.ts';
 async function add(email: string, provider: 'claude' | 'codex' = 'claude') {
 	return updateRegistry((registry) => upsertAccount(registry, { provider, email }));
 }
+
+const scratch: string[] = [];
+
+/** A path in a fresh folder of its own, removed once the test ends. */
+async function scratchFile(name: string): Promise<string> {
+	const dir = await mkdtemp(join(tmpdir(), 'hotseat-export-'));
+	scratch.push(dir);
+	return join(dir, name);
+}
+
+afterEach(async () => {
+	await Promise.all(scratch.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 describe('per-folder rules', () => {
 	test('a rule applies to the folder it was set on', async () => {
@@ -168,7 +181,7 @@ describe('account order', () => {
 		await withHome(async () => {
 			const claude = await add('one@example.com', 'claude');
 			const codex = await add('one@example.com', 'codex');
-			expect(swapSlots('claude', claude.id, codex.id)).rejects.toThrow(/same provider/);
+			await expect(swapSlots('claude', claude.id, codex.id)).rejects.toThrow(/same provider/);
 		});
 	});
 
@@ -186,7 +199,7 @@ describe('account order', () => {
 
 describe('moving between machines', () => {
 	test('an export carries every account and its login back in', async () => {
-		const file = join(await mkdtemp(join(tmpdir(), 'hotseat-export-')), 'accounts.json');
+		const file = await scratchFile('accounts.json');
 		await withHome(async () => {
 			const account = await add('one@example.com');
 			await storeCredential(account, credential('abc'));
@@ -202,7 +215,7 @@ describe('moving between machines', () => {
 	});
 
 	test('an export holds live logins, so it is written owner-only', async () => {
-		const file = join(await mkdtemp(join(tmpdir(), 'hotseat-export-')), 'accounts.json');
+		const file = await scratchFile('accounts.json');
 		await withHome(async () => {
 			await storeCredential(await add('one@example.com'), credential('abc'));
 			await exportAccounts(file);
@@ -211,7 +224,7 @@ describe('moving between machines', () => {
 	});
 
 	test('importing twice does not duplicate an account', async () => {
-		const file = join(await mkdtemp(join(tmpdir(), 'hotseat-export-')), 'accounts.json');
+		const file = await scratchFile('accounts.json');
 		await withHome(async () => {
 			await storeCredential(await add('one@example.com'), credential('abc'));
 			await exportAccounts(file);
@@ -224,10 +237,10 @@ describe('moving between machines', () => {
 	});
 
 	test('importing something that is not an export is refused', async () => {
-		const file = join(await mkdtemp(join(tmpdir(), 'hotseat-export-')), 'junk.json');
+		const file = await scratchFile('junk.json');
 		await Bun.write(file, JSON.stringify({ hello: 'world' }));
 		await withHome(async () => {
-			expect(importAccounts(file)).rejects.toThrow(/not a hotseat export/);
+			await expect(importAccounts(file)).rejects.toThrow(/not a hotseat export/);
 		});
 	});
 });
@@ -352,7 +365,7 @@ describe('naming an account', () => {
 describe('importing', () => {
 	test('an entry that is not an account is refused before anything is written', async () => {
 		await withHome(async () => {
-			const file = join(await mkdtemp(join(tmpdir(), 'hotseat-export-')), 'accounts.json');
+			const file = await scratchFile('accounts.json');
 			await Bun.write(
 				file,
 				JSON.stringify({

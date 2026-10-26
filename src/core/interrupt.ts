@@ -9,11 +9,10 @@ export async function cleanUpEvenIfInterrupted<T>(
 	cleanup: () => Promise<void>,
 	work: () => Promise<T>,
 ): Promise<T> {
-	let cleaned = false;
-	const once = async (): Promise<void> => {
-		if (cleaned) return;
-		cleaned = true;
-		await cleanup().catch(() => undefined);
+	let cleaning: Promise<void> | undefined;
+	const once = (): Promise<void> => {
+		cleaning ??= cleanup().catch(() => undefined);
+		return cleaning;
 	};
 	const stopWith = (code: number) => (): void => {
 		void once().finally(() => process.exit(code));

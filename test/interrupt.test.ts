@@ -7,8 +7,9 @@ const fixture = join(import.meta.dir, 'fixtures', 'interrupted.ts');
 
 async function interruptedWith(
 	signal: 'SIGTERM' | 'SIGINT',
+	args: string[] = [],
 ): Promise<{ dir: string; code: number }> {
-	const child = Bun.spawn(['bun', fixture], { stdout: 'pipe', stderr: 'ignore' });
+	const child = Bun.spawn(['bun', fixture, ...args], { stdout: 'pipe', stderr: 'ignore' });
 	const reader = child.stdout.getReader();
 	const { value } = await reader.read();
 	const dir = new TextDecoder().decode(value).trim();
@@ -28,6 +29,12 @@ describe('a sign-in that is interrupted', () => {
 		const { dir, code } = await interruptedWith('SIGINT');
 		await expect(stat(dir)).rejects.toThrow();
 		expect(code).toBe(130);
+	});
+
+	test('one that fails because it was stopped still finishes cleaning up, and ends as stopped', async () => {
+		const { dir, code } = await interruptedWith('SIGTERM', ['--fails-when-stopped']);
+		await expect(stat(dir)).rejects.toThrow();
+		expect(code).toBe(143);
 	});
 
 	test('cleans up once when nothing interrupts it, and passes the result through', async () => {

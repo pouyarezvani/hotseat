@@ -170,7 +170,7 @@ export async function liveIdentity(
 	// copy it was matched by.
 	for (const account of accountsFor(registry, provider.id)) {
 		const saved = await loadCredential(account).catch(() => null);
-		if (saved && fingerprint(saved) === print) {
+		if ((saved && fingerprint(saved) === print) || account.renewedFrom === print) {
 			if (cache) {
 				cache.identities[provider.id] = {
 					fingerprint: print,
@@ -281,8 +281,8 @@ export function plainError(error: unknown): string {
 }
 
 /** The account as it may be shown or written anywhere: without its login. */
-function shown(record: AccountRecord): Omit<AccountRecord, 'login'> {
-	const { login: _login, ...rest } = record;
+function shown(record: AccountRecord): Omit<AccountRecord, 'login' | 'renewedFrom'> {
+	const { login: _login, renewedFrom: _renewedFrom, ...rest } = record;
 	return rest;
 }
 

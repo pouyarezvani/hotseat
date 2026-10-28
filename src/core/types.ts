@@ -15,6 +15,12 @@ export interface AccountRecord {
 	lastActivatedAt?: string;
 	/** The saved login: tokens and what the sign-in granted. Absent until saved. */
 	login?: Credential;
+	/**
+	 * The fingerprint of the installed login the saved one renewed, kept until
+	 * the renewal is installed, so the installed login can still be named as
+	 * this account's after its saved copy was replaced.
+	 */
+	renewedFrom?: string;
 }
 
 export interface Registry {

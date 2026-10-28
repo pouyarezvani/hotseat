@@ -509,3 +509,12 @@ describe('the History menu', () => {
 		expect(menu).toContain('"history.jsonl"');
 	});
 });
+
+describe('a sign-in that runs out of time', () => {
+	test('is not said to have changed nothing, since the login may already have been saved', () => {
+		const start = menu.indexOf('@objc private func signInSelector');
+		const body = menu.slice(start, menu.indexOf('\n\t}\n', start));
+		expect(body).not.toContain('nothing changed');
+		expect(body).toContain('may have');
+	});
+});

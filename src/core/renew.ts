@@ -1,10 +1,11 @@
 import { ServiceError } from './errors.ts';
 import { acquireLock } from './fs.ts';
 import { hotseatHome } from './paths.ts';
+import { updateRegistry } from './registry.ts';
 import { sessionRunning } from './session.ts';
 import { holdSwitch } from './switch-lock.ts';
 import type { AccountRecord, Credential, Provider } from './types.ts';
-import { fingerprint, loadCredential, storeCredential, storeCredentialUnless } from './vault.ts';
+import { fingerprint, loadCredential, storeCredential } from './vault.ts';
 
 /** Long enough to wait out another process's renewal, which may itself wait on the service. */
 const RENEW_LOCK_WAIT_MS = 45_000;
@@ -96,16 +97,24 @@ export async function renewInstalled(
 			if (!provider.sharesToken(saved, installed)) {
 				if (provider.session.compareAge(saved, installed) <= 0) return installed;
 				await provider.writeAgentCredential(saved);
+				await settled(owner);
 				return saved;
 			}
 			const renewed = await provider.refreshIfNeeded(installed);
 			if (renewed === installed) return installed;
-			await storeCredentialUnless(
-				owner,
-				renewed,
-				(current) => !provider.sharesToken(current, installed),
-			);
+			// Saved with the login it renewed, in one write, so the installed
+			// login can be named as this account's even after a restart.
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((entry) => entry.id === owner.id);
+				if (!record || (record.login && !provider.sharesToken(record.login, installed))) return;
+				record.login = structuredClone(renewed);
+				record.renewedFrom = fingerprint(installed);
+			});
+			// Refreshing waits on the service; a login put in meanwhile stays.
+			const now = await provider.readAgentCredential();
+			if (!now || fingerprint(now) !== fingerprint(named)) return now;
 			await provider.writeAgentCredential(renewed);
+			await settled(owner);
 			return renewed;
 		} finally {
 			await lock.release();
@@ -113,4 +122,12 @@ export async function renewInstalled(
 	} finally {
 		await held.release();
 	}
+}
+
+/** Forgets which login an account's saved one renewed, once that renewal is installed. */
+async function settled(owner: Pick<AccountRecord, 'id'>): Promise<void> {
+	await updateRegistry((registry) => {
+		const record = registry.accounts.find((entry) => entry.id === owner.id);
+		if (record) delete record.renewedFrom;
+	});
 }

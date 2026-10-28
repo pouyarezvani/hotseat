@@ -834,7 +834,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			let signer = Runner()
 			let ok = signer.run(["signin", parts[0], parts[1]], timeout: Runner.signInTimeout) != nil
 			let reason = signer.timedOut
-				? "The sign-in was not finished in the browser within 5 minutes, so nothing changed. Try again, and finish signing in to \(email) in the browser window that opens."
+				? "The sign-in did not finish within 5 minutes and was stopped. If you finished signing in to \(email) in the browser, it may have been saved; the menu shows what is in place now. Otherwise, try again."
 				: signer.lastError
 			DispatchQueue.main.async {
 				if ok {

@@ -79,6 +79,7 @@ function readEntry(
 		...(typeof entry.lastActivatedAt === 'string'
 			? { lastActivatedAt: entry.lastActivatedAt }
 			: {}),
+		...(typeof entry.renewedFrom === 'string' ? { renewedFrom: entry.renewedFrom } : {}),
 		...(login ? { login } : {}),
 	};
 	return { record, changed };

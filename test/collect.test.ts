@@ -790,7 +790,46 @@ describe('a renewal that could not be installed, for a login the service cannot 
 	});
 });
 
+describe('a renewal saved but not installed when hotseat stopped', () => {
+	test('is installed by the next run, which knows nothing the stopped one remembered', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.identities.delete('A');
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.rotate = '+';
+			claude.spends = true;
+			claude.writeFailure = new Error('stopped before installing');
+			await expect(renewInstalled(claude, a, cred('A', 0, T - MIN), () => true)).rejects.toThrow(
+				'stopped before installing',
+			);
+			claude.writeFailure = null;
+			await collectState({ providers, now: T + MIN, force: true, awake: async () => true });
+			expect(tokenOf(claude.installed ?? {})).toBe('A+');
+			expect(claude.refreshesOf.get('A')).toBe(1);
+		});
+	});
+});
+
 describe('renewing the login in use while something else changes it', () => {
+	test('a login put in from outside while the renewal waits on the service is not replaced', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.rotate = '+';
+			claude.refreshDelayMs = 50;
+			const renewing = renewInstalled(claude, a, cred('A', 0, T - MIN), () => true);
+			await Bun.sleep(20);
+			claude.installed = cred('X');
+			await renewing;
+			expect(tokenOf(claude.installed ?? {})).toBe('X');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A+');
+		});
+	});
+
 	test("a login put in after the one named is never replaced by the named account's login", async () => {
 		await withHome(async () => {
 			const { providers, a } = await world();

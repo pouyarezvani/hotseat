@@ -884,9 +884,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		perform(["remove", parts[0], parts[1]])
 	}
 
+	/// Shown at once, so the menu reads the new value and a second click reverses
+	/// it; the refresh after the command puts back whatever was actually saved.
 	@objc private func toggleSetting(_ sender: NSMenuItem) {
 		let parts = split(sender)
 		guard parts.count == 2 else { return }
+		board = board?.withSetting(parts[0], parts[1])
+		renderTitle()
 		perform(["config", "set", parts[0], parts[1]])
 	}
 

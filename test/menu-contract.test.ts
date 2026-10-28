@@ -518,3 +518,12 @@ describe('a sign-in that runs out of time', () => {
 		expect(body).toContain('may have');
 	});
 });
+
+describe('changing a setting from the menu', () => {
+	test('shows the new value at once, before the command line answers', () => {
+		const start = menu.indexOf('@objc private func toggleSetting');
+		const body = menu.slice(start, menu.indexOf('\n\t}\n', start));
+		expect(body).toContain('withSetting(');
+		expect(body.indexOf('withSetting(')).toBeLessThan(body.indexOf('perform('));
+	});
+});

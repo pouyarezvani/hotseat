@@ -262,6 +262,21 @@ check("the service spans are marked, so the compact title can show their marks",
 // What a failed command says is what the person reads in the alert. A command
 // cut off for taking too long must say so, not replay whatever it printed.
 
+// A setting changed from the menu shows at once, so a second click reverses
+// it rather than asking for the same value again.
+print("changing a setting")
+check("a switched-on setting reads as on at once", Settings().applying("titleCompact", "true").titleCompact)
+check(
+	"a switched-off setting reads as off at once",
+	!Settings().applying("titleShowAccount", "false").titleShowAccount)
+check("a choice reads as chosen at once", Settings().applying("titlePercentage", "worst").titlePercentage == "worst")
+check(
+	"a limit reads as set at once", Settings().applying("autoThresholdPercent", "85").autoThresholdPercent == 85)
+check(
+	"the model limits counted read as set at once",
+	Settings().applying("autoModelLimits", "fable, opus").autoModelLimits == ["fable", "opus"])
+check("clearing the model limits reads as none at once", Settings().applying("autoModelLimits", "").autoModelLimits.isEmpty)
+
 print("failing commands")
 let slow = Runner(executable: "/bin/sleep")
 check("a command that runs too long is cut off", slow.run(["5"], timeout: 0.5) == nil)

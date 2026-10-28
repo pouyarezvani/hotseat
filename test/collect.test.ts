@@ -896,6 +896,22 @@ describe('renewing the login in use while something else changes it', () => {
 	});
 });
 
+describe('renewing a saved login while it is signed in to again', () => {
+	test('the sign-in saved while the renewal waits on the service is kept', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const claude = providers.claude;
+			claude.rotate = '+';
+			claude.refreshDelayMs = 50;
+			const renewing = renewSaved(claude, b);
+			await Bun.sleep(20);
+			await storeCredential(b, cred('NEW-SIGN-IN', 9));
+			await renewing;
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('NEW-SIGN-IN');
+		});
+	});
+});
+
 describe('renewing one login from two places at once', () => {
 	test('a saved copy and the installed login holding one token are renewed once, never twice', async () => {
 		await withHome(async () => {

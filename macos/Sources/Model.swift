@@ -82,6 +82,28 @@ struct Settings: Decodable {
 
 	init() {}
 
+	/// These settings with one changed the way `hotseat config set` changes it,
+	/// so the menu can show a change the moment it is asked for.
+	func applying(_ key: String, _ value: String) -> Settings {
+		var copy = self
+		switch key {
+		case "titleCompact": copy.titleCompact = value == "true"
+		case "titleShowAccount": copy.titleShowAccount = value == "true"
+		case "titleShowModelLimits": copy.titleShowModelLimits = value == "true"
+		case "titleShortenEmail": copy.titleShortenEmail = value == "true"
+		case "titlePercentage": copy.titlePercentage = value
+		case "autoThresholdPercent": copy.autoThresholdPercent = Double(value) ?? copy.autoThresholdPercent
+		case "autoThresholdFiveHour": copy.autoThresholdFiveHour = Double(value) ?? copy.autoThresholdFiveHour
+		case "autoThresholdWeekly": copy.autoThresholdWeekly = Double(value) ?? copy.autoThresholdWeekly
+		case "autoModelLimits":
+			copy.autoModelLimits = value.split(separator: ",")
+				.map { $0.trimmingCharacters(in: .whitespaces) }
+				.filter { !$0.isEmpty }
+		default: break
+		}
+		return copy
+	}
+
 	init(from decoder: Decoder) throws {
 		let c = try decoder.container(keyedBy: Keys.self)
 		titleCompact = try c.decodeIfPresent(Bool.self, forKey: .titleCompact) ?? titleCompact
@@ -137,7 +159,7 @@ struct Board: Decodable {
 	let updatedAt: String
 	var providers: [String: ProviderState]
 	/// Missing settings fall back to defaults rather than failing the board.
-	let settings: Settings
+	var settings: Settings
 
 	private enum Keys: String, CodingKey { case updatedAt, providers, settings }
 
@@ -151,6 +173,13 @@ struct Board: Decodable {
 	/// The board as it will look once a switch to this account lands. Shown the
 	/// moment the account is clicked, so the menu bar answers at once; the real
 	/// board replaces it when the switch finishes, or puts it back if it fails.
+	/// The board with one setting changed, as it will read once the change is saved.
+	func withSetting(_ key: String, _ value: String) -> Board {
+		var copy = self
+		copy.settings = settings.applying(key, value)
+		return copy
+	}
+
 	func activating(provider: String, accountId: String) -> Board {
 		guard let state = providers[provider],
 			state.accounts.contains(where: { $0.id == accountId })

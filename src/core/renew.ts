@@ -5,7 +5,7 @@ import { updateRegistry } from './registry.ts';
 import { sessionRunning } from './session.ts';
 import { holdSwitch } from './switch-lock.ts';
 import type { AccountRecord, Credential, Provider } from './types.ts';
-import { fingerprint, loadCredential, storeCredential } from './vault.ts';
+import { fingerprint, loadCredential, storeCredentialUnless } from './vault.ts';
 
 /** Long enough to wait out another process's renewal, which may itself wait on the service. */
 const RENEW_LOCK_WAIT_MS = 45_000;
@@ -59,7 +59,15 @@ export async function renewSaved(
 		} catch (error) {
 			throw new RenewalFailed(stored, error);
 		}
-		if (renewed !== stored) await storeCredential(account, renewed);
+		// Saved only while the saved copy is still the one renewed, so a sign-in
+		// saved while the service answered is kept.
+		if (renewed !== stored) {
+			await storeCredentialUnless(
+				account,
+				renewed,
+				(current) => !provider.sharesToken(current, stored),
+			);
+		}
 		return renewed;
 	} finally {
 		await lock.release();

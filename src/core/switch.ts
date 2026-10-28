@@ -4,7 +4,7 @@ import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './regi
 import { renewSaved } from './renew.ts';
 import { adoptIfNewer, freshestLogin, sessionRunning } from './session.ts';
 import type { AccountRecord, AccountState, Provider, ProviderId, ProviderState } from './types.ts';
-import { storeCredential } from './vault.ts';
+import { fingerprint, storeCredential } from './vault.ts';
 
 export { MIN_USABLE_HEADROOM };
 
@@ -59,15 +59,22 @@ export function rotateNext(state: ProviderState): AccountState | undefined {
 	return usable[(index + 1) % usable.length];
 }
 
-/** The next account in order that still has room, wrapping around. */
-export function nextAvailable(state: ProviderState): AccountState | undefined {
+/**
+ * The next account in order that still has room on every window counted,
+ * wrapping around. An account whose login was refused is passed over.
+ */
+export function nextAvailable(
+	state: ProviderState,
+	modelLimits: string[] = [],
+): AccountState | undefined {
 	const usable = state.accounts.filter((account) => !account.disabled);
 	if (usable.length === 0) return undefined;
 	const start = usable.findIndex((account) => account.id === state.activeAccountId);
 	for (let step = 1; step <= usable.length; step += 1) {
 		const candidate = usable[(start + step) % usable.length];
 		if (!candidate || candidate.id === state.activeAccountId) continue;
-		const room = headroom(candidate);
+		if (candidate.usage?.errorKind === 'auth') continue;
+		const room = headroom(candidate, modelLimits);
 		if (!Number.isFinite(room) || room > 0) return candidate;
 	}
 	return undefined;
@@ -103,7 +110,10 @@ export async function activate(
 		);
 	}
 
-	const live = await provider.readAgentCredential().catch(() => null);
+	const live = await provider.readAgentCredential().catch((error: unknown) => {
+		const why = error instanceof Error ? error.message : String(error);
+		throw new Error(`could not read the login in use (${why}) - not switching, so nothing is lost`);
+	});
 	const identity = live ? await liveIdentity(provider, live, registry) : undefined;
 	if (live && !identity) {
 		// An installed login nobody can name would be overwritten unsaved,
@@ -157,7 +167,18 @@ export async function activate(
 		);
 	}
 
-	const refreshed = (await renewSaved(provider, target)) ?? stored;
+	const refreshed = await renewSaved(provider, target);
+	if (!refreshed) throw new Error(`no saved login for ${target.email} - it was removed`);
+
+	// The agent may have renewed its login while the target was renewed. The
+	// copy read at the start would then be stale, and overwriting the newer one
+	// would lose the only working token, so the switch stops instead.
+	const liveNow = await provider.readAgentCredential();
+	if ((live ? fingerprint(live) : null) !== (liveNow ? fingerprint(liveNow) : null)) {
+		throw new Error(
+			'the login in use changed while switching - not switching, so nothing is lost; try again',
+		);
+	}
 
 	// Save the outgoing login before overwriting it, so a token the agent
 	// refreshed while that account was in use is not lost. Never over a

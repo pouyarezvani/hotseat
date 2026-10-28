@@ -432,7 +432,12 @@ export function rankCandidates(input: RankInput): AccountState[] {
 	const models = settings.modelLimits;
 	const active = accounts.find((account) => account.id === activeId);
 	const activeHeadroom = active ? headroom(active, models) : undefined;
-	const pool = accounts.filter((account) => !account.disabled && account.id !== activeId);
+	// A login the service refused needs a person, not a switch, and its last
+	// reading says nothing about whether the others are out of room.
+	const pool = accounts.filter(
+		(account) =>
+			!account.disabled && account.id !== activeId && account.usage?.errorKind !== 'auth',
+	);
 
 	const measured = pool.filter((account) => headroom(account, models) !== undefined);
 	const allAbove =
@@ -452,8 +457,6 @@ export function rankCandidates(input: RankInput): AccountState[] {
 	const slivers: [Key, AccountState][] = [];
 
 	for (const candidate of pool) {
-		// A login the service refused needs a person, not a switch.
-		if (candidate.usage?.errorKind === 'auth') continue;
 		const h = headroom(candidate, models);
 		if (h === undefined) continue;
 		if (h <= 0) continue;

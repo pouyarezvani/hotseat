@@ -119,6 +119,29 @@ describe('accounts.json edited by hand', () => {
 	});
 });
 
+describe('an accounts.json that is not in the expected shape', () => {
+	test('is refused, and left exactly as it was, rather than read as empty and written over', async () => {
+		await withHome(async () => {
+			const text = JSON.stringify({
+				version: 1,
+				accounts: {
+					one: { provider: 'claude', email: 'one@example.com', login: credential('keep') },
+				},
+			});
+			await Bun.write(registryPath(), text);
+			await expect(loadRegistry()).rejects.toThrow(
+				'accounts.json is not in the shape hotseat expects - fix it or move it aside',
+			);
+			await expect(
+				updateRegistry((registry) =>
+					upsertAccount(registry, { provider: 'claude', email: 'two@example.com' }),
+				),
+			).rejects.toThrow('accounts.json is not in the shape hotseat expects');
+			expect(await Bun.file(registryPath()).text()).toBe(text);
+		});
+	});
+});
+
 describe('logins saved by an older hotseat', () => {
 	test('are folded into accounts.json once, and the old folder removed', async () => {
 		await withHome(async () => {
@@ -132,6 +155,20 @@ describe('logins saved by an older hotseat', () => {
 			expect(await loadCredential(account)).toEqual(credential('old'));
 			await expect(readdir(vaultDir())).rejects.toThrow();
 			expect(await migrateVault()).toBe(0);
+		});
+	});
+
+	test('a migration run again after it was cut short never replaces a login saved since', async () => {
+		await withHome(async () => {
+			const account = await updateRegistry((registry) =>
+				upsertAccount(registry, { provider: 'claude', email: 'one@example.com' }),
+			);
+			await storeCredential(account, credential('newer'));
+			await mkdir(vaultDir(), { recursive: true });
+			await Bun.write(join(vaultDir(), `${account.id}.json`), JSON.stringify(credential('old')));
+			expect(await migrateVault()).toBe(0);
+			expect(await loadCredential(account)).toEqual(credential('newer'));
+			await expect(readdir(vaultDir())).rejects.toThrow();
 		});
 	});
 });

@@ -138,6 +138,7 @@ export function mergeAccountKeys(live: Credential | null, incoming: Credential):
 		else delete merged[key];
 	}
 	if (incoming.organizationUuid !== undefined) merged.organizationUuid = incoming.organizationUuid;
+	else delete merged.organizationUuid;
 	return merged;
 }
 

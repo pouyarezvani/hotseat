@@ -1,18 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
-import {
-	ACTIVE_CALM_MS,
-	CANDIDATE_MS,
-	collectState,
-	fingerprint,
-	plainError,
-} from '../src/core/collect.ts';
+import { ACTIVE_CALM_MS, CANDIDATE_MS, collectState, plainError } from '../src/core/collect.ts';
 import { publishState } from '../src/core/enroll.ts';
 import { ServiceError } from '../src/core/errors.ts';
+import { usageCachePath } from '../src/core/paths.ts';
 import { loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
+import { renewInstalled, renewSaved } from '../src/core/renew.ts';
 import { prepareSession, sessionDir } from '../src/core/session.ts';
+import { holdSwitch } from '../src/core/switch-lock.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
-import { loadCredential, storeCredential } from '../src/core/vault.ts';
+import { fingerprint, loadCredential, storeCredential } from '../src/core/vault.ts';
 import { cred, type FakeProvider, fakeProviders, tokenOf } from './fake-provider.ts';
 import { withHome } from './helpers.ts';
 
@@ -683,6 +680,356 @@ describe('renewing a saved login', () => {
 			await collectState({ providers, now: T, awake: halfAwake });
 			expect(providers.claude.refreshesOf.get('A')).toBeUndefined();
 			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+});
+
+describe('renewing the login in use', () => {
+	test('a renewal that cannot be installed is kept, and installed next time without spending its token again', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			providers.claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			providers.claude.rotate = '+';
+			providers.claude.spends = true;
+			providers.claude.writeFailure = new Error('keychain locked');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+			providers.claude.writeFailure = null;
+			const state = await collectState({
+				providers,
+				now: T + MIN,
+				force: true,
+				awake: async () => true,
+			});
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A+');
+			expect(providers.claude.refreshesOf.get('A')).toBe(1);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A+');
+			expect(
+				state.providers.claude.accounts.find((account) => account.id === a.id)?.usage?.error,
+			).toBeUndefined();
+		});
+	});
+});
+
+describe('a kept renewal whose login was switched away from', () => {
+	test('is filed under its account, not lost, and that account is never renewed from its spent token', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.rotate = '+';
+			claude.spends = true;
+			claude.writeFailure = new Error('keychain locked');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			claude.writeFailure = null;
+			claude.installed = cred('B');
+			await updateRegistry((registry) => {
+				registry.active.claude = b.id;
+			});
+			const state = await collectState({
+				providers,
+				now: T + MIN,
+				force: true,
+				awake: async () => true,
+			});
+			expect(claude.refreshesOf.get('A')).toBe(1);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toStartWith('A+');
+			const usage = state.providers.claude.accounts.find((account) => account.id === a.id)?.usage;
+			expect(usage?.error).toBeUndefined();
+		});
+	});
+});
+
+describe('a renewal saved but never installed', () => {
+	test('stays with its account when another login is put in use and renewed', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.rotate = '+';
+			claude.spends = true;
+			claude.writeFailure = new Error('keychain locked');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			claude.writeFailure = null;
+			claude.identities.set('B2', { email: 'b@example.com' });
+			claude.installed = cred('B2', 0, T - MIN);
+			await storeCredential(b, cred('B2', 0, T - MIN));
+			await updateRegistry((registry) => {
+				registry.active.claude = b.id;
+			});
+			await renewInstalled(claude, b, cred('B2', 0, T - MIN), () => true);
+			expect(tokenOf(claude.installed ?? {})).toBe('B2+');
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('B2+');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A+');
+			expect(claude.refreshesOf.get('A')).toBe(1);
+		});
+	});
+});
+
+describe('a renewal that could not be installed, for a login the service cannot name', () => {
+	test('is still put in once installing works again', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.identities.delete('A');
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.rotate = '+';
+			claude.spends = true;
+			claude.writeFailure = new Error('keychain locked');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A+');
+			claude.writeFailure = null;
+			await collectState({ providers, now: T + MIN, force: true, awake: async () => true });
+			expect(tokenOf(claude.installed ?? {})).toBe('A+');
+			expect(claude.refreshesOf.get('A')).toBe(1);
+		});
+	});
+});
+
+describe('renewing the login in use while something else changes it', () => {
+	test("a login put in after the one named is never replaced by the named account's login", async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			await storeCredential(a, cred('A2', 5));
+			claude.installed = cred('B', 0, T - MIN);
+			const named = cred('A', 0, T - MIN);
+			expect(tokenOf((await renewInstalled(claude, a, named, () => true)) ?? {})).toBe('B');
+			expect(tokenOf(claude.installed ?? {})).toBe('B');
+		});
+	});
+
+	test('a login that changed hands since it was named is left alone', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('B', 0, T - MIN);
+			claude.rotate = '+';
+			expect(
+				tokenOf((await renewInstalled(claude, a, cred('B', 0, T - MIN), () => true)) ?? {}),
+			).toBe('B');
+			expect(claude.refreshesOf.get('B') ?? 0).toBe(0);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A');
+		});
+	});
+
+	test('a switch that finishes first is never undone by the renewal', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.rotate = '+';
+			claude.refreshDelayMs = 50;
+			const switching = await holdSwitch('claude');
+			const renewing = renewInstalled(claude, a, cred('A', 0, T - MIN), (login) => {
+				const expires = claude.expiresAt(login);
+				return expires !== undefined && expires <= T;
+			});
+			await Bun.sleep(30);
+			claude.installed = cred('B');
+			await switching.release();
+			await renewing;
+			expect(tokenOf(claude.installed ?? {})).toBe('B');
+			expect(claude.refreshesOf.get('A') ?? 0).toBe(0);
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('B');
+		});
+	});
+
+	test('a renewal is never saved over a sign-in made while it was under way', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.rotate = '+';
+			claude.refreshDelayMs = 50;
+			const renewing = renewInstalled(claude, a, cred('A', 0, T - MIN), () => true);
+			await Bun.sleep(20);
+			await storeCredential(a, cred('NEW-SIGN-IN', 9));
+			await renewing;
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW-SIGN-IN');
+		});
+	});
+});
+
+describe('renewing one login from two places at once', () => {
+	test('a saved copy and the installed login holding one token are renewed once, never twice', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('B', 0, T - MIN);
+			await storeCredential(b, cred('B', 0, T - MIN));
+			claude.rotate = '+';
+			claude.spends = true;
+			claude.refreshDelayMs = 50;
+			const results = await Promise.allSettled([
+				renewSaved(claude, b),
+				renewInstalled(claude, b, cred('B', 0, T - MIN), () => true),
+			]);
+			expect(claude.refreshesOf.get('B')).toBe(1);
+			expect(tokenOf(claude.installed ?? {})).toBe('B+');
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('B+');
+			expect(
+				results.flatMap((result) => (result.status === 'rejected' ? [String(result.reason)] : [])),
+			).not.toContainEqual(expect.stringContaining('invalid_grant'));
+		});
+	});
+});
+
+describe('not knowing what is in use', () => {
+	test('a login in use that cannot be read is neither renewed nor read from its saved copy', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.rotate = '+';
+			providers.claude.readFailure = new Error('security: timed out');
+			const state = await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(providers.claude.refreshesOf.get('A') ?? 0).toBe(0);
+			expect(providers.claude.readsOf.get('A') ?? 0).toBe(0);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A');
+			const byId = new Map(state.providers.claude.accounts.map((account) => [account.id, account]));
+			expect(byId.get(a.id)?.usage?.error).toBe(
+				'could not confirm which login is in use - trying again shortly',
+			);
+			expect(byId.get(b.id)?.usage?.windows.length).toBe(2);
+		});
+	});
+
+	test('an expired login in use is not renewed while nobody can tell whether an agent is using it', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			providers.claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			providers.claude.rotate = '+';
+			providers.claude.scanFailure = new Error('could not list processes');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(providers.claude.refreshesOf.get('A') ?? 0).toBe(0);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+});
+
+describe('a window that has reset', () => {
+	const HOUR = 3_600_000;
+	function split(
+		short: number,
+		shortReset: number,
+		week: number,
+		weekReset: number,
+	): UsageSnapshot {
+		return {
+			fetchedAt: new Date(T).toISOString(),
+			windows: [
+				{
+					key: 'five_hour',
+					label: '5h',
+					percent: short,
+					resetsAt: new Date(shortReset).toISOString(),
+				},
+				{
+					key: 'seven_day',
+					label: 'week',
+					percent: week,
+					resetsAt: new Date(weekReset).toISOString(),
+				},
+			],
+		};
+	}
+
+	test('reads as empty once its reset has passed, even while the account cannot be read again', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.readings.set('B', () => split(100, T + HOUR, 50, T + 100 * HOUR));
+			await collectState({ providers, now: T, force: true });
+			providers.claude.failures.set('B', new Error('fetch failed'));
+			const later = await collectState({ providers, now: T + HOUR + 5 * MIN, force: true });
+			const windows = later.providers.claude.accounts.find((account) => account.id === b.id)?.usage
+				?.windows;
+			expect(windows?.find((window) => window.key === 'five_hour')?.percent).toBe(0);
+			expect(windows?.find((window) => window.key === 'seven_day')?.percent).toBe(50);
+		});
+	});
+
+	test('a fresh reading of all zeros replaces numbers whose windows have all reset', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.readings.set('B', () => split(100, T + HOUR, 100, T + 2 * HOUR));
+			await collectState({ providers, now: T, force: true });
+			providers.claude.readings.set('B', () => ({
+				fetchedAt: new Date(T).toISOString(),
+				windows: [
+					{ key: 'five_hour', label: '5h', percent: 0 },
+					{ key: 'seven_day', label: 'week', percent: 0 },
+				],
+			}));
+			const later = await collectState({ providers, now: T + 3 * HOUR, force: true });
+			const windows = later.providers.claude.accounts.find((account) => account.id === b.id)?.usage
+				?.windows;
+			expect(windows?.map((window) => window.percent)).toEqual([0, 0]);
+		});
+	});
+});
+
+describe('two passes at once', () => {
+	test('a slower pass carrying an older reading from the agent never replaces a newer one', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			await collectState({ providers, now: T, force: true });
+			const other = fakeProviders();
+			other.claude.installed = cred('A');
+			other.claude.identities.set('A', { email: 'a@example.com', plan: 'max' });
+			other.claude.identities.set('B', { email: 'b@example.com' });
+			other.claude.readings.set('A', () => reading(50));
+			other.claude.readings.set('B', () => reading(10));
+			const local = (percent: number, at: number) => ({
+				fetchedAtMs: at,
+				windows: [
+					{
+						key: 'five_hour',
+						label: '5h',
+						percent,
+						resetsAt: new Date(T + 5 * 3_600_000).toISOString(),
+					},
+				],
+			});
+			providers.claude.local = local(20, T + 20_000);
+			providers.claude.localDelayMs = 100;
+			other.claude.local = local(95, T + 40_000);
+			const slow = collectState({ providers, now: T + MIN });
+			await Bun.sleep(20);
+			await collectState({ providers: other, now: T + MIN });
+			await slow;
+			const stored = (await Bun.file(usageCachePath()).json()) as {
+				entries: Record<string, { snapshot: UsageSnapshot }>;
+			};
+			const percent = stored.entries[a.id]?.snapshot.windows.find(
+				(window) => window.key === 'five_hour',
+			)?.percent;
+			expect(percent).toBe(95);
+		});
+	});
+
+	test('a slow pass that started first never replaces the newer reading of a later one', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.readings.set('B', () => reading(10));
+			providers.claude.fetchDelayMs = 100;
+			const slow = collectState({ providers, now: T, force: true });
+			await Bun.sleep(20);
+			providers.claude.fetchDelayMs = 0;
+			providers.claude.readings.set('B', () => reading(95));
+			await collectState({ providers, now: T + MIN, force: true });
+			await slow;
+			const reads = providers.claude.readsOf.get('B');
+			const after = await collectState({ providers, now: T + MIN + 1000 });
+			const percent = after.providers.claude.accounts.find((account) => account.id === b.id)?.usage
+				?.windows[0]?.percent;
+			expect(percent).toBe(95);
+			expect(providers.claude.readsOf.get('B')).toBe(reads);
 		});
 	});
 });

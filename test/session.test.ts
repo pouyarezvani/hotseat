@@ -131,6 +131,36 @@ describe('running one terminal as another account', () => {
 		expect(needsSession({ accounts: [] }, 'a')).toBe(true);
 	});
 
+	test('a session copy confirmed only after a newer login was saved does not replace it', async () => {
+		await withHome(async (home) => {
+			const { claude, b } = await world(home);
+			const dir = sessionDir(claude, b);
+			await mkdir(dir, { recursive: true });
+			await claude.session.writeLogin(dir, cred('B2', 200));
+			claude.identities.set('B2', { email: 'b@example.com' });
+			claude.identifyDelayMs = 50;
+			const adopting = freshestLogin(claude, b);
+			await Bun.sleep(10);
+			await storeCredential(b, cred('B3', 300));
+			expect(await adopting).toEqual(cred('B3', 300));
+			expect(await loadCredential(b)).toEqual(cred('B3', 300));
+		});
+	});
+
+	test('accounts whose addresses differ only in letters outside plain ASCII get folders of their own', async () => {
+		await withHome(async () => {
+			const { claude } = fakeProviders();
+			const first = sessionDir(claude, { email: 'élise@example.com' });
+			const second = sessionDir(claude, { email: 'ëlise@example.com' });
+			expect(first).not.toBe(second);
+			expect(
+				sessionDir(claude, { email: 'One.Two+x_y-z@example.com' }).endsWith(
+					'/sessions/claude/one.two+x_y-z@example.com',
+				),
+			).toBe(true);
+		});
+	});
+
 	test('freshest login prefers whichever copy was issued later', async () => {
 		await withHome(async (home) => {
 			const { claude, b } = await world(home);
@@ -268,7 +298,7 @@ describe('keeping sessions honest', () => {
 });
 
 describe("Claude Code's own record of who is signed in", () => {
-	test('is rewritten after a switch, keeping everything else in the file', async () => {
+	test('is rewritten after a switch, keeping everything else in the file but nothing of the old account', async () => {
 		await withHome(async (home) => {
 			const path = join(home, 'claude.json');
 			await writeFile(
@@ -296,7 +326,32 @@ describe("Claude Code's own record of who is signed in", () => {
 					organizationUuid: 'org-new',
 					accountUuid: 'acc-new',
 					organizationName: 'New Org',
+				},
+			});
+		});
+	});
+
+	test('signing in to the same account again keeps what Claude Code recorded about it', async () => {
+		await withHome(async (home) => {
+			const path = join(home, 'claude.json');
+			await writeFile(
+				path,
+				JSON.stringify({
+					oauthAccount: {
+						emailAddress: 'Same@example.com',
+						organizationUuid: 'org-1',
+						organizationRole: 'admin',
+						displayName: 'Same',
+					},
+				}),
+			);
+			await updateOauthAccount(path, { email: 'same@example.com' });
+			expect(await Bun.file(path).json()).toEqual({
+				oauthAccount: {
+					emailAddress: 'same@example.com',
+					organizationUuid: 'org-1',
 					organizationRole: 'admin',
+					displayName: 'Same',
 				},
 			});
 		});

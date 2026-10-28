@@ -6,6 +6,15 @@ import type { AccountRecord, Credential } from './types.ts';
  * three things anything else needs to do with one.
  */
 
+/**
+ * Whatever changes when a login is replaced or its token rotated. The whole
+ * credential is hashed rather than one field so no service-specific shape has
+ * to be known here.
+ */
+export function fingerprint(credential: Credential): string {
+	return new Bun.CryptoHasher('sha256').update(JSON.stringify(credential)).digest('hex');
+}
+
 export async function storeCredential(
 	account: Pick<AccountRecord, 'id'>,
 	credential: Credential,
@@ -14,6 +23,26 @@ export async function storeCredential(
 		const record = registry.accounts.find((entry) => entry.id === account.id);
 		if (!record) throw new Error('that account is no longer in accounts.json');
 		record.login = structuredClone(credential);
+	});
+}
+
+/**
+ * Saves a login for the account unless `keepSaved` says the login saved at that
+ * moment should stay. The check runs inside the write, so a copy judged against
+ * what was saved earlier can never replace a login saved since. Says whether
+ * it saved.
+ */
+export async function storeCredentialUnless(
+	account: Pick<AccountRecord, 'id'>,
+	credential: Credential,
+	keepSaved: (saved: Credential) => boolean,
+): Promise<boolean> {
+	return updateRegistry((registry) => {
+		const record = registry.accounts.find((entry) => entry.id === account.id);
+		if (!record) throw new Error('that account is no longer in accounts.json');
+		if (record.login && keepSaved(record.login)) return false;
+		record.login = structuredClone(credential);
+		return true;
 	});
 }
 

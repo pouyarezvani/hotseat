@@ -18,6 +18,7 @@ import {
 import { accountsFor, loadRegistry } from './registry.ts';
 import { loadSettings, type Settings } from './settings.ts';
 import { activate } from './switch.ts';
+import { holdSwitch } from './switch-lock.ts';
 import type { AccountState, Provider, ProviderId, ProviderState } from './types.ts';
 import { fullyAwake } from './wake.ts';
 
@@ -199,8 +200,10 @@ export async function tick(
 				detail: 'the Mac is asleep - waiting until it wakes',
 			}));
 	}
-	const state = await collectState(options);
+	// Read before the accounts are, so a switch made at any point after this,
+	// even while they are being read, is seen when this pass comes to act.
 	const auto = await loadAutoState();
+	const state = await collectState(options);
 	const now = options.now ?? Date.now();
 
 	for (const providerId of Object.keys(PROVIDERS) as ProviderId[]) {
@@ -226,64 +229,81 @@ export async function tick(
 			});
 			continue;
 		}
-		const trigger = decision.trigger ?? 'proactive';
-		const skipped: string[] = [];
-		let landed: Awaited<ReturnType<typeof activate>> | undefined;
-		let chosen = decision.target;
-		for (const candidate of decision.targets) {
-			try {
-				landed = await activate(providerId, candidate.id, options);
-				chosen = candidate;
-				break;
-			} catch (error) {
-				skipped.push(`${candidate.email}: ${(error as Error).message}`);
+		// Decided on the board as it was; once this pass may act, it checks no
+		// other switch landed in between, which it would otherwise undo.
+		const held = await holdSwitch(providerId);
+		try {
+			const latest = (await loadAutoState()).memory[providerId] ?? {};
+			if (latest.lastSwitchAt !== memory.lastSwitchAt) {
+				reports.push({
+					provider: providerId,
+					outcome: 'holding',
+					detail:
+						'the account in use was switched while this pass was deciding - deciding again next pass',
+				});
+				continue;
 			}
-		}
-		if (!landed || !chosen) {
+			const trigger = decision.trigger ?? 'proactive';
+			const skipped: string[] = [];
+			let landed: Awaited<ReturnType<typeof activate>> | undefined;
+			let chosen = decision.target;
+			for (const candidate of decision.targets) {
+				try {
+					landed = await activate(providerId, candidate.id, options);
+					chosen = candidate;
+					break;
+				} catch (error) {
+					skipped.push(`${candidate.email}: ${(error as Error).message}`);
+				}
+			}
+			if (!landed || !chosen) {
+				reports.push({
+					provider: providerId,
+					outcome: 'blocked',
+					detail: skipped.join('; ') || 'no account could be switched to',
+					trigger,
+				});
+				continue;
+			}
+			const result = landed;
+			const leftHeadroom = active ? headroom(active, policy.modelLimits) : undefined;
+			const leftRecovery = active
+				? bindingRecoveryAt(active, policy.modelLimits, now)
+				: Number.POSITIVE_INFINITY;
+			// Memory is written before the history line, and to disk right away:
+			// once the login has changed, a crash must not leave the next pass
+			// free to change it straight back.
+			await rememberFor(providerId, {
+				lastSwitchAt: now,
+				lastSwitchTo: chosen.id,
+				...(active ? { lastSwitchFrom: active.id } : {}),
+				leftHeadroom: leftHeadroom ?? null,
+				leftRecoveryAt: Number.isFinite(leftRecovery) ? leftRecovery : null,
+				leftTrigger: trigger,
+			});
+			await recordSwitch({
+				at: new Date(now).toISOString(),
+				provider: providerId,
+				...(result.from ? { from: result.from } : {}),
+				to: result.to,
+				reason: 'auto',
+				...(leftHeadroom !== undefined ? { leftAtPercent: Math.round(100 - leftHeadroom) } : {}),
+			});
+			const restart =
+				result.runningProcesses > 0 && !result.liveSwap
+					? ` (${result.runningProcesses} open ${result.runningProcesses === 1 ? 'session keeps' : 'sessions keep'} the old account until restarted)`
+					: '';
+			const passedOver = skipped.length > 0 ? ` after passing over ${skipped.join('; ')}` : '';
 			reports.push({
 				provider: providerId,
-				outcome: 'blocked',
-				detail: skipped.join('; ') || 'no account could be switched to',
+				outcome: 'switched',
+				detail: `switched to ${result.to}${restart}${passedOver}`,
 				trigger,
+				to: result.to,
 			});
-			continue;
+		} finally {
+			await held.release();
 		}
-		const result = landed;
-		const leftHeadroom = active ? headroom(active, policy.modelLimits) : undefined;
-		const leftRecovery = active
-			? bindingRecoveryAt(active, policy.modelLimits, now)
-			: Number.POSITIVE_INFINITY;
-		// Memory is written before the history line, and to disk right away:
-		// once the login has changed, a crash must not leave the next pass
-		// free to change it straight back.
-		await rememberFor(providerId, {
-			lastSwitchAt: now,
-			lastSwitchTo: chosen.id,
-			...(active ? { lastSwitchFrom: active.id } : {}),
-			leftHeadroom: leftHeadroom ?? null,
-			leftRecoveryAt: Number.isFinite(leftRecovery) ? leftRecovery : null,
-			leftTrigger: trigger,
-		});
-		await recordSwitch({
-			at: new Date(now).toISOString(),
-			provider: providerId,
-			...(result.from ? { from: result.from } : {}),
-			to: result.to,
-			reason: 'auto',
-			...(leftHeadroom !== undefined ? { leftAtPercent: Math.round(100 - leftHeadroom) } : {}),
-		});
-		const restart =
-			result.runningProcesses > 0 && !result.liveSwap
-				? ` (${result.runningProcesses} open ${result.runningProcesses === 1 ? 'session keeps' : 'sessions keep'} the old account until restarted)`
-				: '';
-		const passedOver = skipped.length > 0 ? ` after passing over ${skipped.join('; ')}` : '';
-		reports.push({
-			provider: providerId,
-			outcome: 'switched',
-			detail: `switched to ${result.to}${restart}${passedOver}`,
-			trigger,
-			to: result.to,
-		});
 	}
 
 	return reports;

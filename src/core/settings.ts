@@ -1,5 +1,5 @@
-import { readJson, writeJsonAtomic } from './fs.ts';
-import { settingsPath } from './paths.ts';
+import { acquireLock, readJson, writeJsonAtomic } from './fs.ts';
+import { hotseatHome, settingsPath } from './paths.ts';
 
 export type TitlePercentage = 'worst' | 'all' | 'none';
 
@@ -178,14 +178,25 @@ export function coerce(key: keyof Settings, raw: string): Settings[keyof Setting
 
 /** Writes only the touched key, so later default changes still reach this file. */
 export async function setSetting(key: keyof Settings, raw: string): Promise<Settings> {
-	const stored = (await readJson<Partial<Settings>>(settingsPath())) ?? {};
-	await writeJsonAtomic(settingsPath(), { ...stored, version: 1, [key]: coerce(key, raw) });
+	const value = coerce(key, raw);
+	const lock = await acquireLock(hotseatHome(), 10_000, 'settings.lock');
+	try {
+		const stored = (await readJson<Partial<Settings>>(settingsPath())) ?? {};
+		await writeJsonAtomic(settingsPath(), { ...stored, version: 1, [key]: value });
+	} finally {
+		await lock.release();
+	}
 	return loadSettings();
 }
 
 export async function resetSetting(key: keyof Settings): Promise<Settings> {
-	const stored = (await readJson<Partial<Settings>>(settingsPath())) ?? {};
-	delete stored[key];
-	await writeJsonAtomic(settingsPath(), { ...stored, version: 1 });
+	const lock = await acquireLock(hotseatHome(), 10_000, 'settings.lock');
+	try {
+		const stored = (await readJson<Partial<Settings>>(settingsPath())) ?? {};
+		delete stored[key];
+		await writeJsonAtomic(settingsPath(), { ...stored, version: 1 });
+	} finally {
+		await lock.release();
+	}
 	return loadSettings();
 }

@@ -20,7 +20,7 @@ import {
 	swapSlots,
 } from '../src/core/transfer.ts';
 import { loadCredential, storeCredential } from '../src/core/vault.ts';
-import { credential, withHome } from './helpers.ts';
+import { CREDENTIAL_EXPIRY, credential, withHome } from './helpers.ts';
 
 async function add(email: string, provider: 'claude' | 'codex' = 'claude') {
 	return updateRegistry((registry) => upsertAccount(registry, { provider, email }));
@@ -40,6 +40,28 @@ afterEach(async () => {
 });
 
 describe('per-folder rules', () => {
+	test('rules set and removed at the same moment all take effect', async () => {
+		await withHome(async () => {
+			const account = await add('one@example.com');
+			const rule = (path: string) => ({
+				path,
+				provider: 'claude' as const,
+				accountId: account.id,
+				email: account.email,
+			});
+			await setMapping(rule('/tmp/gone'));
+			await Promise.all([
+				setMapping(rule('/tmp/one')),
+				setMapping(rule('/tmp/two')),
+				removeMapping('/tmp/gone'),
+			]);
+			expect((await listMappings()).map((mapping) => mapping.path).sort()).toEqual([
+				'/tmp/one',
+				'/tmp/two',
+			]);
+		});
+	});
+
 	test('a rule applies to the folder it was set on', async () => {
 		await withHome(async () => {
 			const account = await add('one@example.com');
@@ -363,6 +385,72 @@ describe('naming an account', () => {
 });
 
 describe('importing', () => {
+	async function bundle(accounts: Record<string, unknown>[]): Promise<string> {
+		const file = await scratchFile('accounts.json');
+		await Bun.write(file, JSON.stringify({ version: 1, exportedAt: 'x', accounts }));
+		return file;
+	}
+
+	test('an account whose id is already used here gets an id of its own, and leaves the other login alone', async () => {
+		await withHome(async () => {
+			const mine = await add('one@example.com');
+			await storeCredential(mine, credential('mine'));
+			const file = await bundle([
+				{
+					id: mine.id,
+					provider: 'claude',
+					email: 'two@example.com',
+					slot: 1,
+					login: credential('theirs'),
+				},
+			]);
+			expect(await importAccounts(file)).toBe(1);
+			const registry = await loadRegistry();
+			expect(new Set(registry.accounts.map((account) => account.id)).size).toBe(2);
+			expect(await loadCredential(mine)).toEqual(credential('mine'));
+			const theirs = findAccount(registry, 'claude', 'two@example.com');
+			if (!theirs) throw new Error('not imported');
+			expect(await loadCredential(theirs)).toEqual(credential('theirs'));
+		});
+	});
+
+	test('an account with no id is brought in with its login', async () => {
+		await withHome(async () => {
+			const file = await bundle([
+				{ provider: 'claude', email: 'one@example.com', slot: 1, login: credential('abc') },
+			]);
+			expect(await importAccounts(file)).toBe(1);
+			const [account] = (await loadRegistry()).accounts;
+			if (!account) throw new Error('not imported');
+			expect(await loadCredential(account)).toEqual(credential('abc'));
+		});
+	});
+
+	test('a file refused part-way through changes nothing', async () => {
+		await withHome(async () => {
+			const file = await bundle([
+				{ provider: 'claude', email: 'one@example.com', slot: 1, login: credential('abc') },
+				{ provider: 'claude', email: 'x@example.com' },
+			]);
+			await expect(importAccounts(file)).rejects.toThrow(/not a hotseat account/);
+			expect((await loadRegistry()).accounts).toEqual([]);
+		});
+	});
+
+	test('an older login for an account already here does not replace the newer one', async () => {
+		await withHome(async () => {
+			const mine = await add('one@example.com');
+			const newer = credential('newer');
+			(newer.claudeAiOauth as Record<string, unknown>).expiresAt = CREDENTIAL_EXPIRY + 3_600_000;
+			await storeCredential(mine, newer);
+			const file = await bundle([
+				{ provider: 'claude', email: 'one@example.com', slot: 1, login: credential('older') },
+			]);
+			expect(await importAccounts(file)).toBe(1);
+			expect(await loadCredential(mine)).toEqual(newer);
+		});
+	});
+
 	test('an entry that is not an account is refused before anything is written', async () => {
 		await withHome(async () => {
 			const file = await scratchFile('accounts.json');

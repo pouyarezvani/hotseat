@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { PROVIDERS } from './collect.ts';
 import { readJson, writeJsonAtomic } from './fs.ts';
@@ -6,7 +7,6 @@ import { accountsFor, loadRegistry, updateRegistry } from './registry.ts';
 import { forgetSession } from './session.ts';
 import type { AccountRecord, Credential, Provider, ProviderId, Registry } from './types.ts';
 import { PROVIDER_IDS } from './types.ts';
-import { storeCredential } from './vault.ts';
 
 interface Bundle {
 	version: 1;
@@ -30,15 +30,20 @@ export async function exportAccounts(path: string): Promise<number> {
 	return registry.accounts.length;
 }
 
+/**
+ * Brings in the accounts an export holds, all of them or none: every entry is
+ * checked before anything is written, and everything is written at once. A
+ * new account is given an id of its own here, so an id already in use cannot
+ * point two accounts at one login. An account already here keeps its login
+ * when that login is newer than the one in the file.
+ */
 export async function importAccounts(path: string): Promise<number> {
 	const bundle = await readJson<Bundle>(path);
 	if (bundle?.version !== 1 || !Array.isArray(bundle.accounts)) {
 		throw new Error(`${path} is not a hotseat export`);
 	}
-	let imported = 0;
-	for (const entry of bundle.accounts) {
+	const entries = bundle.accounts.map((entry) => {
 		const { credential, login, ...record } = entry;
-		const saved = login ?? credential ?? undefined;
 		const shaped =
 			typeof record === 'object' &&
 			record !== null &&
@@ -48,26 +53,42 @@ export async function importAccounts(path: string): Promise<number> {
 			Number.isInteger(record.slot) &&
 			record.slot > 0;
 		if (!shaped) throw new Error(`${path} has an account entry that is not a hotseat account`);
-		record.disabled = record.disabled === true;
-		if (typeof record.addedAt !== 'string') record.addedAt = new Date().toISOString();
-		const account = await updateRegistry((registry) => {
+		return { record, saved: login ?? credential ?? undefined };
+	});
+	return updateRegistry((registry) => {
+		for (const { record, saved } of entries) {
 			const existing = registry.accounts.find(
 				(candidate) =>
 					candidate.provider === record.provider &&
 					candidate.email.toLowerCase() === record.email.toLowerCase(),
 			);
-			if (existing) return existing;
+			if (existing) {
+				const newerHere =
+					existing.login !== undefined &&
+					saved !== undefined &&
+					PROVIDERS[record.provider].session.compareAge(saved, existing.login) < 0;
+				if (saved && !newerHere) existing.login = structuredClone(saved);
+				continue;
+			}
 			const taken = new Set(accountsFor(registry, record.provider).map((a) => a.slot));
 			let slot = record.slot;
 			while (taken.has(slot)) slot += 1;
-			const created: AccountRecord = { ...record, slot };
-			registry.accounts.push(created);
-			return created;
-		});
-		if (saved) await storeCredential(account, saved);
-		imported += 1;
-	}
-	return imported;
+			registry.accounts.push({
+				id: randomUUID(),
+				provider: record.provider,
+				email: record.email,
+				slot,
+				disabled: record.disabled === true,
+				addedAt: typeof record.addedAt === 'string' ? record.addedAt : new Date().toISOString(),
+				...(typeof record.alias === 'string' && record.alias.length > 0
+					? { alias: record.alias }
+					: {}),
+				...(typeof record.plan === 'string' && record.plan.length > 0 ? { plan: record.plan } : {}),
+				...(saved ? { login: structuredClone(saved) } : {}),
+			});
+		}
+		return entries.length;
+	});
 }
 
 /** Exchanges two accounts' numbers, so the order matches how you think about them. */

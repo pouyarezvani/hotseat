@@ -189,6 +189,11 @@ export class ClaudeProvider implements Provider {
 		};
 	}
 
+	sharesToken(a: Credential, b: Credential): boolean {
+		const token = oauthOf(a)?.refreshToken;
+		return token !== undefined && token.length > 0 && token === oauthOf(b)?.refreshToken;
+	}
+
 	expiresAt(credential: Credential): number | undefined {
 		const expires = oauthOf(credential)?.expiresAt;
 		return expires !== undefined && expires > 0 ? expires : undefined;

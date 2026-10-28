@@ -11,13 +11,15 @@ import type {
 	UsageSnapshot,
 	UsageWindow,
 } from '../../core/types.ts';
-import { listProcesses } from '../process.ts';
+import { listProcesses, markedRunning } from '../process.ts';
 
 const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const ORIGINATOR = 'codex_cli_rs';
 const REFRESH_AFTER_MS = 24 * 60 * 60 * 1000;
+/** How close to its expiry an access token is renewed rather than used. */
+const REFRESH_MARGIN_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 interface CodexTokens {
@@ -85,9 +87,10 @@ export const codexSession: SessionSupport = {
 	compareAge(a, b) {
 		return lastRefresh(a) - lastRefresh(b);
 	},
-	// Codex leaves no record of which home a running process uses, so a
-	// session is never known to be running; nothing outside the folder to forget.
-	isRunning: async () => false,
+	// Codex leaves no record of which home a running process uses, so a session
+	// is running while the agent hotseat started in it is; nothing outside the
+	// folder to forget.
+	isRunning: markedRunning,
 	forget: async () => undefined,
 };
 
@@ -128,8 +131,8 @@ export function mapUsage(payload: UsagePayload, fetchedAt: string): UsageSnapsho
 	return { fetchedAt, windows };
 }
 
-function decodeClaims(idToken: string | undefined): Record<string, unknown> {
-	const payload = idToken?.split('.')[1];
+function decodeClaims(token: string | undefined): Record<string, unknown> {
+	const payload = token?.split('.')[1];
 	if (!payload) return {};
 	try {
 		return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<
@@ -179,11 +182,7 @@ export class CodexProvider implements Provider {
 
 	async fetchUsage(credential: Credential): Promise<UsageSnapshot> {
 		const fetchedAt = new Date().toISOString();
-		try {
-			return mapUsage(await this.requestUsage(credential), fetchedAt);
-		} catch (error) {
-			return { fetchedAt, windows: [], error: (error as Error).message };
-		}
+		return mapUsage(await this.requestUsage(credential), fetchedAt);
 	}
 
 	private async requestUsage(credential: Credential): Promise<UsagePayload> {
@@ -208,11 +207,24 @@ export class CodexProvider implements Provider {
 		return (await response.json()) as UsagePayload;
 	}
 
+	expiresAt(credential: Credential): number | undefined {
+		const exp = decodeClaims(tokensOf(credential)?.access_token).exp;
+		return typeof exp === 'number' && Number.isFinite(exp) ? exp * 1000 : undefined;
+	}
+
+	sharesToken(a: Credential, b: Credential): boolean {
+		const token = tokensOf(a)?.refresh_token;
+		return token !== undefined && token.length > 0 && token === tokensOf(b)?.refresh_token;
+	}
+
 	async refreshIfNeeded(credential: Credential): Promise<Credential> {
 		const tokens = tokensOf(credential);
 		if (!tokens) return credential;
 		const last = Date.parse((credential as CodexAuth).last_refresh ?? '');
-		if (Number.isFinite(last) && Date.now() - last < REFRESH_AFTER_MS) return credential;
+		const expires = this.expiresAt(credential);
+		const recent = Number.isFinite(last) && Date.now() - last < REFRESH_AFTER_MS;
+		const valid = expires === undefined || expires > Date.now() + REFRESH_MARGIN_MS;
+		if (recent && valid) return credential;
 		const response = await fetch(TOKEN_URL, {
 			method: 'POST',
 			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),

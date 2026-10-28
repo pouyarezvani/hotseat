@@ -740,3 +740,26 @@ describe('an account you picked by hand', () => {
 		expect(decideTrigger(picked, settings, settled(), 3, NOW).trigger).toBe('failover');
 	});
 });
+
+describe('an account whose login was refused', () => {
+	test('changes nothing about which other accounts qualify', () => {
+		const active = account('active', { weekly: [98, 100] });
+		const available = account('available', { weekly: [92, 2] }, 2);
+		const base = account('refused', { weekly: [10, 50] }, 3);
+		const refused: AccountState = {
+			...base,
+			usage: { fetchedAt: inHours(0), windows: base.usage?.windows ?? [], errorKind: 'auth' },
+		};
+		const rank = (accounts: AccountState[]): string[] =>
+			rankCandidates({
+				trigger: 'proactive',
+				accounts,
+				activeId: 'active',
+				noReturn: undefined,
+				settings: policy,
+				now: NOW,
+			}).map((candidate) => candidate.id);
+		expect(rank([active, available])).toEqual(['available']);
+		expect(rank([active, available, refused])).toEqual(['available']);
+	});
+});

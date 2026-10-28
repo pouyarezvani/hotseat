@@ -65,6 +65,17 @@ describe('credential handling', () => {
 		expect(oauthOf(merged)?.accessToken).toBe('new');
 		expect(merged.mcpOAuth).toEqual({ sentry: 'token' });
 	});
+
+	test("switching to an account with no organization drops the previous account's", () => {
+		const live = {
+			claudeAiOauth: { accessToken: 'old', refreshToken: 'old-r', expiresAt: 1 },
+			organizationUuid: 'org-old',
+		};
+		const incoming = {
+			claudeAiOauth: { accessToken: 'new', refreshToken: 'new-r', expiresAt: 2 },
+		};
+		expect(mergeAccountKeys(live, incoming).organizationUuid).toBeUndefined();
+	});
 });
 
 describe('token fallback', () => {

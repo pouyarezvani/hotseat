@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readJson } from '../../core/fs.ts';
+import { readJsonLoose } from '../../core/fs.ts';
 import type { RunningProcess } from '../../core/types.ts';
 
 function configHome(): string {
@@ -62,7 +62,7 @@ export async function claudeSessions(home = configHome()): Promise<RunningProces
 	const sessionNames = await readdir(join(home, 'sessions')).catch(() => [] as string[]);
 	for (const name of sessionNames) {
 		if (!name.endsWith('.json')) continue;
-		const session = await readJson<SessionFile>(join(home, 'sessions', name));
+		const session = await readJsonLoose<SessionFile>(join(home, 'sessions', name));
 		const pid = session?.pid;
 		if (typeof pid !== 'number' || !isAlive(pid)) continue;
 		const where = session?.cwd ? ` in ${session.cwd.split('/').pop()}` : '';
@@ -72,7 +72,7 @@ export async function claudeSessions(home = configHome()): Promise<RunningProces
 	const lockNames = await readdir(join(home, 'ide')).catch(() => [] as string[]);
 	for (const name of lockNames) {
 		if (!name.endsWith('.lock')) continue;
-		const lock = await readJson<IdeLock>(join(home, 'ide', name));
+		const lock = await readJsonLoose<IdeLock>(join(home, 'ide', name));
 		const pid = lock?.pid;
 		if (typeof pid !== 'number' || !isAlive(pid)) continue;
 		const folder = lock?.workspaceFolders?.[0]?.split('/').pop();

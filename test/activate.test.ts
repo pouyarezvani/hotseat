@@ -3,10 +3,17 @@ import { forgivenNames, rememberManualSwitch, tick } from '../src/core/auto.ts';
 import { collectState } from '../src/core/collect.ts';
 import { ServiceError } from '../src/core/errors.ts';
 import { readHistory } from '../src/core/history.ts';
-import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
+import {
+	accountsFor,
+	loadRegistry,
+	removeAccount,
+	updateRegistry,
+	upsertAccount,
+} from '../src/core/registry.ts';
 import { prepareSession, sessionDir } from '../src/core/session.ts';
 import { loadSettings, setSetting } from '../src/core/settings.ts';
 import { activate } from '../src/core/switch.ts';
+import { holdSwitch } from '../src/core/switch-lock.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
 import { dropCredential, loadCredential, storeCredential } from '../src/core/vault.ts';
 import { cred, type FakeProvider, fakeProviders, tokenOf } from './fake-provider.ts';
@@ -61,6 +68,18 @@ async function world(): Promise<{
 }
 
 describe('switching', () => {
+	test('a login in use that cannot be read is not overwritten', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.readFailure = new Error('security: timed out');
+			await expect(activate('claude', b.id, { providers, now: T })).rejects.toThrow(
+				'could not read the login in use (security: timed out) - not switching, so nothing is lost',
+			);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+			expect(providers.claude.calls.write).toBe(0);
+		});
+	});
+
 	test('installs the saved login and records which account is in use', async () => {
 		await withHome(async () => {
 			const { providers, a, b } = await world();
@@ -354,6 +373,108 @@ describe('switching while the Mac sleeps', () => {
 			expect(providers.claude.calls.fetchUsage).toBe(0);
 			expect(providers.claude.calls.refresh).toBe(0);
 			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+});
+
+describe('switching while something else changes', () => {
+	test('a login the agent renewed while the switch was under way is never overwritten', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.rotate = '+';
+			providers.claude.refreshDelayMs = 50;
+			const switching = activate('claude', b.id, { providers, now: T });
+			await Bun.sleep(20);
+			providers.claude.installed = cred('A2');
+			providers.claude.identities.set('A2', { email: 'a@example.com' });
+			await expect(switching).rejects.toThrow(
+				'the login in use changed while switching - not switching, so nothing is lost; try again',
+			);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A2');
+		});
+	});
+
+	test('an account removed while the switch was under way is not put in use', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.identifyDelayMs = 50;
+			const switching = activate('claude', b.id, { providers, now: T });
+			await Bun.sleep(20);
+			await updateRegistry((registry) => {
+				removeAccount(registry, b.id);
+			});
+			await expect(switching).rejects.toThrow('no saved login for b@example.com - it was removed');
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+
+	test('an automatic pass reading the accounts while a switch is made by hand stands down', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const c = await updateRegistry((registry) =>
+				upsertAccount(registry, { provider: 'claude', email: 'c@example.com' }),
+			);
+			await storeCredential(c, cred('C'));
+			providers.claude.identities.set('C', { email: 'c@example.com' });
+			providers.claude.readings.set('A', () => reading(95));
+			providers.claude.readings.set('B', () => reading(40, 6));
+			providers.claude.readings.set('C', () => reading(60, 120));
+			await setSetting('autoCooldownSeconds', '0');
+			providers.claude.fetchDelayMs = 150;
+			const automatic = tick({ providers, now: T });
+			while (providers.claude.calls.fetchUsage === 0) await Bun.sleep(5);
+			providers.claude.fetchDelayMs = 0;
+			const byHand = await holdSwitch('claude');
+			const before = await collectState({ providers, now: T });
+			await activate('claude', c.id, { providers, now: T });
+			await rememberManualSwitch({
+				provider: 'claude',
+				state: before.providers.claude,
+				fromId: a.id,
+				toId: c.id,
+				settings: await loadSettings(),
+				now: T,
+			});
+			await byHand.release();
+			const reports = await automatic;
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('C');
+			expect(reports[0]?.outcome).toBe('holding');
+		});
+	});
+
+	test('an automatic switch decided before a switch made by hand stands down', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const c = await updateRegistry((registry) =>
+				upsertAccount(registry, { provider: 'claude', email: 'c@example.com' }),
+			);
+			await storeCredential(c, cred('C'));
+			providers.claude.identities.set('C', { email: 'c@example.com' });
+			providers.claude.readings.set('A', () => reading(95));
+			providers.claude.readings.set('B', () => reading(40, 6));
+			providers.claude.readings.set('C', () => reading(60, 120));
+			const byHand = await holdSwitch('claude');
+			const automatic = tick({ providers, now: T });
+			while (providers.claude.calls.fetchUsage === 0) await Bun.sleep(5);
+			await Bun.sleep(150);
+			const before = await collectState({ providers, now: T });
+			await activate('claude', c.id, { providers, now: T });
+			await rememberManualSwitch({
+				provider: 'claude',
+				state: before.providers.claude,
+				fromId: a.id,
+				toId: c.id,
+				settings: await loadSettings(),
+				now: T,
+			});
+			await byHand.release();
+			const reports = await automatic;
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('C');
+			expect(reports[0]).toMatchObject({
+				outcome: 'holding',
+				detail:
+					'the account in use was switched while this pass was deciding - deciding again next pass',
+			});
 		});
 	});
 });

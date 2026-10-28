@@ -401,6 +401,10 @@ describe('the menu bar rests while the Mac sleeps', () => {
 		expect(menu).toContain('NSWorkspace.didWakeNotification');
 		const sleep = menu.slice(menu.indexOf('@objc private func willSleep'));
 		expect(sleep.slice(0, sleep.indexOf('\n\t}\n'))).toContain('timer?.invalidate()');
+		const wake = menu.slice(menu.indexOf('@objc private func didWake'));
+		const body = wake.slice(0, wake.indexOf('\n\t}\n'));
+		expect(body).toContain('isAsleep = false');
+		expect(body).toContain('refresh()');
 	});
 
 	test('no pass starts while it is asleep, even one already scheduled', () => {
@@ -457,5 +461,51 @@ describe('signing the app', () => {
 	test('without one it still builds, signed ad hoc, and says what that costs', () => {
 		expect(build).toContain('identity="-"');
 		expect(build).toContain('starting at login stops working after each rebuild');
+	});
+});
+
+describe('the menu acts on the account it showed', () => {
+	test('names an account by its id, which renumbering cannot move to another account', () => {
+		expect(menu).toContain('"\\(providerId)|\\(account.id)"');
+		expect(menu).not.toContain('|\\(account.slot)');
+		expect(menu).not.toContain('String($0.slot) == parts[1]');
+		expect(menu).not.toContain('String(account.slot)');
+	});
+
+	test('a turned-off account can still be switched to from its menu, as its tooltip says', () => {
+		const body = menu.slice(menu.indexOf('func accountMenu'), menu.indexOf('func appendFooter'));
+		const before = body.slice(0, body.indexOf('"Switch to this account"'));
+		expect(before).toContain('if !isActive {');
+		expect(before).not.toContain('!account.disabled {');
+	});
+
+	test('Switch now waits its turn like any other action, and says when it fails', () => {
+		const body = menu.slice(menu.indexOf('func switchToBest'), menu.indexOf('func addFromToken'));
+		expect(body).toContain('perform(["best"');
+		expect(body).not.toContain('runner.run');
+		expect(body).not.toContain('isBusy');
+		// Any enabled account besides the one in use is somewhere to go, even
+		// when the one in use is itself turned off.
+		expect(body).toContain('!$0.disabled && $0.id != entry.state.activeAccountId');
+	});
+
+	test('opening History or Settings never waits on the command line', () => {
+		for (const marker of ['func fillHistory', 'func fillSettings']) {
+			const start = menu.indexOf(marker);
+			const body = menu.slice(start, menu.indexOf('\n\t}\n', start));
+			expect(body.length).toBeGreaterThan(0);
+			expect(body).not.toContain('runner.');
+			expect(body).not.toContain('latestSettings');
+		}
+	});
+});
+
+describe('the History menu', () => {
+	test('is read again whenever the history file changes, and a failed read is tried again', () => {
+		const refresh = menu.slice(menu.indexOf('@objc private func refresh()'));
+		const body = refresh.slice(0, refresh.indexOf('\n\t}\n'));
+		expect(body).toContain('historyFileStamp()');
+		expect(body).toContain('if let history {');
+		expect(menu).toContain('"history.jsonl"');
 	});
 });

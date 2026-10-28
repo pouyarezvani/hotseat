@@ -18,8 +18,9 @@ import type {
 	Registry,
 	State,
 	UsageSnapshot,
+	UsageWindow,
 } from './types.ts';
-import { loadCredential, storeCredential } from './vault.ts';
+import { fingerprint, loadCredential } from './vault.ts';
 import { fullyAwake } from './wake.ts';
 
 export const PROVIDERS: Record<ProviderId, Provider> = {
@@ -100,7 +101,7 @@ interface UsageCache {
 	identities: Partial<Record<ProviderId, LiveIdentity>>;
 }
 
-async function loadCache(): Promise<UsageCache> {
+export async function loadCache(): Promise<UsageCache> {
 	const stored = await readJsonLoose<Partial<UsageCache>>(usageCachePath());
 	if (stored?.version !== 2) return { version: 2, entries: {}, identities: {} };
 	return { version: 2, entries: stored.entries ?? {}, identities: stored.identities ?? {} };
@@ -121,15 +122,6 @@ export async function forgetReading(accountId: string): Promise<void> {
 	} finally {
 		await lock.release();
 	}
-}
-
-/**
- * Whatever changes when a login is replaced or its token rotated. The whole
- * credential is hashed rather than one field so no service-specific shape has
- * to be known here.
- */
-export function fingerprint(credential: Credential): string {
-	return new Bun.CryptoHasher('sha256').update(JSON.stringify(credential)).digest('hex');
 }
 
 /**
@@ -174,9 +166,18 @@ export async function liveIdentity(
 	}
 	// No answer from the service: the installed login is still known when it is
 	// exactly one of the saved copies, which hotseat keeps current below.
+	// The match is remembered, because renewing that account replaces the saved
+	// copy it was matched by.
 	for (const account of accountsFor(registry, provider.id)) {
 		const saved = await loadCredential(account).catch(() => null);
 		if (saved && fingerprint(saved) === print) {
+			if (cache) {
+				cache.identities[provider.id] = {
+					fingerprint: print,
+					email: account.email,
+					...(account.plan ? { plan: account.plan } : {}),
+				};
+			}
 			return { email: account.email, ...(account.plan ? { plan: account.plan } : {}) };
 		}
 	}
@@ -310,6 +311,17 @@ function carryResets(
 	};
 }
 
+/**
+ * A window whose reset has passed starts again from nothing, whatever the last
+ * reading of it said, so it is shown empty until the next reading says more.
+ */
+function resetBy(window: UsageWindow, now: number): UsageWindow {
+	const reset = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
+	if (!Number.isFinite(reset) || reset > now) return window;
+	const { resetsAt: _passed, ...rest } = window;
+	return { ...rest, percent: 0 };
+}
+
 /** A reading whose every window has already reset says nothing about now. */
 function expired(snapshot: UsageSnapshot, now: number): boolean {
 	if (snapshot.windows.length === 0) return false;
@@ -350,7 +362,13 @@ export async function collectState(
 	for (const id of Object.keys(providerSet) as ProviderId[]) {
 		const provider = providerSet[id];
 		const records = accountsFor(registry, id);
-		let installed = await provider.readAgentCredential().catch(() => null);
+		let installed: Credential | null = null;
+		let unreadable = false;
+		try {
+			installed = await provider.readAgentCredential();
+		} catch {
+			unreadable = true;
+		}
 		let liveAwaitsRenewal: string | undefined;
 		if (installed) {
 			// On an idle machine nobody refreshes the installed login, so it
@@ -362,21 +380,31 @@ export async function collectState(
 				return expires !== undefined && expires <= now;
 			};
 			if (expired(installed)) {
-				const running = await provider.runningProcesses().catch(() => []);
-				if (running.length > 0) {
+				const running = await provider.runningProcesses().catch(() => null);
+				if (running === null) {
+					liveAwaitsRenewal =
+						'the login in use has expired; could not tell whether an agent is using it, so it is left for now';
+				} else if (running.length > 0) {
 					liveAwaitsRenewal =
 						'the login in use has expired; the running agent will refresh it on its next turn';
 				} else if (!(await awake())) {
 					liveAwaitsRenewal = WAITING_FOR_WAKE;
 				} else {
-					const renewed = await renewInstalled(provider, expired, async (next) => {
-						const who = await provider.identify(next).catch(() => undefined);
-						const owner = who
-							? records.find((record) => record.email.toLowerCase() === who.email.toLowerCase())
-							: undefined;
-						if (owner) await storeCredential(owner, next);
-					}).catch(() => null);
-					if (renewed) installed = renewed;
+					// Renewed only once it is known whose login this is, so the
+					// renewal can be saved to that account before it goes in.
+					const who = await liveIdentity(provider, installed, registry, cache);
+					const owner = who
+						? records.find((record) => record.email.toLowerCase() === who.email.toLowerCase())
+						: undefined;
+					if (owner) {
+						const renewed = await renewInstalled(provider, owner, installed, expired).catch(
+							() => null,
+						);
+						if (renewed) installed = renewed;
+					} else {
+						liveAwaitsRenewal =
+							'the login in use has expired and is not one of the saved accounts; its agent will refresh it';
+					}
 				}
 			}
 		}
@@ -403,6 +431,8 @@ export async function collectState(
 			} else {
 				unconfirmedId = records.find((record) => record.id === registry.active[id])?.id;
 			}
+		} else if (unreadable) {
+			unconfirmedId = records.find((record) => record.id === registry.active[id])?.id;
 		}
 
 		const accounts = await Promise.all(
@@ -461,7 +491,12 @@ export async function collectState(
 				touched.add(record.id);
 				const usage = attempt.usage;
 				if (usage.windows.length > 0 && !attempt.failure) {
-					if (good && !hasEvidence(usage) && hasEvidence(cached.snapshot)) {
+					if (
+						good &&
+						!hasEvidence(usage) &&
+						hasEvidence(cached.snapshot) &&
+						!expired(cached.snapshot, now)
+					) {
 						// All zeros with no clock is what the service sends when it
 						// has nothing to say. It does not replace numbers that said something.
 						cache.entries[record.id] = { ...cached, attemptedAtMs: now };
@@ -543,19 +578,33 @@ export async function collectState(
 			touched.add(active.id);
 			active.usage = snapshot;
 		}
+		for (const account of accounts) {
+			if (account.usage)
+				account.usage = {
+					...account.usage,
+					windows: account.usage.windows.map((window) => resetBy(window, now)),
+				};
+		}
 		providers[id] = { accounts, ...(active ? { activeAccountId: active.id } : {}) };
 	}
 
 	// Written under a lock, over whatever another pass wrote meanwhile: two
-	// collectors may run at once, and each keeps only the accounts it read.
-	// Entries for accounts that no longer exist are dropped, so the file cannot
-	// grow without bound as accounts come and go.
+	// collectors may run at once, and each keeps only the accounts it read,
+	// unless another pass has already written a later attempt, or the same
+	// attempt with a later reading, such as the agent's own. Entries for accounts that no longer exist are dropped, so the
+	// file cannot grow without bound as accounts come and go.
 	const lock = await acquireLock(hotseatHome(), 10_000, 'usage.lock');
 	try {
 		const latest = await loadCache();
 		for (const id of touched) {
 			const entry = cache.entries[id];
-			if (entry) latest.entries[id] = entry;
+			if (!entry) continue;
+			const there = latest.entries[id];
+			const newer =
+				!there ||
+				entry.attemptedAtMs > there.attemptedAtMs ||
+				(entry.attemptedAtMs === there.attemptedAtMs && entry.fetchedAtMs >= there.fetchedAtMs);
+			if (newer) latest.entries[id] = entry;
 		}
 		latest.identities = { ...latest.identities, ...cache.identities };
 		const known = new Set(registry.accounts.map((account) => account.id));

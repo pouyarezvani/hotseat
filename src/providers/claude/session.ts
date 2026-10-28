@@ -51,8 +51,9 @@ export async function seedClaudeConfig(dir: string, mainConfigPath: string): Pro
 
 /**
  * Rewrites the account Claude Code records as signed in, so what it shows
- * and what hotseat installed agree. Everything else in the file, and any key
- * of the account entry hotseat does not know, is kept.
+ * and what hotseat installed agree. Everything else in the file is kept, and
+ * so is any key of the account entry hotseat does not know while it is the
+ * same account; a different account starts from nothing of the old one's.
  */
 export async function updateOauthAccount(path: string, identity: Identity): Promise<void> {
 	const config = (await readJsonLoose<Record<string, unknown>>(path)) ?? {};
@@ -60,8 +61,11 @@ export async function updateOauthAccount(path: string, identity: Identity): Prom
 		typeof config.oauthAccount === 'object' && config.oauthAccount !== null
 			? (config.oauthAccount as Record<string, unknown>)
 			: {};
+	const same =
+		typeof current.emailAddress === 'string' &&
+		current.emailAddress.toLowerCase() === identity.email.toLowerCase();
 	config.oauthAccount = {
-		...current,
+		...(same ? current : {}),
 		emailAddress: identity.email,
 		...(identity.organizationId ? { organizationUuid: identity.organizationId } : {}),
 		...(identity.accountId ? { accountUuid: identity.accountId } : {}),

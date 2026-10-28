@@ -270,6 +270,35 @@ let noisy = Runner(executable: "/bin/sh")
 check("a command that fails is reported as failed", noisy.run(["-c", "echo 'Opening browser' >&2; echo 'step two' >&2; echo '\u{2717} the sign-in ended with status 1' >&2; exit 1"]) == nil)
 check("and what it says is its own last line, not everything it printed", noisy.lastError == "the sign-in ended with status 1", noisy.lastError)
 check("a failure that is not a timeout is not called one", !noisy.timedOut)
+check(
+	"a command cut off is not said to have changed nothing, since it may have",
+	slow.lastError.contains("may have"), slow.lastError)
+
+let chatty = Runner(executable: "/bin/sh")
+let chattyOut = chatty.run(
+	["-c", "head -c 1048576 /dev/zero | tr '\\0' x >&2; echo done"], timeout: 10)
+check(
+	"a command that says a great deal on its error stream still finishes",
+	chattyOut.flatMap { String(data: $0, encoding: .utf8) } == "done\n" && !chatty.timedOut,
+	chatty.lastError)
+
+let familyFile = NSTemporaryDirectory() + "hotseat-runner-family-\(UUID().uuidString)"
+let family = Runner(executable: "/bin/sh")
+let familyStarted = Date()
+check(
+	"a command that ignores being asked to stop is stopped, with what it started",
+	family.run(
+		["-c", "trap '' TERM; (trap '' TERM; exec sleep 12) & echo $! > \(familyFile); sleep 20"],
+		timeout: 0.5) == nil && family.timedOut)
+check(
+	"and soon after its time is up, though what it started holds its output open",
+	Date().timeIntervalSince(familyStarted) < 8, String(Date().timeIntervalSince(familyStarted)))
+usleep(300_000)
+let leftBehind = Int32(
+	(try? String(contentsOfFile: familyFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+check("leaving nothing it started running", leftBehind > 0 && kill(leftBehind, 0) != 0, String(leftBehind))
+if leftBehind > 0 { kill(leftBehind, SIGKILL) }
+try? FileManager.default.removeItem(atPath: familyFile)
 
 // The CLI the app runs: beside the app first, as an install lays them out,
 // then the checkout the app was built in, then the usual install folders.

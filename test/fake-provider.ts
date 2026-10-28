@@ -40,6 +40,8 @@ export class FakeProvider implements Provider {
 	readonly readsOf = new Map<string, number>();
 	readonly refreshesOf = new Map<string, number>();
 	identifyFails = false;
+	/** How long the service takes to say whose a login is, so a test can act in between. */
+	identifyDelayMs = 0;
 	/** When set, every refresh rotates the token by appending this. */
 	rotate = '';
 	/**
@@ -49,6 +51,8 @@ export class FakeProvider implements Provider {
 	spends = false;
 	/** How long the service takes to answer a refresh, so two can overlap. */
 	refreshDelayMs = 0;
+	/** How long the service takes to deliver a reading it has already taken. */
+	fetchDelayMs = 0;
 	running: RunningProcess[] = [];
 	/** Where the fake agent keeps its everyday setup; a test points this somewhere. */
 	home = '';
@@ -61,6 +65,12 @@ export class FakeProvider implements Provider {
 	local: LocalReading | null = null;
 	/** What fetchUsage throws for a token, when a test wants a specific failure. */
 	readonly failures = new Map<string, Error>();
+	/** When set, reading the installed login fails with this, as a locked or slow keychain does. */
+	readFailure: Error | null = null;
+	/** When set, looking for running agents fails with this. */
+	scanFailure: Error | null = null;
+	/** When set, installing a login fails with this, as a locked keychain does. */
+	writeFailure: Error | null = null;
 	session: SessionSupport;
 
 	constructor(id: ProviderId) {
@@ -88,6 +98,10 @@ export class FakeProvider implements Provider {
 		};
 	}
 
+	sharesToken(a: Credential, b: Credential): boolean {
+		return tokenOf(a) !== '' && tokenOf(a) === tokenOf(b);
+	}
+
 	expiresAt(credential: Credential): number | undefined {
 		return typeof credential.expires === 'number' ? credential.expires : undefined;
 	}
@@ -96,21 +110,28 @@ export class FakeProvider implements Provider {
 		this.recorded.push(identity);
 	}
 
+	/** How long the agent's own reading takes to come back, so two passes can overlap. */
+	localDelayMs = 0;
+
 	async localReading(): Promise<LocalReading | null> {
+		if (this.localDelayMs > 0) await Bun.sleep(this.localDelayMs);
 		return this.local;
 	}
 
 	async readAgentCredential(): Promise<Credential | null> {
+		if (this.readFailure) throw this.readFailure;
 		return this.installed ? structuredClone(this.installed) : null;
 	}
 
 	async writeAgentCredential(credential: Credential): Promise<void> {
+		if (this.writeFailure) throw this.writeFailure;
 		this.calls.write += 1;
 		this.installed = structuredClone(credential);
 	}
 
 	async identify(credential: Credential): Promise<Identity> {
 		this.calls.identify += 1;
+		if (this.identifyDelayMs > 0) await Bun.sleep(this.identifyDelayMs);
 		if (this.identifyFails) throw new Error('fetch failed');
 		const identity = this.identities.get(tokenOf(credential));
 		if (!identity) throw new Error('profile request failed with 401');
@@ -124,7 +145,9 @@ export class FakeProvider implements Provider {
 		if (failure) throw failure;
 		const read = this.readings.get(tokenOf(credential));
 		if (!read) throw new Error('usage request failed with 401');
-		return read();
+		const snapshot = read();
+		if (this.fetchDelayMs > 0) await Bun.sleep(this.fetchDelayMs);
+		return snapshot;
 	}
 
 	/** When set, refreshing this token fails with this error. */
@@ -137,7 +160,7 @@ export class FakeProvider implements Provider {
 		const failure = this.refreshFailures.get(tokenOf(credential));
 		if (failure) throw failure;
 		if (!this.rotate) return credential;
-		const next = cred(tokenOf(credential) + this.rotate, 0, 0);
+		const next = cred(tokenOf(credential) + this.rotate, issuedOf(credential) + 1, 0);
 		if (this.spends) {
 			this.refreshFailures.set(
 				tokenOf(credential),
@@ -151,6 +174,7 @@ export class FakeProvider implements Provider {
 	}
 
 	async runningProcesses(): Promise<RunningProcess[]> {
+		if (this.scanFailure) throw this.scanFailure;
 		return this.running;
 	}
 }

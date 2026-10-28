@@ -2,7 +2,7 @@ import { lstat, mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hotseatHome } from './paths.ts';
 import type { AccountRecord, Credential, Provider, ProviderState } from './types.ts';
-import { loadCredential, storeCredential } from './vault.ts';
+import { loadCredential, storeCredentialUnless } from './vault.ts';
 
 /**
  * A session runs one command as one account in one terminal. The agent is
@@ -12,9 +12,19 @@ import { loadCredential, storeCredential } from './vault.ts';
  * the same time.
  */
 
-/** One folder per account, named after it, so its history follows it. */
+/**
+ * One folder per account, named after it, so its history follows it. Any
+ * character outside plain letters, digits and `@.+_-` is written as its
+ * percent-encoded bytes, so no two addresses ever share a folder.
+ */
 export function sessionDir(provider: Provider, account: Pick<AccountRecord, 'email'>): string {
-	const slug = account.email.toLowerCase().replace(/[^a-z0-9@.+_-]/g, '_');
+	const slug = account.email
+		.toLowerCase()
+		.replace(/[^a-z0-9@.+_-]/gu, (character) =>
+			[...new TextEncoder().encode(character)]
+				.map((byte) => `%${byte.toString(16).padStart(2, '0')}`)
+				.join(''),
+		);
 	return join(hotseatHome(), 'sessions', provider.id, slug);
 }
 
@@ -34,11 +44,12 @@ export async function adoptIfNewer(
 	account: Pick<AccountRecord, 'id' | 'email'>,
 	candidate: Credential,
 ): Promise<boolean> {
+	const keep = (saved: Credential): boolean =>
+		provider.session.compareAge(candidate, saved) < 0 ||
+		JSON.stringify(saved) === JSON.stringify(candidate);
 	const saved = await loadCredential(account);
-	if (saved && provider.session.compareAge(candidate, saved) < 0) return false;
-	if (saved && JSON.stringify(saved) === JSON.stringify(candidate)) return false;
-	await storeCredential(account, candidate);
-	return true;
+	if (saved && keep(saved)) return false;
+	return storeCredentialUnless(account, candidate, keep);
 }
 
 /** The login a session folder holds, if the folder exists. */
@@ -76,8 +87,12 @@ export async function freshestLogin(
 	if (saved && provider.session.compareAge(inSession, saved) <= 0) return saved;
 	const who = await provider.identify(inSession).catch(() => undefined);
 	if (who?.email.toLowerCase() !== account.email.toLowerCase()) return saved;
-	await storeCredential(account, inSession);
-	return inSession;
+	const adopted = await storeCredentialUnless(
+		account,
+		inSession,
+		(current) => provider.session.compareAge(inSession, current) <= 0,
+	);
+	return adopted ? inSession : loadCredential(account);
 }
 
 /**

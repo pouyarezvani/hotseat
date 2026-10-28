@@ -83,6 +83,52 @@ describe('signing in to an account again', () => {
 		});
 	});
 
+	test('a login put in use outside hotseat is never replaced by signing in again', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			await updateRegistry((registry) => {
+				registry.active.claude = a.id;
+			});
+			providers.claude.installed = cred('X');
+			providers.claude.identities.set('X', { email: 'x@example.com' });
+			providers.claude.identities.set('A2', { email: 'a@example.com' });
+			providers.claude.readings.set('A2', () => reading(20));
+			await signInAgain({
+				providerId: 'claude',
+				account: a,
+				providers,
+				now: T,
+				login: async () => cred('A2'),
+			});
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('X');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A2');
+		});
+	});
+
+	test('a login put in use while signing in again is not replaced', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			await updateRegistry((registry) => {
+				registry.active.claude = a.id;
+			});
+			providers.claude.identities.set('A2', { email: 'a@example.com' });
+			providers.claude.identities.set('X', { email: 'x@example.com' });
+			providers.claude.readings.set('A2', () => reading(20));
+			providers.claude.identifyDelayMs = 40;
+			const signing = signInAgain({
+				providerId: 'claude',
+				account: a,
+				providers,
+				now: T,
+				login: async () => cred('A2'),
+			});
+			await Bun.sleep(60);
+			providers.claude.installed = cred('X');
+			await signing;
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('X');
+		});
+	});
+
 	test('signing in as someone else saves that account and leaves the one asked about alone', async () => {
 		await withHome(async () => {
 			const { providers, b } = await world();

@@ -1,8 +1,10 @@
 import { ServiceError } from './errors.ts';
 import { acquireLock } from './fs.ts';
 import { hotseatHome } from './paths.ts';
+import { sessionRunning } from './session.ts';
+import { holdSwitch } from './switch-lock.ts';
 import type { AccountRecord, Credential, Provider } from './types.ts';
-import { loadCredential, storeCredential } from './vault.ts';
+import { fingerprint, loadCredential, storeCredential, storeCredentialUnless } from './vault.ts';
 
 /** Long enough to wait out another process's renewal, which may itself wait on the service. */
 const RENEW_LOCK_WAIT_MS = 45_000;
@@ -25,19 +27,31 @@ export class RenewalFailed extends ServiceError {
 
 /**
  * Renews an account's saved login if it is due, and saves the result before
- * anything else can read the old one. One process at a time per account, and
- * the saved copy is read again once it is this process's turn: a renewal spends
- * the old refresh token, so a second process presenting the copy it read
- * earlier would be refused, and the account written off for nothing.
+ * anything else can read the old one. One renewal at a time per service, the
+ * installed login's included, and everything is read again once it is this
+ * process's turn: a renewal spends the old refresh token, so a second process
+ * presenting the copy it read earlier would be refused, and the account
+ * written off for nothing. A saved copy holding the same token as the login in
+ * use, or as a session running as the account, is left to whoever holds it.
  */
 export async function renewSaved(
 	provider: Provider,
 	account: Pick<AccountRecord, 'id' | 'email'>,
 ): Promise<Credential | null> {
-	const lock = await acquireLock(hotseatHome(), RENEW_LOCK_WAIT_MS, `renew-${account.id}.lock`);
+	const lock = await acquireLock(hotseatHome(), RENEW_LOCK_WAIT_MS, `renew-${provider.id}.lock`);
 	try {
 		const stored = await loadCredential(account);
 		if (!stored) return null;
+		// A login in use that cannot be read may hold this same token, so
+		// nothing is renewed until it can be.
+		const installed = await provider.readAgentCredential().catch(() => undefined);
+		if (installed === undefined) return stored;
+		if (installed && provider.sharesToken(installed, stored)) {
+			throw new Error(`${account.email} was just put in use - it is read from there next time`);
+		}
+		if (await sessionRunning(provider, account)) {
+			throw new Error(`${account.email} is open in another terminal (hotseat run)`);
+		}
 		let renewed: Credential;
 		try {
 			renewed = await provider.refreshIfNeeded(stored);
@@ -51,26 +65,52 @@ export async function renewSaved(
 	}
 }
 
-/** The same guard for the login installed on this machine, shared by every account. */
+/**
+ * Renews the login installed on this machine, `named` as belonging to `owner`,
+ * and only while that exact login is still the one installed. It is
+ * done while holding the switch lock, so nothing switches the login in use
+ * meanwhile, and the renewal is saved to the owner before it is installed: if
+ * installing it fails, the next attempt finds the owner's saved copy newer
+ * than the installed one and installs that, rather than presenting the spent
+ * token again. The renewal is not saved over a login the owner was given since,
+ * such as a fresh sign-in.
+ */
 export async function renewInstalled(
 	provider: Provider,
+	owner: Pick<AccountRecord, 'id'>,
+	named: Credential,
 	due: (installed: Credential) => boolean,
-	save: (renewed: Credential) => Promise<void>,
 ): Promise<Credential | null> {
-	const lock = await acquireLock(
-		hotseatHome(),
-		RENEW_LOCK_WAIT_MS,
-		`renew-${provider.id}-installed.lock`,
-	);
+	const held = await holdSwitch(provider.id);
 	try {
-		const installed = await provider.readAgentCredential();
-		if (!installed || !due(installed)) return installed;
-		const renewed = await provider.refreshIfNeeded(installed);
-		if (renewed === installed) return installed;
-		await provider.writeAgentCredential(renewed);
-		await save(renewed);
-		return renewed;
+		const lock = await acquireLock(hotseatHome(), RENEW_LOCK_WAIT_MS, `renew-${provider.id}.lock`);
+		try {
+			const installed = await provider.readAgentCredential();
+			if (!installed || fingerprint(installed) !== fingerprint(named)) return installed;
+			if (!due(installed)) return installed;
+			// The owner's saved copy holds the installed token while the login is
+			// theirs. A newer one is a renewal that never got installed; anything
+			// else means the login in use has changed hands since it was named.
+			const saved = await loadCredential(owner);
+			if (!saved) return installed;
+			if (!provider.sharesToken(saved, installed)) {
+				if (provider.session.compareAge(saved, installed) <= 0) return installed;
+				await provider.writeAgentCredential(saved);
+				return saved;
+			}
+			const renewed = await provider.refreshIfNeeded(installed);
+			if (renewed === installed) return installed;
+			await storeCredentialUnless(
+				owner,
+				renewed,
+				(current) => !provider.sharesToken(current, installed),
+			);
+			await provider.writeAgentCredential(renewed);
+			return renewed;
+		} finally {
+			await lock.release();
+		}
 	} finally {
-		await lock.release();
+		await held.release();
 	}
 }

@@ -33,6 +33,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	/// An action asked for while a refresh was in flight. It runs when the
 	/// refresh finishes, rather than being dropped on the floor.
 	private var queued: [[String]] = []
+	/// The latest switches, for the History menu, read in the background
+	/// whenever the history file changes.
+	private var history: [HistoryEntry] = []
+	/// The history file as it was when it was last read whole.
+	private var historyStamp: String?
 	/// Held so the submenu delegates are not released while their menus live.
 	private var liveSubmenus: [LiveSubmenu] = []
 	private var watcher: DispatchSourceFileSystemObject?
@@ -131,12 +136,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	@objc private func refresh() {
 		guard !isBusy, !isAsleep else { return }
 		isBusy = true
+		let readFor = historyStamp
 		DispatchQueue.global(qos: .utility).async { [weak self] in
 			guard let self else { return }
 			let reports = self.runner.decode([TickReport].self, ["auto", "--once", "--json"]) ?? []
 			let loaded = self.runner.board()
+			let stamp = Self.historyFileStamp()
+			let history = stamp == readFor ? nil : self.runner.history(limit: 12)
 			DispatchQueue.main.async {
 				self.isBusy = false
+				if let history {
+					self.history = history
+					self.historyStamp = stamp
+				}
 				self.board = loaded
 				self.renderTitle()
 				self.announce(reports)
@@ -144,6 +156,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 				self.drainQueue()
 			}
 		}
+	}
+
+	/// The history file's size and when it last changed, or nothing while there
+	/// is no history yet. Any switch changes both.
+	private static func historyFileStamp() -> String? {
+		let path = (homePath as NSString).appendingPathComponent("history.jsonl")
+		guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+		let changed = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+		return "\(changed)|\((attributes[.size] as? NSNumber)?.intValue ?? 0)"
 	}
 
 	/// Says what the pass did, once per change: a switch, a switch that could
@@ -377,7 +398,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		let isActive = account.id == entry.state.activeAccountId
 		let canSwitch = !isActive && !account.disabled
 		let provider = entry.id
-		let slot = String(account.slot)
 		let row = AccountRowView(
 			account: account,
 			isActive: isActive,
@@ -385,7 +405,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			onClick: canSwitch
 				? { [weak self] in
 					self?.showSwitch(provider: provider, accountId: account.id)
-					self?.perform(["switch", provider, slot])
+					self?.perform(["switch", provider, account.id])
 				} : nil)
 		let bars =
 			"Each bar is one of this account's limits and how much of it is used. The time on the right is when that limit resets."
@@ -409,7 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	private func accountMenu(_ account: Account, providerId: String, isActive: Bool) -> NSMenu {
 		let menu = NSMenu()
 		menu.autoenablesItems = false
-		let selector = "\(providerId)|\(account.slot)"
+		let selector = "\(providerId)|\(account.id)"
 		let service = Board.providerTitles[providerId] ?? providerId
 		let pickup =
 			providerId == "claude"
@@ -424,7 +444,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			menu.addItem(signIn)
 			menu.addItem(.separator())
 		}
-		if !isActive && !account.disabled {
+		if !isActive {
 			menu.addItem(
 				bound(
 					"Switch to this account", #selector(seatSelector(_:)), selector,
@@ -520,8 +540,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 				tip: "Close the menu bar app. Automatic switching stops until you open it again with  hotseat menubar  in a terminal."))
 	}
 
+	/// Built from the switches the last refresh read, so opening it never
+	/// waits on the command line.
 	private func fillHistory(_ menu: NSMenu) {
-		let entries = runner.history(limit: 12)
+		let entries = history
 		if entries.isEmpty {
 			menu.addItem(caption("No switches yet", tip: "Once an account changes, by hand or automatically, it is listed here."))
 			return
@@ -554,7 +576,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	}
 
 	private func fillSettings(_ menu: NSMenu) {
-		guard let settings = latestSettings() else {
+		guard let settings = board?.settings else {
 			menu.addItem(caption("Settings could not be read", tip: "hotseat could not read its settings file. Run  hotseat config reset  in a terminal to restore the defaults."))
 			return
 		}
@@ -726,13 +748,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		}
 	}
 
-	/// Re-reads settings so a submenu opened right after a change shows the new
-	/// value. This reads the settings file only, with no network call, because it
-	/// runs on the main thread while the menu is opening.
-	private func latestSettings() -> Settings? {
-		runner.decode(Settings.self, ["config", "--json"]) ?? board?.settings
-	}
-
 	// MARK: - Menu item builders
 
 	private func caption(_ text: String, tip: String? = nil) -> NSMenuItem {
@@ -802,7 +817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	@objc private func seatSelector(_ sender: NSMenuItem) {
 		let parts = split(sender)
 		guard parts.count == 2 else { return }
-		if let account = board?.providers[parts[0]]?.accounts.first(where: { String($0.slot) == parts[1] }) {
+		if let account = board?.providers[parts[0]]?.accounts.first(where: { $0.id == parts[1] }) {
 			showSwitch(provider: parts[0], accountId: account.id)
 		}
 		perform(["switch", parts[0], parts[1]])
@@ -813,7 +828,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	@objc private func signInSelector(_ sender: NSMenuItem) {
 		let parts = split(sender)
 		guard parts.count == 2 else { return }
-		let email = board?.providers[parts[0]]?.accounts.first(where: { String($0.slot) == parts[1] })?.email ?? "the account"
+		let email = board?.providers[parts[0]]?.accounts.first(where: { $0.id == parts[1] })?.email ?? "the account"
 		DispatchQueue.global(qos: .userInitiated).async { [weak self] in
 			guard let self else { return }
 			let signer = Runner()
@@ -875,17 +890,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		perform(["config", "set", parts[0], parts[1]])
 	}
 
+	/// Queued like any other action, so a click while a refresh runs is kept,
+	/// and a service it could not move is said so. A service with no enabled
+	/// account other than the one in use is left out rather than reported every
+	/// time.
 	@objc private func switchToBest() {
-		guard let board, !isBusy else { return }
-		let providers = board.orderedProviders.map(\.id)
-		isBusy = true
-		DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-			guard let self else { return }
-			for provider in providers { self.runner.run(["best", provider]) }
-			DispatchQueue.main.async {
-				self.isBusy = false
-				self.refresh()
-			}
+		guard let board else { return }
+		for entry in board.orderedProviders
+		where entry.state.accounts.contains(where: { !$0.disabled && $0.id != entry.state.activeAccountId }) {
+			perform(["best", entry.id])
 		}
 	}
 
@@ -908,8 +921,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		guard !token.isEmpty else { return }
 		DispatchQueue.global(qos: .userInitiated).async { [weak self] in
 			guard let self else { return }
-			let ok = self.runner.run(["add-token", "claude", "-"], input: token + "\n") != nil
-			let reason = self.runner.lastError
+			let adder = Runner()
+			let ok = adder.run(["add-token", "claude", "-"], input: token + "\n") != nil
+			let reason = adder.lastError
 			DispatchQueue.main.async {
 				if !ok { self.reportTokenFailure(reason) }
 				self.refresh()

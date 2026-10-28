@@ -108,6 +108,8 @@ export interface Provider {
 	fetchUsage(credential: Credential): Promise<UsageSnapshot>;
 	refreshIfNeeded(credential: Credential): Promise<Credential>;
 	runningProcesses(): Promise<RunningProcess[]>;
+	/** Whether two copies of a login hold the same refresh token, so renewing one spends the other. */
+	sharesToken(a: Credential, b: Credential): boolean;
 	/** When the access token stops working, if the credential says. */
 	expiresAt?(credential: Credential): number | undefined;
 	/** Tells the agent's own records who is signed in now. */

@@ -84,10 +84,18 @@ function readEntry(
 	return { record, changed };
 }
 
+/**
+ * A missing file, or one with no accounts yet, is an empty registry. A file
+ * whose accounts are not a list is refused rather than read as empty, because
+ * the next change would write over everything in it.
+ */
 function readRegistry(raw: unknown): { registry: Registry; changed: boolean } {
+	if (raw === null) return { registry: structuredClone(EMPTY), changed: false };
 	const file = asObject(raw);
-	if (!file || !Array.isArray(file.accounts))
-		return { registry: structuredClone(EMPTY), changed: false };
+	if (!file || (file.accounts !== undefined && !Array.isArray(file.accounts))) {
+		throw new Error('accounts.json is not in the shape hotseat expects - fix it or move it aside');
+	}
+	if (!Array.isArray(file.accounts)) return { registry: structuredClone(EMPTY), changed: false };
 	let changed = false;
 	const accounts: AccountRecord[] = [];
 	const unreadable: unknown[] = [];
@@ -164,6 +172,8 @@ export async function updateRegistry<T>(
 /**
  * Logins used to live one file per account under vault/. They are folded into
  * accounts.json the first time a newer hotseat runs, and the folder removed.
+ * An account that already has a login keeps it: the folder outliving an
+ * earlier migration means its copies are the older ones.
  */
 export async function migrateVault(): Promise<number> {
 	const dir = vaultDir();
@@ -180,7 +190,7 @@ export async function migrateVault(): Promise<number> {
 				(entry) => entry.id === name.slice(0, -'.json'.length),
 			);
 			const login = await readJson<Credential>(join(dir, name));
-			if (!account || !login) continue;
+			if (!account || !login || account.login) continue;
 			account.login = login;
 			count += 1;
 		}

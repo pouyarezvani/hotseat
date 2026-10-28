@@ -8,6 +8,7 @@ import { loadRegistry, setAlias, updateRegistry, upsertAccount } from '../src/co
 import { loadSettings } from '../src/core/settings.ts';
 import { exportAccounts } from '../src/core/transfer.ts';
 import { storeCredential } from '../src/core/vault.ts';
+import { fakeProviders } from './fake-provider.ts';
 import { withHome } from './helpers.ts';
 
 describe('files that are not what they should be', () => {
@@ -40,11 +41,29 @@ describe('files that are not what they should be', () => {
 	});
 });
 
+const lockWorker = join(import.meta.dir, 'fixtures', 'lock-worker.ts');
+
 describe('the lock', () => {
-	test('a lock left by a process id that now belongs to someone else is stale', async () => {
+	test('a holder that is killed gives up its lock at once', async () => {
 		await withHome(async (home) => {
-			await writeFile(join(home, 'lock'), `${process.pid} 1`);
-			const lock = await acquireLock(home, 500);
+			const holder = Bun.spawn([process.execPath, lockWorker, home, '1000000'], {
+				stdout: 'ignore',
+				stderr: 'ignore',
+			});
+			for (let tries = 0; tries < 200; tries += 1) {
+				if (
+					(
+						await Bun.file(join(home, 'occupant'))
+							.text()
+							.catch(() => '')
+					).length > 0
+				)
+					break;
+				await Bun.sleep(10);
+			}
+			holder.kill('SIGKILL');
+			await holder.exited;
+			const lock = await acquireLock(home, 1_000, 'contended.lock');
 			await lock.release();
 		});
 	});
@@ -74,6 +93,48 @@ describe('the lock under contention', () => {
 				}),
 			);
 			expect(most).toBe(1);
+		});
+	});
+
+	test('is held by one process at a time, even while holders are killed inside it and others take over', async () => {
+		await withHome(async (home) => {
+			const workers = Array.from({ length: 16 }, () =>
+				Bun.spawn([process.execPath, lockWorker, home, '15'], {
+					stdout: 'ignore',
+					stderr: 'ignore',
+				}),
+			);
+			for (let kills = 0; kills < 12; kills += 1) {
+				await Bun.sleep(40);
+				const inside = Number.parseInt(
+					await Bun.file(join(home, 'occupant'))
+						.text()
+						.catch(() => ''),
+					10,
+				);
+				const worker = workers.find((each) => each.pid === inside);
+				worker?.kill('SIGKILL');
+			}
+			await Promise.all(workers.map((worker) => worker.exited));
+			expect(
+				await Bun.file(join(home, 'violations'))
+					.text()
+					.catch(() => ''),
+			).toBe('');
+		});
+	}, 60_000);
+});
+
+describe('writing a file whole', () => {
+	test('many writes to one file at the same moment all land, and leave it whole', async () => {
+		await withHome(async (home) => {
+			const path = join(home, 'busy.json');
+			const results = await Promise.allSettled(
+				Array.from({ length: 40 }, (_, index) => writeJsonAtomic(path, { index })),
+			);
+			expect(results.filter((result) => result.status === 'rejected')).toEqual([]);
+			expect(typeof (await readJson<{ index: number }>(path))?.index).toBe('number');
+			expect((await readdir(home)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
 		});
 	});
 });
@@ -110,10 +171,11 @@ describe('naming and adding accounts', () => {
 					scopes: ['user:profile'],
 				},
 			});
-			await expect(enrollFromToken('sk-ant-oat01-x', { email: 'a@example.com' })).rejects.toThrow(
-				/fewer permissions/,
-			);
-			await enrollFromToken('sk-ant-oat01-x', { email: 'a@example.com', replace: true });
+			const providers = fakeProviders();
+			await expect(
+				enrollFromToken('sk-ant-oat01-x', { email: 'a@example.com', providers }),
+			).rejects.toThrow(/fewer permissions/);
+			await enrollFromToken('sk-ant-oat01-x', { email: 'a@example.com', replace: true, providers });
 			const stored = (await loadRegistry()).accounts[0]?.login;
 			expect(stored?.claudeAiOauth).toMatchObject({ accessToken: 'sk-ant-oat01-x' });
 		});
@@ -153,5 +215,18 @@ describe('how long the service asks us to wait', () => {
 		expect(error.status).toBe(429);
 		expect(error.retryAfterMs).toBe(5000);
 		expect(error.message).toBe('usage request failed with 429');
+	});
+});
+
+describe('the tests themselves', () => {
+	test('cannot reach a real service', async () => {
+		await expect(fetch('https://api.anthropic.com/api/oauth/profile')).rejects.toThrow(
+			'a test tried to reach https://api.anthropic.com/api/oauth/profile',
+		);
+	});
+
+	test("cannot read this Mac's keychain, which holds the real login", async () => {
+		const { readKeychain } = await import('../src/providers/claude/keychain.ts');
+		expect(await readKeychain()).toBeNull();
 	});
 });

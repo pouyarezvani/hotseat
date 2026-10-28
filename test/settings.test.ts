@@ -62,6 +62,21 @@ describe('changing a setting', () => {
 			expect(settings.barWidth).toBe(20);
 		});
 	});
+
+	test('changes made at the same moment all survive, and a reset at the same moment too', async () => {
+		await withHome(async () => {
+			await setSetting('titleCompact', 'true');
+			await Promise.all([
+				setSetting('autoThresholdPercent', '85'),
+				setSetting('barWidth', '20'),
+				resetSetting('titleCompact'),
+			]);
+			const settings = await loadSettings();
+			expect(settings.autoThresholdPercent).toBe(85);
+			expect(settings.barWidth).toBe(20);
+			expect(settings.titleCompact).toBe(DEFAULTS.titleCompact);
+		});
+	});
 });
 
 describe('rejecting bad values', () => {

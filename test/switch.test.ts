@@ -63,6 +63,53 @@ describe('order-based moves', () => {
 		);
 		expect(nextAvailable(state)?.id).toBe('c');
 	});
+
+	test('next passes over an account whose login was refused', () => {
+		const refused = account('b', 2, [{ percent: 10, resetsIn: 5 }]);
+		const state = providerState(
+			[
+				account('a', 1, [{ percent: 95, resetsIn: 5 }]),
+				{
+					...refused,
+					usage: {
+						fetchedAt: inHours(0),
+						windows: refused.usage?.windows ?? [],
+						errorKind: 'auth',
+					},
+				},
+				account('c', 3, [{ percent: 10, resetsIn: 5 }]),
+			],
+			'a',
+		);
+		expect(nextAvailable(state)?.id).toBe('c');
+	});
+
+	test('next passes over an account out of room on a model limit you count', () => {
+		const spent = account('b', 2, [{ percent: 10, resetsIn: 5 }]);
+		const state = providerState(
+			[
+				account('a', 1, [{ percent: 95, resetsIn: 5 }]),
+				{
+					...spent,
+					usage: {
+						fetchedAt: inHours(0),
+						windows: [
+							...(spent.usage?.windows ?? []),
+							{
+								key: 'weekly_scoped:fable',
+								label: 'Fable',
+								percent: 100,
+								resetsAt: inHours(5),
+							},
+						],
+					},
+				},
+				account('c', 3, [{ percent: 10, resetsIn: 5 }]),
+			],
+			'a',
+		);
+		expect(nextAvailable(state, ['fable'])?.id).toBe('c');
+	});
 });
 
 describe('a deliberate switch now', () => {

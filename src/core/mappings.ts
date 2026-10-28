@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { readJson, writeJsonAtomic } from './fs.ts';
+import { acquireLock, readJson, writeJsonAtomic } from './fs.ts';
 import { hotseatHome } from './paths.ts';
 import type { ProviderId } from './types.ts';
 
@@ -28,24 +28,34 @@ export async function listMappings(): Promise<Mapping[]> {
 }
 
 export async function setMapping(entry: Mapping): Promise<void> {
-	const file = await load();
 	const path = resolve(entry.path);
-	file.mappings = file.mappings.filter(
-		(mapping) => !(mapping.path === path && mapping.provider === entry.provider),
-	);
-	file.mappings.push({ ...entry, path });
-	await writeJsonAtomic(mappingsPath(), file);
+	const lock = await acquireLock(hotseatHome(), 10_000, 'mappings.lock');
+	try {
+		const file = await load();
+		file.mappings = file.mappings.filter(
+			(mapping) => !(mapping.path === path && mapping.provider === entry.provider),
+		);
+		file.mappings.push({ ...entry, path });
+		await writeJsonAtomic(mappingsPath(), file);
+	} finally {
+		await lock.release();
+	}
 }
 
 export async function removeMapping(path: string, provider?: ProviderId): Promise<number> {
-	const file = await load();
 	const target = resolve(path);
-	const before = file.mappings.length;
-	file.mappings = file.mappings.filter(
-		(mapping) => !(mapping.path === target && (!provider || mapping.provider === provider)),
-	);
-	await writeJsonAtomic(mappingsPath(), file);
-	return before - file.mappings.length;
+	const lock = await acquireLock(hotseatHome(), 10_000, 'mappings.lock');
+	try {
+		const file = await load();
+		const before = file.mappings.length;
+		file.mappings = file.mappings.filter(
+			(mapping) => !(mapping.path === target && (!provider || mapping.provider === provider)),
+		);
+		await writeJsonAtomic(mappingsPath(), file);
+		return before - file.mappings.length;
+	} finally {
+		await lock.release();
+	}
 }
 
 /**

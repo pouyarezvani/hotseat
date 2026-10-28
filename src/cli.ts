@@ -24,6 +24,7 @@ import {
 	startMenuBar,
 	stopMenuBar,
 } from './core/menubar.ts';
+import type { SwitchMemory } from './core/policy.ts';
 import {
 	accountsFor,
 	findAccount,
@@ -44,10 +45,12 @@ import {
 	SETTING_KEYS,
 	setSetting,
 } from './core/settings.ts';
-import { activate, nextAvailable, pickBest, rotateNext } from './core/switch.ts';
+import { activate, nextAvailable, pickBest, rotateNext, type SwitchResult } from './core/switch.ts';
+import { holdSwitch } from './core/switch-lock.ts';
 import { exportAccounts, importAccounts, moveSlot, purge, swapSlots } from './core/transfer.ts';
 import { PROVIDER_IDS, type ProviderId } from './core/types.ts';
 import { storeCredential } from './core/vault.ts';
+import { clearRunMark, markRunning } from './providers/process.ts';
 import { renderBoard } from './ui/board.ts';
 import { renderHelp } from './ui/help.ts';
 import { closePrompt, isInteractive, select } from './ui/prompt.ts';
@@ -113,32 +116,39 @@ async function seat(
 	const _leaving = before.providers[providerId].accounts.find(
 		(account) => account.id === before.providers[providerId].activeAccountId,
 	);
-	const result = await activate(providerId, accountId);
-	if (result.alreadyActive) {
-		note(`${provider.displayName} is already using ${result.to}`);
-		return 0;
+	const held = await holdSwitch(providerId);
+	let result: SwitchResult;
+	let memory: SwitchMemory;
+	try {
+		result = await activate(providerId, accountId);
+		if (result.alreadyActive) {
+			note(`${provider.displayName} is already using ${result.to}`);
+			return 0;
+		}
+		const now = Date.now();
+		await recordSwitch({
+			at: new Date(now).toISOString(),
+			provider: providerId,
+			...(result.from ? { from: result.from } : {}),
+			to: result.to,
+			reason,
+		});
+		memory = await rememberManualSwitch({
+			provider: providerId,
+			state: before.providers[providerId],
+			...(result.fromId ? { fromId: result.fromId } : {}),
+			toId: result.toId,
+			settings,
+			now,
+		});
+	} finally {
+		await held.release();
 	}
 	if (result.savedLogin) {
 		note(
 			`the login that was in use, ${result.savedLogin.email}, was not saved yet - kept it as account ${result.savedLogin.slot}`,
 		);
 	}
-	const now = Date.now();
-	await recordSwitch({
-		at: new Date(now).toISOString(),
-		provider: providerId,
-		...(result.from ? { from: result.from } : {}),
-		to: result.to,
-		reason,
-	});
-	const memory = await rememberManualSwitch({
-		provider: providerId,
-		state: before.providers[providerId],
-		...(result.fromId ? { fromId: result.fromId } : {}),
-		toId: result.toId,
-		settings,
-		now,
-	});
 	const arriving = before.providers[providerId].accounts.find(
 		(account) => account.id === result.toId,
 	);
@@ -347,9 +357,10 @@ export async function main(argv: readonly string[]): Promise<number> {
 			}
 			case 'next': {
 				const providerId = parseProvider(rest[0]);
+				const settings = await loadSettings();
 				return await seatPicked(
 					providerId,
-					nextAvailable,
+					(state) => nextAvailable(state, settings.autoModelLimits),
 					'next',
 					'every other account is out of room',
 				);
@@ -383,9 +394,15 @@ export async function main(argv: readonly string[]): Promise<number> {
 			case 'remove': {
 				const providerId = parseProvider(rest[0]);
 				const account = await resolve(providerId, rest[1]);
-				const wasInUse = (await loadRegistry()).active[providerId] === account.id;
-				await forgetSession(PROVIDERS[providerId], account);
-				await updateRegistry((registry) => removeAccount(registry, account.id));
+				const held = await holdSwitch(providerId);
+				let wasInUse: boolean;
+				try {
+					wasInUse = (await loadRegistry()).active[providerId] === account.id;
+					await forgetSession(PROVIDERS[providerId], account);
+					await updateRegistry((registry) => removeAccount(registry, account.id));
+				} finally {
+					await held.release();
+				}
 				await publishState();
 				success(`removed ${account.email} and deleted its saved login`);
 				if (wasInUse) {
@@ -597,13 +614,27 @@ export async function main(argv: readonly string[]): Promise<number> {
 				aside(
 					`running as ${account.email} in this terminal only - every other terminal stays on ${shared?.email ?? 'the shared login'}`,
 				);
-				const child = Bun.spawn(command, {
-					env: { ...process.env, ...session.env },
-					stdin: 'inherit',
-					stdout: 'inherit',
-					stderr: 'inherit',
-				});
-				const code = await child.exited;
+				// This process is recorded before the agent starts, and nothing starts
+				// if it cannot be: a session with no record would look idle, and its
+				// login could be renewed or removed under it.
+				// The agent is recorded too once it starts, so it is still known to be
+				// running if this process is killed first.
+				await markRunning(session.dir, process.pid);
+				let child: ReturnType<typeof Bun.spawn> | undefined;
+				let code: number;
+				try {
+					child = Bun.spawn(command, {
+						env: { ...process.env, ...session.env },
+						stdin: 'inherit',
+						stdout: 'inherit',
+						stderr: 'inherit',
+					});
+					await markRunning(session.dir, child.pid).catch(() => undefined);
+					code = await child.exited;
+				} finally {
+					await clearRunMark(session.dir, process.pid);
+					if (child) await clearRunMark(session.dir, child.pid);
+				}
 				if (await captureSession(provider, account)) {
 					aside(`saved the login ${account.email} refreshed during this session`);
 				}

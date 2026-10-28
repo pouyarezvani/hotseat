@@ -5,13 +5,14 @@ import { credentialFromToken } from '../providers/claude/index.ts';
 import { oauthOf } from '../providers/claude/keychain.ts';
 import { loginIsolated } from '../providers/claude/login.ts';
 import { agentCommand } from './agent-command.ts';
-import { collectState, forgetReading, PROVIDERS } from './collect.ts';
+import { collectState, forgetReading, liveIdentity, loadCache, PROVIDERS } from './collect.ts';
 import { readJson, writeJsonAtomic } from './fs.ts';
 import { cleanUpEvenIfInterrupted } from './interrupt.ts';
 import { statePath } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
+import { holdSwitch } from './switch-lock.ts';
 import type { AccountRecord, Credential, Provider, ProviderId } from './types.ts';
-import { storeCredential } from './vault.ts';
+import { fingerprint, storeCredential } from './vault.ts';
 
 /** Saves a credential under the account it belongs to, creating it if new. */
 export async function enroll(
@@ -68,11 +69,28 @@ export async function signInAgain(input: {
 	// and the installed one are the same the moment the board is published.
 	const provider = (input.providers ?? PROVIDERS)[input.providerId];
 	const who = await provider.identify(credential).catch(() => null);
-	const registry = await loadRegistry();
-	const inUse = registry.accounts.find((entry) => entry.id === registry.active[input.providerId]);
-	if (who && inUse && who.email.toLowerCase() === inUse.email.toLowerCase()) {
-		await provider.writeAgentCredential(credential);
-		await provider.recordIdentity?.(who).catch(() => undefined);
+	if (who) {
+		const held = await holdSwitch(input.providerId);
+		try {
+			// Whose login is installed is read from the login itself, not from
+			// which account hotseat last put in use: one put in outside hotseat
+			// would otherwise be overwritten unsaved.
+			const installed = await provider.readAgentCredential().catch(() => null);
+			const owner = installed
+				? await liveIdentity(provider, installed, await loadRegistry(), await loadCache())
+				: undefined;
+			// Naming it may have taken a request; it is replaced only if it is
+			// still the same login once that answer is in.
+			const still = await provider.readAgentCredential().catch(() => null);
+			const unchanged =
+				installed !== null && still !== null && fingerprint(still) === fingerprint(installed);
+			if (owner && unchanged && who.email.toLowerCase() === owner.email.toLowerCase()) {
+				await provider.writeAgentCredential(credential);
+				await provider.recordIdentity?.(who).catch(() => undefined);
+			}
+		} finally {
+			await held.release();
+		}
 	}
 	const saved = await enroll(input.providerId, credential, undefined, {
 		...(input.providers ? { providers: input.providers } : {}),
@@ -104,10 +122,12 @@ export async function publishState(
  */
 export async function enrollFromToken(
 	token: string,
-	options: { email?: string; replace?: boolean } = {},
+	options: { email?: string; replace?: boolean; providers?: Record<ProviderId, Provider> } = {},
 ): Promise<AccountRecord> {
 	const credential = credentialFromToken(token);
-	const identity = await PROVIDERS.claude.identify(credential).catch(() => null);
+	const identity = await (options.providers ?? PROVIDERS).claude
+		.identify(credential)
+		.catch(() => null);
 	const email = identity?.email ?? options.email;
 	if (!email) {
 		throw new Error(
@@ -124,7 +144,12 @@ export async function enrollFromToken(
 			`${email} already has a full sign-in saved; a setup token has fewer permissions - add --replace to use it anyway`,
 		);
 	}
-	return enroll('claude', credential, email);
+	return enroll(
+		'claude',
+		credential,
+		email,
+		options.providers ? { providers: options.providers } : {},
+	);
 }
 
 /** A full Claude sign-in, isolated so the current login is left alone. */

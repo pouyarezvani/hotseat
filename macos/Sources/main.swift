@@ -821,7 +821,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	}
 
 	private func split(_ sender: NSMenuItem) -> [String] {
-		(sender.representedObject as? String)?.components(separatedBy: "|") ?? []
+		(sender.representedObject as? String).map(menuPayload) ?? []
 	}
 
 	// MARK: - Actions

@@ -59,16 +59,15 @@ export async function renewSaved(
 		} catch (error) {
 			throw new RenewalFailed(stored, error);
 		}
-		// Saved only while the saved copy is still the one renewed, so a sign-in
-		// saved while the service answered is kept.
-		if (renewed !== stored) {
-			await storeCredentialUnless(
-				account,
-				renewed,
-				(current) => !provider.sharesToken(current, stored),
-			);
-		}
-		return renewed;
+		if (renewed === stored) return stored;
+		// Saved only while the saved copy is still the one renewed. A sign-in
+		// saved while the service answered is kept, and is what gets used.
+		const kept = await storeCredentialUnless(
+			account,
+			renewed,
+			(current) => !provider.sharesToken(current, stored),
+		);
+		return kept ?? renewed;
 	} finally {
 		await lock.release();
 	}
@@ -111,19 +110,26 @@ export async function renewInstalled(
 			const renewed = await provider.refreshIfNeeded(installed);
 			if (renewed === installed) return installed;
 			// Saved with the login it renewed, in one write, so the installed
-			// login can be named as this account's even after a restart.
-			await updateRegistry((registry) => {
+			// login can be named as this account's even after a restart. A
+			// sign-in saved to the owner meanwhile is kept, and is what gets
+			// installed in place of the spent token.
+			const kept = await updateRegistry((registry): Credential | null => {
 				const record = registry.accounts.find((entry) => entry.id === owner.id);
-				if (!record || (record.login && !provider.sharesToken(record.login, installed))) return;
+				if (!record) return null;
+				if (record.login && !provider.sharesToken(record.login, installed)) {
+					return structuredClone(record.login);
+				}
 				record.login = structuredClone(renewed);
 				record.renewedFrom = fingerprint(installed);
+				return null;
 			});
+			const login = kept ?? renewed;
 			// Refreshing waits on the service; a login put in meanwhile stays.
 			const now = await provider.readAgentCredential();
 			if (!now || fingerprint(now) !== fingerprint(named)) return now;
-			await provider.writeAgentCredential(renewed);
+			await provider.writeAgentCredential(login);
 			await settled(owner);
-			return renewed;
+			return login;
 		} finally {
 			await lock.release();
 		}

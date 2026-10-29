@@ -277,6 +277,11 @@ check(
 	Settings().applying("autoModelLimits", "fable, opus").autoModelLimits == ["fable", "opus"])
 check("clearing the model limits reads as none at once", Settings().applying("autoModelLimits", "").autoModelLimits.isEmpty)
 
+print("reading a menu item's payload")
+check("an account id holding a bar stays whole", menuPayload("claude|id:team|work") == ["claude", "id:team|work"])
+check("a setting cleared to nothing keeps its empty value", menuPayload("autoModelLimits|") == ["autoModelLimits", ""])
+check("a payload with no bar is one part", menuPayload("claude") == ["claude"])
+
 print("failing commands")
 let slow = Runner(executable: "/bin/sleep")
 check("a command that runs too long is cut off", slow.run(["5"], timeout: 0.5) == nil)

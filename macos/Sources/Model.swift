@@ -329,3 +329,10 @@ enum Countdown {
 		return nil
 	}
 }
+
+/// A menu item's payload: what comes before its first bar, and everything
+/// after it, which may hold bars of its own, as an account id may.
+func menuPayload(_ payload: String) -> [String] {
+	guard let bar = payload.firstIndex(of: "|") else { return [payload] }
+	return [String(payload[..<bar]), String(payload[payload.index(after: bar)...])]
+}

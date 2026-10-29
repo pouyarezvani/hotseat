@@ -7,6 +7,7 @@ import { usageCachePath } from '../src/core/paths.ts';
 import { loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
 import { renewInstalled, renewSaved } from '../src/core/renew.ts';
 import { prepareSession, sessionDir } from '../src/core/session.ts';
+import { activate } from '../src/core/switch.ts';
 import { holdSwitch } from '../src/core/switch-lock.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
 import { fingerprint, loadCredential, storeCredential } from '../src/core/vault.ts';
@@ -894,6 +895,32 @@ describe('renewing the login in use while something else changes it', () => {
 			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW-SIGN-IN');
 		});
 	});
+
+	test('the sign-in kept over a renewal is the login put in use, and stays saved after the next pass', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.identities.set('A+', { email: 'a@example.com' });
+			claude.identities.set('NEW-SIGN-IN', { email: 'a@example.com' });
+			claude.readings.set('NEW-SIGN-IN', () => reading(20));
+			claude.rotate = '+';
+			claude.refreshDelayMs = 50;
+			const renewing = renewInstalled(claude, a, cred('A', 0, T - MIN), () => true);
+			await Bun.sleep(20);
+			// Older than the renewal, as a Codex sign-in made before the refresh
+			// answered is by its last_refresh.
+			await storeCredential(a, cred('NEW-SIGN-IN'));
+			await renewing;
+			expect(tokenOf(claude.installed ?? {})).toBe('NEW-SIGN-IN');
+			claude.rotate = '';
+			claude.refreshDelayMs = 0;
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf(claude.installed ?? {})).toBe('NEW-SIGN-IN');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW-SIGN-IN');
+		});
+	});
 });
 
 describe('renewing a saved login while it is signed in to again', () => {
@@ -907,6 +934,28 @@ describe('renewing a saved login while it is signed in to again', () => {
 			await Bun.sleep(20);
 			await storeCredential(b, cred('NEW-SIGN-IN', 9));
 			await renewing;
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('NEW-SIGN-IN');
+		});
+	});
+
+	test('switching to the account puts in the sign-in kept over the renewal, and it stays saved after the next pass', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const claude = providers.claude;
+			claude.identities.set('B+', { email: 'b@example.com' });
+			claude.identities.set('NEW-SIGN-IN', { email: 'b@example.com' });
+			claude.readings.set('NEW-SIGN-IN', () => reading(20));
+			claude.rotate = '+';
+			claude.refreshDelayMs = 50;
+			const switching = activate('claude', b.id, { providers, now: T });
+			await Bun.sleep(20);
+			await storeCredential(b, cred('NEW-SIGN-IN'));
+			await switching;
+			expect(tokenOf(claude.installed ?? {})).toBe('NEW-SIGN-IN');
+			claude.rotate = '';
+			claude.refreshDelayMs = 0;
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf(claude.installed ?? {})).toBe('NEW-SIGN-IN');
 			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('NEW-SIGN-IN');
 		});
 	});

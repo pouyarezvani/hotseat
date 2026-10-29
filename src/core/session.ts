@@ -49,7 +49,7 @@ export async function adoptIfNewer(
 		JSON.stringify(saved) === JSON.stringify(candidate);
 	const saved = await loadCredential(account);
 	if (saved && keep(saved)) return false;
-	return storeCredentialUnless(account, candidate, keep);
+	return (await storeCredentialUnless(account, candidate, keep)) === null;
 }
 
 /** The login a session folder holds, if the folder exists. */
@@ -87,12 +87,12 @@ export async function freshestLogin(
 	if (saved && provider.session.compareAge(inSession, saved) <= 0) return saved;
 	const who = await provider.identify(inSession).catch(() => undefined);
 	if (who?.email.toLowerCase() !== account.email.toLowerCase()) return saved;
-	const adopted = await storeCredentialUnless(
+	const kept = await storeCredentialUnless(
 		account,
 		inSession,
 		(current) => provider.session.compareAge(inSession, current) <= 0,
 	);
-	return adopted ? inSession : loadCredential(account);
+	return kept ?? inSession;
 }
 
 /**

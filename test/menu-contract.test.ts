@@ -465,8 +465,11 @@ describe('signing the app', () => {
 });
 
 describe('the menu acts on the account it showed', () => {
-	test('names an account by its id, which renumbering cannot move to another account', () => {
-		expect(menu).toContain('"\\(providerId)|\\(account.id)"');
+	test('names an account by its id alone, which neither renumbering nor a name can move to another account', () => {
+		expect(menu).toContain('"\\(providerId)|id:\\(account.id)"');
+		expect(menu).toContain('perform(["switch", provider, "id:\\(account.id)"])');
+		expect(menu).not.toContain('"\\(providerId)|\\(account.id)"');
+		expect(menu).not.toContain('$0.id == parts[1]');
 		expect(menu).not.toContain('|\\(account.slot)');
 		expect(menu).not.toContain('String($0.slot) == parts[1]');
 		expect(menu).not.toContain('String(account.slot)');
@@ -525,5 +528,16 @@ describe('changing a setting from the menu', () => {
 		const body = menu.slice(start, menu.indexOf('\n\t}\n', start));
 		expect(body).toContain('withSetting(');
 		expect(body.indexOf('withSetting(')).toBeLessThan(body.indexOf('perform('));
+	});
+});
+
+describe('a settings change made while a refresh is running', () => {
+	test('stays on screen until its own write has finished, whatever that refresh loads', () => {
+		const toggle = menu.slice(menu.indexOf('@objc private func toggleSetting'));
+		expect(toggle.slice(0, toggle.indexOf('\n\t}\n'))).toContain('pendingSettings.append(');
+		const refresh = menu.slice(menu.indexOf('@objc private func refresh()'));
+		expect(refresh.slice(0, refresh.indexOf('\n\t}\n'))).toContain('pendingSettings.reduce(');
+		const perform = menu.slice(menu.indexOf('private func perform('));
+		expect(perform.slice(0, perform.indexOf('\n\t}\n'))).toContain('pendingSettings.remove(at:');
 	});
 });

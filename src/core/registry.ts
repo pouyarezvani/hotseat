@@ -213,6 +213,11 @@ export function findAccount(
 	selector: string,
 ): AccountRecord | undefined {
 	const candidates = accountsFor(registry, provider);
+	// "id:<id>" names an account by its id alone, which no number, name or
+	// address of another account can shadow.
+	if (selector.startsWith('id:')) {
+		return candidates.find((account) => account.id === selector.slice('id:'.length));
+	}
 	const asSlot = Number.parseInt(selector, 10);
 	if (String(asSlot) === selector) return candidates.find((account) => account.slot === asSlot);
 	const needle = selector.toLowerCase();

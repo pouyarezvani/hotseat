@@ -19,6 +19,7 @@ import {
 	purge,
 	swapSlots,
 } from '../src/core/transfer.ts';
+import type { AccountRecord, Registry } from '../src/core/types.ts';
 import { loadCredential, storeCredential } from '../src/core/vault.ts';
 import { CREDENTIAL_EXPIRY, credential, withHome } from './helpers.ts';
 
@@ -465,5 +466,39 @@ describe('importing', () => {
 			await expect(importAccounts(file)).rejects.toThrow(/not a hotseat account/);
 			expect((await loadRegistry()).accounts).toEqual([]);
 		});
+	});
+});
+
+describe('naming an account by its id', () => {
+	test('finds that account and no other, whatever the others are called or numbered', () => {
+		const record = (
+			id: string,
+			slot: number,
+			extra: Partial<AccountRecord> = {},
+		): AccountRecord => ({
+			id,
+			provider: 'claude',
+			email: `${id}@example.com`,
+			slot,
+			disabled: false,
+			addedAt: 'x',
+			...extra,
+		});
+		const wanted = record('6b0f3a52-1c2d-4e5f-8a9b-0c1d2e3f4a5b', 3);
+		const registry: Registry = {
+			version: 1,
+			accounts: [
+				record('2', 1),
+				record('other', 2, { alias: '6b0f3a52-1c2d-4e5f-8a9b-0c1d2e3f4a5b' }),
+				wanted,
+				record('fourth', 4),
+			],
+			active: {},
+			unreadable: [],
+		};
+		expect(findAccount(registry, 'claude', `id:${wanted.id}`)?.id).toBe(wanted.id);
+		expect(findAccount(registry, 'claude', 'id:2')?.id).toBe('2');
+		expect(findAccount(registry, 'claude', 'id:missing')).toBeUndefined();
+		expect(findAccount(registry, 'claude', 'id:6b0f')).toBeUndefined();
 	});
 });

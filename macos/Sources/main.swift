@@ -38,6 +38,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	private var history: [HistoryEntry] = []
 	/// The history file as it was when it was last read whole.
 	private var historyStamp: String?
+	/// Settings changed from the menu whose writes have not finished, kept on
+	/// the board over whatever a refresh loads until they have.
+	private var pendingSettings: [(key: String, value: String)] = []
 	/// Held so the submenu delegates are not released while their menus live.
 	private var liveSubmenus: [LiveSubmenu] = []
 	private var watcher: DispatchSourceFileSystemObject?
@@ -149,7 +152,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 					self.history = history
 					self.historyStamp = stamp
 				}
-				self.board = loaded
+				self.board = self.pendingSettings.reduce(loaded) { board, change in
+					board?.withSetting(change.key, change.value)
+				}
 				self.renderTitle()
 				self.announce(reports)
 				self.rescheduleTimer()
@@ -221,6 +226,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			let reason = self.runner.lastError
 			DispatchQueue.main.async {
 				self.isBusy = false
+				if arguments.count == 4, arguments[0] == "config", arguments[1] == "set",
+					let index = self.pendingSettings.firstIndex(where: {
+						$0.key == arguments[2] && $0.value == arguments[3]
+					})
+				{
+					self.pendingSettings.remove(at: index)
+				}
 				if !ok { self.report(failure: arguments, reason: reason) }
 				self.refresh()
 			}
@@ -405,7 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			onClick: canSwitch
 				? { [weak self] in
 					self?.showSwitch(provider: provider, accountId: account.id)
-					self?.perform(["switch", provider, account.id])
+					self?.perform(["switch", provider, "id:\(account.id)"])
 				} : nil)
 		let bars =
 			"Each bar is one of this account's limits and how much of it is used. The time on the right is when that limit resets."
@@ -429,7 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	private func accountMenu(_ account: Account, providerId: String, isActive: Bool) -> NSMenu {
 		let menu = NSMenu()
 		menu.autoenablesItems = false
-		let selector = "\(providerId)|\(account.id)"
+		let selector = "\(providerId)|id:\(account.id)"
 		let service = Board.providerTitles[providerId] ?? providerId
 		let pickup =
 			providerId == "claude"
@@ -817,7 +829,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	@objc private func seatSelector(_ sender: NSMenuItem) {
 		let parts = split(sender)
 		guard parts.count == 2 else { return }
-		if let account = board?.providers[parts[0]]?.accounts.first(where: { $0.id == parts[1] }) {
+		if let account = board?.providers[parts[0]]?.accounts.first(where: { "id:\($0.id)" == parts[1] }) {
 			showSwitch(provider: parts[0], accountId: account.id)
 		}
 		perform(["switch", parts[0], parts[1]])
@@ -828,7 +840,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	@objc private func signInSelector(_ sender: NSMenuItem) {
 		let parts = split(sender)
 		guard parts.count == 2 else { return }
-		let email = board?.providers[parts[0]]?.accounts.first(where: { $0.id == parts[1] })?.email ?? "the account"
+		let email = board?.providers[parts[0]]?.accounts.first(where: { "id:\($0.id)" == parts[1] })?.email ?? "the account"
 		DispatchQueue.global(qos: .userInitiated).async { [weak self] in
 			guard let self else { return }
 			let signer = Runner()
@@ -889,6 +901,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	@objc private func toggleSetting(_ sender: NSMenuItem) {
 		let parts = split(sender)
 		guard parts.count == 2 else { return }
+		pendingSettings.append((key: parts[0], value: parts[1]))
 		board = board?.withSetting(parts[0], parts[1])
 		renderTitle()
 		perform(["config", "set", parts[0], parts[1]])

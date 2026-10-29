@@ -1,7 +1,7 @@
 import { ServiceError } from './errors.ts';
 import { acquireLock } from './fs.ts';
 import { hotseatHome } from './paths.ts';
-import { updateRegistry } from './registry.ts';
+import { loadRegistry, updateRegistry } from './registry.ts';
 import { sessionRunning } from './session.ts';
 import { holdSwitch } from './switch-lock.ts';
 import type { AccountRecord, Credential, Provider } from './types.ts';
@@ -97,12 +97,17 @@ export async function renewInstalled(
 			if (!installed || fingerprint(installed) !== fingerprint(named)) return installed;
 			if (!due(installed)) return installed;
 			// The owner's saved copy holds the installed token while the login is
-			// theirs. A newer one is a renewal that never got installed; anything
-			// else means the login in use has changed hands since it was named.
-			const saved = await loadCredential(owner);
+			// theirs. One recorded as replacing the installed login, or newer than
+			// it, is a renewal or sign-in that never got installed; anything else
+			// means the login in use has changed hands since it was named.
+			const record = (await loadRegistry()).accounts.find((entry) => entry.id === owner.id);
+			const saved = record?.login;
 			if (!saved) return installed;
 			if (!provider.sharesToken(saved, installed)) {
-				if (provider.session.compareAge(saved, installed) <= 0) return installed;
+				const replacesInstalled =
+					record?.renewedFrom === fingerprint(installed) ||
+					provider.session.compareAge(saved, installed) > 0;
+				if (!replacesInstalled) return installed;
 				await provider.writeAgentCredential(saved);
 				await settled(owner);
 				return saved;
@@ -117,6 +122,7 @@ export async function renewInstalled(
 				const record = registry.accounts.find((entry) => entry.id === owner.id);
 				if (!record) return null;
 				if (record.login && !provider.sharesToken(record.login, installed)) {
+					record.renewedFrom = fingerprint(installed);
 					return structuredClone(record.login);
 				}
 				record.login = structuredClone(renewed);

@@ -16,9 +16,11 @@ export async function readJson<T>(path: string): Promise<T | null> {
 	} catch (error) {
 		const why =
 			error instanceof Error ? error.message.replace(/^JSON Parse error: /, '') : String(error);
-		throw new Error(`${basename(path)} is not valid JSON (${why}) - fix it or move it aside`);
+		throw new NotJson(`${basename(path)} is not valid JSON (${why}) - fix it or move it aside`);
 	}
 }
+
+class NotJson extends Error {}
 
 /** Like readJson, but a file that is not JSON reads as nothing. For caches. */
 export async function readJsonLoose<T>(path: string): Promise<T | null> {
@@ -27,6 +29,29 @@ export async function readJsonLoose<T>(path: string): Promise<T | null> {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Like readJson, but a file that is not JSON, or that went away while it was
+ * read, reads as nothing. A file that cannot be read at all still throws: for
+ * files written by someone else whose absence says that nothing is running.
+ */
+export async function readJsonUnlessGarbled<T>(path: string): Promise<T | null> {
+	return readJson<T>(path).catch((error: unknown) => {
+		if (error instanceof NotJson) return null;
+		return orIfMissing(null)(error);
+	});
+}
+
+/**
+ * For a `.catch`: a file or folder that is not there reads as `fallback`, and
+ * any other failure, such as one that cannot be opened, is thrown on.
+ */
+export function orIfMissing<T>(fallback: T): (error: unknown) => T {
+	return (error) => {
+		if ((error as { code?: string } | null)?.code === 'ENOENT') return fallback;
+		throw error;
+	};
 }
 
 export async function writeJsonAtomic(path: string, value: unknown, mode = 0o600): Promise<void> {

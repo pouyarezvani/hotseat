@@ -896,6 +896,33 @@ describe('renewing the login in use while something else changes it', () => {
 		});
 	});
 
+	test('the sign-in kept over a renewal still goes in after installing it failed and hotseat stopped', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.identities.delete('A');
+			claude.identities.set('NEW-SIGN-IN', { email: 'a@example.com' });
+			claude.readings.set('NEW-SIGN-IN', () => reading(20));
+			claude.rotate = '+';
+			claude.refreshDelayMs = 50;
+			claude.writeFailure = new Error('security: the keychain is locked');
+			const renewing = renewInstalled(claude, a, cred('A', 0, T - MIN), () => true);
+			await Bun.sleep(20);
+			await storeCredential(a, cred('NEW-SIGN-IN'));
+			await expect(renewing).rejects.toThrow('the keychain is locked');
+			expect(tokenOf(claude.installed ?? {})).toBe('A');
+			claude.writeFailure = null;
+			claude.rotate = '';
+			claude.refreshDelayMs = 0;
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf(claude.installed ?? {})).toBe('NEW-SIGN-IN');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW-SIGN-IN');
+			expect(claude.refreshesOf.get('A')).toBe(1);
+		});
+	});
+
 	test('the sign-in kept over a renewal is the login put in use, and stays saved after the next pass', async () => {
 		await withHome(async () => {
 			const { providers, a } = await world();

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ServiceError } from '../src/core/errors.ts';
@@ -177,6 +177,31 @@ describe('finding running Claude sessions', () => {
 			await rm(home, { recursive: true, force: true });
 		}
 	});
+
+	test('a sessions folder that cannot be read is not taken for no sessions', async () => {
+		const home = await mkdtemp(join(tmpdir(), 'hotseat-claude-home-'));
+		try {
+			await mkdir(join(home, 'sessions'));
+			await chmod(join(home, 'sessions'), 0o000);
+			await expect(claudeSessions(home)).rejects.toThrow('EACCES');
+			await expect(claudeSession.isRunning(home)).rejects.toThrow('EACCES');
+		} finally {
+			await chmod(join(home, 'sessions'), 0o700);
+			await rm(home, { recursive: true, force: true });
+		}
+	});
+
+	test('a session file that cannot be opened is not taken for no session', async () => {
+		const home = await mkdtemp(join(tmpdir(), 'hotseat-claude-home-'));
+		try {
+			await mkdir(join(home, 'sessions'));
+			await writeFile(join(home, 'sessions', 'locked.json'), JSON.stringify({ pid: process.pid }));
+			await chmod(join(home, 'sessions', 'locked.json'), 0o000);
+			await expect(claudeSessions(home)).rejects.toThrow('EACCES');
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
+	});
 });
 
 describe('a Codex session run by hotseat', () => {
@@ -204,6 +229,43 @@ describe('a Codex session run by hotseat', () => {
 				join(dir, 'hotseat-runs', `${process.pid}.json`),
 				JSON.stringify({ pid: process.pid, startedAt: 'Thu Jan  1 00:00:00 1970' }),
 			);
+			expect(await codexSession.isRunning(dir)).toBe(false);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a run folder that cannot be read is not taken for idle', async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'hotseat-codex-session-'));
+		try {
+			await markRunning(dir, process.pid);
+			await chmod(join(dir, 'hotseat-runs'), 0o000);
+			await expect(codexSession.isRunning(dir)).rejects.toThrow('EACCES');
+		} finally {
+			await chmod(join(dir, 'hotseat-runs'), 0o700);
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a run record that cannot be read is not taken for idle', async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'hotseat-codex-session-'));
+		try {
+			await markRunning(dir, process.pid);
+			await chmod(join(dir, 'hotseat-runs', `${process.pid}.json`), 0o000);
+			await expect(codexSession.isRunning(dir)).rejects.toThrow('EACCES');
+			await chmod(join(dir, 'hotseat-runs', `${process.pid}.json`), 0o600);
+			await writeFile(join(dir, 'hotseat-runs', `${process.pid}.json`), '{"pid": ');
+			await expect(codexSession.isRunning(dir)).rejects.toThrow(`${process.pid}.json`);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a record still being written is not read as one', async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'hotseat-codex-session-'));
+		try {
+			await mkdir(join(dir, 'hotseat-runs'));
+			await writeFile(join(dir, 'hotseat-runs', '123.json.123.0f3e.tmp'), '{"pid": 1');
 			expect(await codexSession.isRunning(dir)).toBe(false);
 		} finally {
 			await rm(dir, { recursive: true, force: true });

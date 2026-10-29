@@ -1,6 +1,6 @@
 import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { readJsonLoose, writeJsonAtomic } from '../core/fs.ts';
+import { orIfMissing, readJson, writeJsonAtomic } from '../core/fs.ts';
 import type { RunningProcess } from '../core/types.ts';
 
 export async function listProcesses(pattern: RegExp): Promise<RunningProcess[]> {
@@ -64,13 +64,21 @@ export async function clearRunMark(dir: string, pid: number): Promise<void> {
 /**
  * Whether any agent hotseat recorded in a session folder is still running. A
  * recorded process that is alive but whose start cannot be read counts as
- * running: a session is never taken for idle on a guess.
+ * running, and a record or folder that cannot be read is an error: a session
+ * is never taken for idle on a guess.
  */
 export async function markedRunning(dir: string): Promise<boolean> {
-	const names = await readdir(runsDir(dir)).catch(() => [] as string[]);
+	const names = await readdir(runsDir(dir)).catch(orIfMissing([] as string[]));
 	for (const name of names) {
-		const mark = await readJsonLoose<RunMark>(join(runsDir(dir), name));
-		if (typeof mark?.pid !== 'number' || typeof mark.startedAt !== 'string') continue;
+		if (!name.endsWith('.json')) continue;
+		const path = join(runsDir(dir), name);
+		const mark = await readJson<RunMark>(path).catch(orIfMissing(null));
+		if (mark === null) continue;
+		if (typeof mark.pid !== 'number' || typeof mark.startedAt !== 'string') {
+			throw new Error(
+				`${path} is not a run record hotseat can read - remove it if nothing runs there`,
+			);
+		}
 		if (!alive(mark.pid)) continue;
 		const now = await startedAt(mark.pid);
 		if (now.length === 0 || now === mark.startedAt) return true;

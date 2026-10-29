@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readJsonLoose } from '../../core/fs.ts';
+import { orIfMissing, readJsonUnlessGarbled } from '../../core/fs.ts';
 import type { RunningProcess } from '../../core/types.ts';
 
 function configHome(): string {
@@ -59,20 +59,20 @@ function describeEntrypoint(entrypoint: string | undefined): string {
 export async function claudeSessions(home = configHome()): Promise<RunningProcess[]> {
 	const found = new Map<number, string>();
 
-	const sessionNames = await readdir(join(home, 'sessions')).catch(() => [] as string[]);
+	const sessionNames = await readdir(join(home, 'sessions')).catch(orIfMissing([] as string[]));
 	for (const name of sessionNames) {
 		if (!name.endsWith('.json')) continue;
-		const session = await readJsonLoose<SessionFile>(join(home, 'sessions', name));
+		const session = await readJsonUnlessGarbled<SessionFile>(join(home, 'sessions', name));
 		const pid = session?.pid;
 		if (typeof pid !== 'number' || !isAlive(pid)) continue;
 		const where = session?.cwd ? ` in ${session.cwd.split('/').pop()}` : '';
 		found.set(pid, `${describeEntrypoint(session?.entrypoint)}${where}`);
 	}
 
-	const lockNames = await readdir(join(home, 'ide')).catch(() => [] as string[]);
+	const lockNames = await readdir(join(home, 'ide')).catch(orIfMissing([] as string[]));
 	for (const name of lockNames) {
 		if (!name.endsWith('.lock')) continue;
-		const lock = await readJsonLoose<IdeLock>(join(home, 'ide', name));
+		const lock = await readJsonUnlessGarbled<IdeLock>(join(home, 'ide', name));
 		const pid = lock?.pid;
 		if (typeof pid !== 'number' || !isAlive(pid)) continue;
 		const folder = lock?.workspaceFolders?.[0]?.split('/').pop();

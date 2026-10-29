@@ -108,6 +108,10 @@ export async function renewInstalled(
 					record?.renewedFrom === fingerprint(installed) ||
 					provider.session.compareAge(saved, installed) > 0;
 				if (!replacesInstalled) return installed;
+				// Reading the saved login waits on the registry; a login put in
+				// meanwhile stays.
+				const now = await provider.readAgentCredential();
+				if (!now || fingerprint(now) !== fingerprint(named)) return now;
 				await provider.writeAgentCredential(saved);
 				await settled(owner);
 				return saved;

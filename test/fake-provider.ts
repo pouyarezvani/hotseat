@@ -71,6 +71,10 @@ export class FakeProvider implements Provider {
 	scanFailure: Error | null = null;
 	/** When set, installing a login fails with this, as a locked keychain does. */
 	writeFailure: Error | null = null;
+	/** Runs while the service works on a refresh, so a test can change things meanwhile. */
+	duringRefresh: ((credential: Credential) => Promise<void>) | null = null;
+	/** Runs just after the installed login is read, so a test can change it behind the reader. */
+	afterRead: (() => void) | null = null;
 	session: SessionSupport;
 
 	constructor(id: ProviderId) {
@@ -120,7 +124,9 @@ export class FakeProvider implements Provider {
 
 	async readAgentCredential(): Promise<Credential | null> {
 		if (this.readFailure) throw this.readFailure;
-		return this.installed ? structuredClone(this.installed) : null;
+		const read = this.installed ? structuredClone(this.installed) : null;
+		this.afterRead?.();
+		return read;
 	}
 
 	async writeAgentCredential(credential: Credential): Promise<void> {
@@ -157,6 +163,7 @@ export class FakeProvider implements Provider {
 		this.calls.refresh += 1;
 		this.refreshesOf.set(tokenOf(credential), (this.refreshesOf.get(tokenOf(credential)) ?? 0) + 1);
 		if (this.refreshDelayMs > 0) await Bun.sleep(this.refreshDelayMs);
+		await this.duringRefresh?.(credential);
 		const failure = this.refreshFailures.get(tokenOf(credential));
 		if (failure) throw failure;
 		if (!this.rotate) return credential;

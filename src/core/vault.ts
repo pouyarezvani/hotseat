@@ -28,9 +28,10 @@ export async function storeCredential(
 
 /**
  * Saves a login for the account unless `keepSaved` says the login saved at that
- * moment should stay. The check runs inside the write, so a copy judged against
- * what was saved earlier can never replace a login saved since. Returns the
- * saved login it kept instead, or null when it saved the new one.
+ * moment should stay, or the saved login is recorded as the one replacing it.
+ * The check runs inside the write, so a copy judged against what was saved
+ * earlier can never replace a login saved since. Returns the saved login it
+ * kept instead, or null when it saved the new one.
  */
 export async function storeCredentialUnless(
 	account: Pick<AccountRecord, 'id'>,
@@ -40,7 +41,12 @@ export async function storeCredentialUnless(
 	return updateRegistry((registry) => {
 		const record = registry.accounts.find((entry) => entry.id === account.id);
 		if (!record) throw new Error('that account is no longer in accounts.json');
-		if (record.login && keepSaved(record.login)) return structuredClone(record.login);
+		if (
+			record.login &&
+			(record.renewedFrom === fingerprint(credential) || keepSaved(record.login))
+		) {
+			return structuredClone(record.login);
+		}
 		record.login = structuredClone(credential);
 		return null;
 	});

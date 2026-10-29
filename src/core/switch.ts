@@ -194,7 +194,10 @@ export async function activate(
 	await updateRegistry((current) => {
 		current.active[providerId] = target.id;
 		const record = current.accounts.find((account) => account.id === target.id);
-		if (record) record.lastActivatedAt = new Date(now).toISOString();
+		if (record) {
+			record.lastActivatedAt = new Date(now).toISOString();
+			record.inUseFrom = fingerprint(refreshed);
+		}
 	});
 
 	return {

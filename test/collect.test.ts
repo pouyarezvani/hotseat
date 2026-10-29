@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
 import { ACTIVE_CALM_MS, CANDIDATE_MS, collectState, plainError } from '../src/core/collect.ts';
-import { publishState } from '../src/core/enroll.ts';
+import { publishState, saveInstalled, signInAgain } from '../src/core/enroll.ts';
 import { ServiceError } from '../src/core/errors.ts';
 import { usageCachePath } from '../src/core/paths.ts';
 import { loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
@@ -988,6 +988,127 @@ describe('renewing the login in use while something else changes it', () => {
 			await collectState({ providers, now: T, force: true, awake: async () => true });
 			expect(tokenOf(claude.installed ?? {})).toBe('NEW-SIGN-IN');
 			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW-SIGN-IN');
+		});
+	});
+});
+
+describe('keeping the saved copy of the login in use current', () => {
+	test('a login the agent renewed after hotseat put it in use replaces its saved copy', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const claude = providers.claude;
+			await activate('claude', b.id, { providers, now: T });
+			claude.installed = cred('B2', 5);
+			claude.identities.set('B2', { email: 'b@example.com' });
+			claude.readings.set('B2', () => reading(10));
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('B2');
+			claude.installed = cred('B3', 7);
+			claude.identities.set('B3', { email: 'b@example.com' });
+			claude.readings.set('B3', () => reading(10));
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('B3');
+		});
+	});
+
+	test('a login signed in to again and put in use is kept current as the agent renews it', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((entry) => entry.id === a.id);
+				if (record) record.inUseFrom = fingerprint(cred('A'));
+			});
+			claude.identities.set('A-NEW', { email: 'a@example.com' });
+			await signInAgain({
+				providerId: 'claude',
+				account: a,
+				providers,
+				now: T,
+				login: async () => cred('A-NEW'),
+			});
+			expect(tokenOf(claude.installed ?? {})).toBe('A-NEW');
+			claude.installed = cred('A-NEW2', 5);
+			claude.identities.set('A-NEW2', { email: 'a@example.com' });
+			claude.readings.set('A-NEW2', () => reading(10));
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-NEW2');
+		});
+	});
+
+	test('the login in use, once saved, is kept current as the agent renews it', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((entry) => entry.id === a.id);
+				if (record) record.inUseFrom = fingerprint(cred('A-OLD'));
+			});
+			claude.installed = cred('A-CUR');
+			claude.identities.set('A-CUR', { email: 'a@example.com' });
+			const saved = await saveInstalled('claude', { providers });
+			expect(saved?.account.id).toBe(a.id);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-CUR');
+			expect((await loadRegistry()).active.claude).toBe(a.id);
+			claude.installed = cred('A-CUR2', 5);
+			claude.identities.set('A-CUR2', { email: 'a@example.com' });
+			claude.readings.set('A-CUR2', () => reading(10));
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-CUR2');
+		});
+	});
+
+	test('a sign-in saved while another login of the account is in use is never replaced by it', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const claude = providers.claude;
+			await activate('claude', b.id, { providers, now: T });
+			await storeCredential(b, cred('SIGN-IN'));
+			claude.installed = cred('B2', 5);
+			claude.identities.set('B2', { email: 'b@example.com' });
+			claude.readings.set('B2', () => reading(10));
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('SIGN-IN');
+		});
+	});
+
+	test('a pass that read a login no longer in use never saves it', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.afterRead = async () => {
+				claude.afterRead = null;
+				claude.installed = cred('SIGN-IN');
+				await storeCredential(a, cred('SIGN-IN'));
+				await updateRegistry((registry) => {
+					const record = registry.accounts.find((entry) => entry.id === a.id);
+					if (record) record.inUseFrom = fingerprint(cred('SIGN-IN'));
+				});
+			};
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('SIGN-IN');
+		});
+	});
+
+	test('a sign-in saved while a recovered login goes in stays saved after the next pass', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('RENEWAL', 9));
+			claude.identities.set('RENEWAL', { email: 'a@example.com' });
+			claude.identities.set('SIGN-IN', { email: 'a@example.com' });
+			claude.readings.set('RENEWAL', () => reading(20));
+			claude.readings.set('SIGN-IN', () => reading(20));
+			let reads = 0;
+			claude.afterRead = async () => {
+				reads += 1;
+				if (reads === 2) await storeCredential(a, cred('SIGN-IN'));
+			};
+			await renewInstalled(claude, a, cred('A', 0, T - MIN), () => true);
+			claude.afterRead = null;
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('SIGN-IN');
 		});
 	});
 });

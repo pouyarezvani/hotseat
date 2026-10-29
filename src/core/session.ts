@@ -1,8 +1,9 @@
 import { lstat, mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hotseatHome } from './paths.ts';
+import { updateRegistry } from './registry.ts';
 import type { AccountRecord, Credential, Provider, ProviderState } from './types.ts';
-import { loadCredential, storeCredentialUnless } from './vault.ts';
+import { fingerprint, loadCredential, storeCredentialUnless } from './vault.ts';
 
 /**
  * A session runs one command as one account in one terminal. The agent is
@@ -36,20 +37,41 @@ async function exists(path: string): Promise<boolean> {
 }
 
 /**
- * Saves a login for the account unless the saved one is newer, so an older
- * copy found lying around can never revert a fresh sign-in.
+ * Saves the login in use, `candidate`, as the account's when it is the
+ * account's own login renewed by the agent: newer than the saved one, while
+ * the saved one is still the login that went in use. A login saved since,
+ * such as a fresh sign-in, is kept, and so is one recorded as replacing the
+ * candidate. Everything is decided in one registry write, with the login in
+ * use read again there, so a candidate read before something else went in is
+ * never saved.
  */
 export async function adoptIfNewer(
 	provider: Provider,
 	account: Pick<AccountRecord, 'id' | 'email'>,
 	candidate: Credential,
 ): Promise<boolean> {
-	const keep = (saved: Credential): boolean =>
-		provider.session.compareAge(candidate, saved) < 0 ||
-		JSON.stringify(saved) === JSON.stringify(candidate);
-	const saved = await loadCredential(account);
-	if (saved && keep(saved)) return false;
-	return (await storeCredentialUnless(account, candidate, keep)) === null;
+	const print = fingerprint(candidate);
+	const older = (saved: Credential | undefined): boolean =>
+		saved !== undefined &&
+		(provider.session.compareAge(candidate, saved) < 0 ||
+			JSON.stringify(saved) === JSON.stringify(candidate));
+	if (older((await loadCredential(account)) ?? undefined)) return false;
+	return updateRegistry(async (registry) => {
+		const record = registry.accounts.find((entry) => entry.id === account.id);
+		if (!record || older(record.login) || record.renewedFrom === print) return false;
+		if (
+			record.login &&
+			record.inUseFrom !== undefined &&
+			record.inUseFrom !== fingerprint(record.login)
+		) {
+			return false;
+		}
+		const installed = await provider.readAgentCredential().catch(() => null);
+		if (!installed || fingerprint(installed) !== print) return false;
+		record.login = structuredClone(candidate);
+		record.inUseFrom = print;
+		return true;
+	});
 }
 
 /** The login a session folder holds, if the folder exists. */

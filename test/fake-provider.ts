@@ -74,7 +74,7 @@ export class FakeProvider implements Provider {
 	/** Runs while the service works on a refresh, so a test can change things meanwhile. */
 	duringRefresh: ((credential: Credential) => Promise<void>) | null = null;
 	/** Runs just after the installed login is read, so a test can change it behind the reader. */
-	afterRead: (() => void) | null = null;
+	afterRead: (() => void | Promise<void>) | null = null;
 	session: SessionSupport;
 
 	constructor(id: ProviderId) {
@@ -125,7 +125,7 @@ export class FakeProvider implements Provider {
 	async readAgentCredential(): Promise<Credential | null> {
 		if (this.readFailure) throw this.readFailure;
 		const read = this.installed ? structuredClone(this.installed) : null;
-		this.afterRead?.();
+		await this.afterRead?.();
 		return read;
 	}
 

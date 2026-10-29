@@ -44,6 +44,33 @@ export async function enroll(
 }
 
 /**
+ * Saves the login this machine is signed in to as its account's, and makes
+ * that account the one in use, or returns nothing when no login is signed in.
+ */
+export async function saveInstalled(
+	providerId: ProviderId,
+	options: { providers?: Record<ProviderId, Provider> } = {},
+): Promise<{ account: AccountRecord; email: string } | null> {
+	const provider = (options.providers ?? PROVIDERS)[providerId];
+	const credential = await provider.readAgentCredential();
+	if (!credential) return null;
+	const identity = await provider.identify(credential);
+	const account = await updateRegistry((registry) => {
+		const record = upsertAccount(registry, {
+			provider: providerId,
+			email: identity.email,
+			...(identity.plan ? { plan: identity.plan } : {}),
+		});
+		record.login = structuredClone(credential);
+		record.inUseFrom = fingerprint(credential);
+		registry.active[providerId] = record.id;
+		const { login: _login, ...rest } = record;
+		return rest;
+	});
+	return { account, email: identity.email };
+}
+
+/**
  * Signs in to an account again through the browser, as adding it did, and
  * puts the new login in place of the one that stopped working. The sign-in
  * runs against a scratch folder, so nothing in use is signed out. Whoever
@@ -69,6 +96,7 @@ export async function signInAgain(input: {
 	// and the installed one are the same the moment the board is published.
 	const provider = (input.providers ?? PROVIDERS)[input.providerId];
 	const who = await provider.identify(credential).catch(() => null);
+	let putInUse = false;
 	if (who) {
 		const held = await holdSwitch(input.providerId);
 		try {
@@ -86,6 +114,7 @@ export async function signInAgain(input: {
 				installed !== null && still !== null && fingerprint(still) === fingerprint(installed);
 			if (owner && unchanged && who.email.toLowerCase() === owner.email.toLowerCase()) {
 				await provider.writeAgentCredential(credential);
+				putInUse = true;
 				await provider.recordIdentity?.(who).catch(() => undefined);
 			}
 		} finally {
@@ -96,6 +125,14 @@ export async function signInAgain(input: {
 		...(input.providers ? { providers: input.providers } : {}),
 		...(input.now !== undefined ? { now: input.now } : {}),
 	});
+	if (putInUse) {
+		await updateRegistry((registry) => {
+			const record = registry.accounts.find((entry) => entry.id === saved.id);
+			if (record?.login && fingerprint(record.login) === fingerprint(credential)) {
+				record.inUseFrom = fingerprint(credential);
+			}
+		});
+	}
 	return {
 		signedInAs: saved.email,
 		matched: saved.id === input.account.id,

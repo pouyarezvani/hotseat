@@ -80,6 +80,7 @@ function readEntry(
 			? { lastActivatedAt: entry.lastActivatedAt }
 			: {}),
 		...(typeof entry.renewedFrom === 'string' ? { renewedFrom: entry.renewedFrom } : {}),
+		...(typeof entry.inUseFrom === 'string' ? { inUseFrom: entry.inUseFrom } : {}),
 		...(login ? { login } : {}),
 	};
 	return { record, changed };

@@ -113,7 +113,7 @@ export async function renewInstalled(
 				const now = await provider.readAgentCredential();
 				if (!now || fingerprint(now) !== fingerprint(named)) return now;
 				await provider.writeAgentCredential(saved);
-				await settled(owner);
+				await settled(owner, saved);
 				return saved;
 			}
 			const renewed = await provider.refreshIfNeeded(installed);
@@ -138,7 +138,7 @@ export async function renewInstalled(
 			const now = await provider.readAgentCredential();
 			if (!now || fingerprint(now) !== fingerprint(named)) return now;
 			await provider.writeAgentCredential(login);
-			await settled(owner);
+			await settled(owner, login);
 			return login;
 		} finally {
 			await lock.release();
@@ -148,10 +148,15 @@ export async function renewInstalled(
 	}
 }
 
-/** Forgets which login an account's saved one renewed, once that renewal is installed. */
-async function settled(owner: Pick<AccountRecord, 'id'>): Promise<void> {
+/**
+ * Records that `login` went in use for the owner, and forgets which login its
+ * saved one replaced, which is no longer installed.
+ */
+async function settled(owner: Pick<AccountRecord, 'id'>, login: Credential): Promise<void> {
 	await updateRegistry((registry) => {
 		const record = registry.accounts.find((entry) => entry.id === owner.id);
-		if (record) delete record.renewedFrom;
+		if (!record) return;
+		delete record.renewedFrom;
+		record.inUseFrom = fingerprint(login);
 	});
 }

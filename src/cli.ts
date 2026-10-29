@@ -11,6 +11,7 @@ import {
 	loginClaudeIsolated,
 	loginCodexIsolated,
 	publishState,
+	saveInstalled,
 	signInAgain,
 } from './core/enroll.ts';
 import { readHistory, recordSwitch, type SwitchReason } from './core/history.ts';
@@ -33,7 +34,6 @@ import {
 	removeAccount,
 	setAlias,
 	updateRegistry,
-	upsertAccount,
 } from './core/registry.ts';
 import { captureSession, forgetSession, needsSession, prepareSession } from './core/session.ts';
 import {
@@ -49,7 +49,6 @@ import { activate, nextAvailable, pickBest, rotateNext, type SwitchResult } from
 import { holdSwitch } from './core/switch-lock.ts';
 import { exportAccounts, importAccounts, moveSlot, purge, swapSlots } from './core/transfer.ts';
 import { PROVIDER_IDS, type ProviderId } from './core/types.ts';
-import { storeCredential } from './core/vault.ts';
 import { clearRunMark, markRunning } from './providers/process.ts';
 import { renderBoard } from './ui/board.ts';
 import { renderHelp } from './ui/help.ts';
@@ -192,26 +191,14 @@ async function seatPicked(
 
 async function capture(providerId: ProviderId, announce: boolean): Promise<number> {
 	const provider = PROVIDERS[providerId];
-	const credential = await provider.readAgentCredential();
-	if (!credential) {
+	const saved = await saveInstalled(providerId);
+	if (!saved) {
 		problem(`no ${provider.displayName} account is signed in on this machine`);
 		return 1;
 	}
-	const identity = await provider.identify(credential);
-	const account = await updateRegistry((registry) =>
-		upsertAccount(registry, {
-			provider: providerId,
-			email: identity.email,
-			...(identity.plan ? { plan: identity.plan } : {}),
-		}),
-	);
-	await storeCredential(account, credential);
-	await updateRegistry((registry) => {
-		registry.active[providerId] = account.id;
-	});
 	await publishState({ force: true });
 	if (announce) {
-		success(`saved ${identity.email} as ${provider.displayName} account ${account.slot}`);
+		success(`saved ${saved.email} as ${provider.displayName} account ${saved.account.slot}`);
 	}
 	return 0;
 }

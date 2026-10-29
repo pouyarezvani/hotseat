@@ -21,6 +21,14 @@ export interface AccountRecord {
 	 * this account's after its saved copy was replaced.
 	 */
 	renewedFrom?: string;
+	/**
+	 * The fingerprint of the saved login as it was when it last went in use,
+	 * or was last updated from the login in use. While the saved login is still
+	 * that one, the login in use is its own copy, renewed by the agent, and
+	 * replaces it when newer; once something else is saved, such as a fresh
+	 * sign-in, the login in use no longer does.
+	 */
+	inUseFrom?: string;
 }
 
 export interface Registry {

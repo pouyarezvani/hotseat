@@ -281,8 +281,8 @@ export function plainError(error: unknown): string {
 }
 
 /** The account as it may be shown or written anywhere: without its login. */
-function shown(record: AccountRecord): Omit<AccountRecord, 'login' | 'renewedFrom'> {
-	const { login: _login, renewedFrom: _renewedFrom, ...rest } = record;
+function shown(record: AccountRecord): Omit<AccountRecord, 'login' | 'renewedFrom' | 'inUseFrom'> {
+	const { login: _login, renewedFrom: _renewedFrom, inUseFrom: _inUseFrom, ...rest } = record;
 	return rest;
 }
 

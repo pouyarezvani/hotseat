@@ -2,7 +2,8 @@ import { lstat, mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { orIfMissing } from './fs.ts';
 import { hotseatHome } from './paths.ts';
-import { updateRegistry } from './registry.ts';
+import { loadRegistry, updateRegistry } from './registry.ts';
+import { holdSwitch } from './switch-lock.ts';
 import type { AccountRecord, Credential, Provider, ProviderState } from './types.ts';
 import { fingerprint, loadCredential, storeCredentialUnless } from './vault.ts';
 
@@ -40,9 +41,10 @@ async function exists(path: string): Promise<boolean> {
  * account's own login renewed by the agent: newer than the saved one, while
  * the saved one is still the login that went in use. A login saved since,
  * such as a fresh sign-in, is kept, and so is one recorded as replacing the
- * candidate. Everything is decided in one registry write, with the login in
- * use read again there, so a candidate read before something else went in is
- * never saved.
+ * candidate. Done under the switch lock, so never while a login is being put
+ * in, and decided in one registry write with the login in use read again
+ * there, so a candidate read before something else went in is never saved.
+ * The lock is taken only when there is something to decide.
  */
 export async function adoptIfNewer(
 	provider: Provider,
@@ -50,14 +52,38 @@ export async function adoptIfNewer(
 	candidate: Credential,
 ): Promise<boolean> {
 	const print = fingerprint(candidate);
-	const older = (saved: Credential | undefined): boolean =>
-		saved !== undefined &&
-		(provider.session.compareAge(candidate, saved) < 0 ||
-			JSON.stringify(saved) === JSON.stringify(candidate));
-	if (older((await loadCredential(account)) ?? undefined)) return false;
+	const known = (await loadRegistry()).accounts.find((entry) => entry.id === account.id);
+	if (!known || (known.renewedFrom !== print && olderThanSaved(provider, candidate, known.login))) {
+		return false;
+	}
+	const held = await holdSwitch(provider.id);
+	try {
+		return await adoptWhileHeld(provider, account, candidate);
+	} finally {
+		await held.release();
+	}
+}
+
+/** adoptIfNewer, for a caller already holding the switch lock. */
+export async function adoptWhileHeld(
+	provider: Provider,
+	account: Pick<AccountRecord, 'id' | 'email'>,
+	candidate: Credential,
+): Promise<boolean> {
+	const print = fingerprint(candidate);
 	return updateRegistry(async (registry) => {
 		const record = registry.accounts.find((entry) => entry.id === account.id);
-		if (!record || older(record.login) || record.renewedFrom === print) return false;
+		if (!record) return false;
+		if (record.renewedFrom === print) {
+			// The login the saved one was put in to replace is still installed,
+			// so the saved one never went in, whatever was recorded before a
+			// stop: the login in use is this one.
+			if (record.login && record.inUseFrom === fingerprint(record.login)) {
+				record.inUseFrom = print;
+			}
+			return false;
+		}
+		if (olderThanSaved(provider, candidate, record.login)) return false;
 		if (
 			record.login &&
 			record.inUseFrom !== undefined &&
@@ -71,6 +97,18 @@ export async function adoptIfNewer(
 		record.inUseFrom = print;
 		return true;
 	});
+}
+
+function olderThanSaved(
+	provider: Provider,
+	candidate: Credential,
+	saved: Credential | undefined,
+): boolean {
+	return (
+		saved !== undefined &&
+		(provider.session.compareAge(candidate, saved) < 0 ||
+			JSON.stringify(saved) === JSON.stringify(candidate))
+	);
 }
 
 /** The login a session folder holds, if the folder exists. */

@@ -145,7 +145,7 @@ export async function signInAgain(input: {
 				: undefined;
 		saved = await saveLogin(input.providerId, who, credential, replacing);
 		if (replacing) {
-			const now = await putInUse(provider, saved, credential, replacing);
+			const now = await putInUse(provider, saved, credential, replacing, true);
 			if (now && fingerprint(now) === fingerprint(credential)) {
 				await provider.recordIdentity?.(who).catch(() => undefined);
 			}

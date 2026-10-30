@@ -442,6 +442,32 @@ describe('switching while something else changes', () => {
 		});
 	});
 
+	test('a switch made by hand whose bookkeeping failed still stops an automatic pass decided before it', async () => {
+		await withHome(async () => {
+			const { providers } = await world();
+			const c = await updateRegistry((registry) =>
+				upsertAccount(registry, { provider: 'claude', email: 'c@example.com' }),
+			);
+			await storeCredential(c, cred('C'));
+			providers.claude.identities.set('C', { email: 'c@example.com' });
+			providers.claude.readings.set('A', () => reading(95));
+			providers.claude.readings.set('B', () => reading(40, 6));
+			providers.claude.readings.set('C', () => reading(60, 120));
+			const byHand = await holdSwitch('claude');
+			const automatic = tick({ providers, now: T });
+			while (providers.claude.calls.fetchUsage === 0) await Bun.sleep(5);
+			await Bun.sleep(150);
+			await activate('claude', c.id, { providers, now: T });
+			await byHand.release();
+			const reports = await automatic;
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('C');
+			expect(reports[0]).toMatchObject({
+				outcome: 'holding',
+				detail: 'the login in use changed while this pass was deciding - deciding again next pass',
+			});
+		});
+	});
+
 	test('an automatic switch decided before a switch made by hand stands down', async () => {
 		await withHome(async () => {
 			const { providers, a } = await world();

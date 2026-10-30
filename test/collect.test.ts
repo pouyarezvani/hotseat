@@ -1372,6 +1372,60 @@ describe('putting a login in use when something goes wrong', () => {
 		});
 	});
 
+	test('the saved login is never updated from the login in use while a login is being put in', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			const switching = await holdSwitch('claude');
+			await storeCredential(a, cred('SIGN-IN'));
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((entry) => entry.id === a.id);
+				if (!record) return;
+				record.inUseFrom = fingerprint(cred('SIGN-IN'));
+				record.renewedFrom = fingerprint(cred('A'));
+			});
+			claude.installed = cred('A2', 5);
+			claude.identities.set('A2', { email: 'a@example.com' });
+			claude.readings.set('A2', () => reading(10));
+			const reading2 = collectState({ providers, now: T, force: true, awake: async () => true });
+			await Bun.sleep(100);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('SIGN-IN');
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((entry) => entry.id === a.id);
+				if (record) record.inUseFrom = fingerprint(cred('A'));
+			});
+			await switching.release();
+			await reading2;
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('SIGN-IN');
+		});
+	});
+
+	test('a login that never went in because hotseat stopped first does not let the old one take over', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			await storeCredential(a, cred('NEW', 9));
+			let reads = 0;
+			claude.afterRead = async () => {
+				reads += 1;
+				if (reads === 2) {
+					claude.afterRead = null;
+					await chmod(hotseatHome(), 0o500);
+					throw new Error('hotseat stopped');
+				}
+			};
+			await expect(renewInstalled(claude, a, cred('A'), () => true)).rejects.toThrow('EACCES');
+			await chmod(hotseatHome(), 0o700);
+			expect(tokenOf(claude.installed ?? {})).toBe('A');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			claude.installed = cred('A2', 12);
+			claude.identities.set('A2', { email: 'a@example.com' });
+			claude.readings.set('A2', () => reading(10));
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW');
+		});
+	});
+
 	test('a session folder that cannot be looked at is not taken for no session', async () => {
 		await withHome(async () => {
 			const { providers, b } = await world();

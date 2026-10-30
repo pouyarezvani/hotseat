@@ -125,13 +125,8 @@ async function seat(
 			return 0;
 		}
 		const now = Date.now();
-		await recordSwitch({
-			at: new Date(now).toISOString(),
-			provider: providerId,
-			...(result.from ? { from: result.from } : {}),
-			to: result.to,
-			reason,
-		});
+		// Remembered before the history line, so a history write that fails
+		// cannot leave an automatic pass free to switch straight back.
 		memory = await rememberManualSwitch({
 			provider: providerId,
 			state: before.providers[providerId],
@@ -139,6 +134,13 @@ async function seat(
 			toId: result.toId,
 			settings,
 			now,
+		});
+		await recordSwitch({
+			at: new Date(now).toISOString(),
+			provider: providerId,
+			...(result.from ? { from: result.from } : {}),
+			to: result.to,
+			reason,
 		});
 	} finally {
 		await held.release();

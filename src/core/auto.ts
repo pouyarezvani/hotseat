@@ -20,6 +20,7 @@ import { loadSettings, type Settings } from './settings.ts';
 import { activate } from './switch.ts';
 import { holdSwitch } from './switch-lock.ts';
 import type { AccountState, Provider, ProviderId, ProviderState } from './types.ts';
+import { fingerprint } from './vault.ts';
 import { fullyAwake } from './wake.ts';
 
 export type TickOutcome = 'switched' | 'holding' | 'blocked';
@@ -203,6 +204,14 @@ export async function tick(
 	// Read before the accounts are, so a switch made at any point after this,
 	// even while they are being read, is seen when this pass comes to act.
 	const auto = await loadAutoState();
+	const providers = options.providers ?? PROVIDERS;
+	const inUseBefore = new Map<ProviderId, string | null>();
+	for (const providerId of Object.keys(providers) as ProviderId[]) {
+		if (!settings.autoProviders.includes(providerId)) continue;
+		const installed = await providers[providerId].readAgentCredential().catch(() => undefined);
+		if (installed !== undefined)
+			inUseBefore.set(providerId, installed ? fingerprint(installed) : null);
+	}
 	const state = await collectState(options);
 	const now = options.now ?? Date.now();
 
@@ -240,6 +249,20 @@ export async function tick(
 					outcome: 'holding',
 					detail:
 						'the account in use was switched while this pass was deciding - deciding again next pass',
+				});
+				continue;
+			}
+			// A switch whose bookkeeping failed changed the login but not the
+			// memory; so does anything else that put a login in meanwhile.
+			const installed = await providers[providerId].readAgentCredential().catch(() => undefined);
+			const inUseNow =
+				installed === undefined ? undefined : installed ? fingerprint(installed) : null;
+			if (inUseNow === undefined || inUseNow !== inUseBefore.get(providerId)) {
+				reports.push({
+					provider: providerId,
+					outcome: 'holding',
+					detail:
+						'the login in use changed while this pass was deciding - deciding again next pass',
 				});
 				continue;
 			}

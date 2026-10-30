@@ -108,7 +108,7 @@ export async function renewInstalled(
 					record?.renewedFrom === fingerprint(installed) ||
 					provider.session.compareAge(saved, installed) > 0;
 				if (!replacesInstalled) return installed;
-				return putInUse(provider, owner, saved, named);
+				return putInUse(provider, owner, saved, named, true);
 			}
 			const renewed = await provider.refreshIfNeeded(installed);
 			if (renewed === installed) return installed;
@@ -126,7 +126,7 @@ export async function renewInstalled(
 				record.login = structuredClone(renewed);
 				return null;
 			});
-			return putInUse(provider, owner, kept ?? renewed, named);
+			return putInUse(provider, owner, kept ?? renewed, named, true);
 		} finally {
 			await lock.release();
 		}
@@ -143,13 +143,16 @@ export async function renewInstalled(
  * the agent's renewals of it unsaved. If installing fails, or something else
  * went in meanwhile, the record goes back to what it was, or to the login
  * still installed, so the agent's renewals of that one never replace a login
- * that did not go in. Returns the login installed afterwards.
+ * that did not go in. When `named` is the owner's own login, it is recorded as
+ * the one being replaced, so a pass after a stop before the install can tell
+ * the install never landed. Returns the login installed afterwards.
  */
 export async function putInUse(
 	provider: Provider,
 	owner: Pick<AccountRecord, 'id'>,
 	login: Credential,
 	named: Credential | null,
+	namedIsOwners: boolean,
 ): Promise<Credential | null> {
 	const print = fingerprint(login);
 	const before = await updateRegistry((registry) => {
@@ -157,6 +160,7 @@ export async function putInUse(
 		if (!record) return undefined;
 		const previous = record.inUseFrom;
 		record.inUseFrom = print;
+		if (namedIsOwners && named) record.renewedFrom = fingerprint(named);
 		return previous;
 	});
 	const undo = (): Promise<void> =>

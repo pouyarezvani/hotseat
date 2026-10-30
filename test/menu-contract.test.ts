@@ -541,3 +541,14 @@ describe('a settings change made while a refresh is running', () => {
 		expect(perform.slice(0, perform.indexOf('\n\t}\n'))).toContain('pendingSettings.remove(at:');
 	});
 });
+
+describe('a switch made from the command line', () => {
+	test('is remembered before its history line is written, so a failed history write cannot hide it', () => {
+		const seat = cli.slice(
+			cli.indexOf('async function seat('),
+			cli.indexOf('async function seatPicked('),
+		);
+		expect(seat.indexOf('rememberManualSwitch(')).toBeGreaterThan(-1);
+		expect(seat.indexOf('rememberManualSwitch(')).toBeLessThan(seat.indexOf('recordSwitch('));
+	});
+});

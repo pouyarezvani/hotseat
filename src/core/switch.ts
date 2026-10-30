@@ -2,7 +2,7 @@ import { liveIdentity, PROVIDERS } from './collect.ts';
 import { MIN_USABLE_HEADROOM, headroom as policyHeadroom, rankCandidates } from './policy.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
 import { putInUse, renewSaved } from './renew.ts';
-import { adoptIfNewer, freshestLogin, sessionRunning } from './session.ts';
+import { adoptWhileHeld, freshestLogin, sessionRunning } from './session.ts';
 import type { AccountRecord, AccountState, Provider, ProviderId, ProviderState } from './types.ts';
 import { fingerprint, storeCredential } from './vault.ts';
 
@@ -183,9 +183,9 @@ export async function activate(
 	// Save the outgoing login before overwriting it, so a token the agent
 	// refreshed while that account was in use is not lost. Never over a
 	// newer sign-in already saved for that account.
-	if (live && previous && !savedLogin) await adoptIfNewer(provider, previous, live);
+	if (live && previous && !savedLogin) await adoptWhileHeld(provider, previous, live);
 
-	const installed = await putInUse(provider, target, refreshed, live);
+	const installed = await putInUse(provider, target, refreshed, live, false);
 	if (!installed || fingerprint(installed) !== fingerprint(refreshed)) {
 		throw new Error(
 			'the login in use changed while switching - not switching, so nothing is lost; try again',

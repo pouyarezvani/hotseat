@@ -1,5 +1,6 @@
 import { lstat, mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { orIfMissing } from './fs.ts';
 import { hotseatHome } from './paths.ts';
 import { updateRegistry } from './registry.ts';
 import type { AccountRecord, Credential, Provider, ProviderState } from './types.ts';
@@ -29,11 +30,9 @@ export function sessionDir(provider: Provider, account: Pick<AccountRecord, 'ema
 	return join(hotseatHome(), 'sessions', provider.id, slug);
 }
 
+/** Whether something is at `path`. Anything but its absence, such as being refused a look, is thrown. */
 async function exists(path: string): Promise<boolean> {
-	return lstat(path).then(
-		() => true,
-		() => false,
-	);
+	return lstat(path).then(() => true, orIfMissing(false));
 }
 
 /**

@@ -108,46 +108,25 @@ export async function renewInstalled(
 					record?.renewedFrom === fingerprint(installed) ||
 					provider.session.compareAge(saved, installed) > 0;
 				if (!replacesInstalled) return installed;
-				// Reading the saved login waits on the registry; a login put in
-				// meanwhile stays.
-				const now = await provider.readAgentCredential();
-				if (!now || fingerprint(now) !== fingerprint(named)) return now;
-				// Recorded before it goes in, so stopping right after installing
-				// it never leaves the agent's renewals of it unsaved.
-				await updateRegistry((registry) => {
-					const entry = registry.accounts.find((account) => account.id === owner.id);
-					if (entry) entry.inUseFrom = fingerprint(saved);
-				});
-				await provider.writeAgentCredential(saved);
-				await settled(owner);
-				return saved;
+				return putInUse(provider, owner, saved, named);
 			}
 			const renewed = await provider.refreshIfNeeded(installed);
 			if (renewed === installed) return installed;
 			// Saved with the login it renewed, in one write, so the installed
-			// login can be named as this account's even after a restart, and
-			// recorded as the one going in use. A sign-in saved to the owner
-			// meanwhile is kept, and is what gets installed in place of the
-			// spent token.
+			// login can be named as this account's even after a restart. A
+			// sign-in saved to the owner meanwhile is kept, and is what gets
+			// installed in place of the spent token.
 			const kept = await updateRegistry((registry): Credential | null => {
 				const record = registry.accounts.find((entry) => entry.id === owner.id);
 				if (!record) return null;
 				record.renewedFrom = fingerprint(installed);
 				if (record.login && !provider.sharesToken(record.login, installed)) {
-					record.inUseFrom = fingerprint(record.login);
 					return structuredClone(record.login);
 				}
 				record.login = structuredClone(renewed);
-				record.inUseFrom = fingerprint(renewed);
 				return null;
 			});
-			const login = kept ?? renewed;
-			// Refreshing waits on the service; a login put in meanwhile stays.
-			const now = await provider.readAgentCredential();
-			if (!now || fingerprint(now) !== fingerprint(named)) return now;
-			await provider.writeAgentCredential(login);
-			await settled(owner);
-			return login;
+			return putInUse(provider, owner, kept ?? renewed, named);
 		} finally {
 			await lock.release();
 		}
@@ -156,10 +135,52 @@ export async function renewInstalled(
 	}
 }
 
-/** Forgets which login an account's saved one replaced, once the saved one is installed. */
-export async function settled(owner: Pick<AccountRecord, 'id'>): Promise<void> {
+/**
+ * Installs `login` as the owner's in place of `named` (null when nothing was
+ * installed), and only while that is still what is installed, read again
+ * after every registry write. The login is recorded as the one going in use
+ * before it is installed, so a stop right after installing it never leaves
+ * the agent's renewals of it unsaved. If installing fails, or something else
+ * went in meanwhile, the record goes back to what it was, or to the login
+ * still installed, so the agent's renewals of that one never replace a login
+ * that did not go in. Returns the login installed afterwards.
+ */
+export async function putInUse(
+	provider: Provider,
+	owner: Pick<AccountRecord, 'id'>,
+	login: Credential,
+	named: Credential | null,
+): Promise<Credential | null> {
+	const print = fingerprint(login);
+	const before = await updateRegistry((registry) => {
+		const record = registry.accounts.find((entry) => entry.id === owner.id);
+		if (!record) return undefined;
+		const previous = record.inUseFrom;
+		record.inUseFrom = print;
+		return previous;
+	});
+	const undo = (): Promise<void> =>
+		updateRegistry((registry) => {
+			const record = registry.accounts.find((entry) => entry.id === owner.id);
+			if (!record || record.inUseFrom !== print) return;
+			const back = before ?? (named ? fingerprint(named) : undefined);
+			if (back === undefined) delete record.inUseFrom;
+			else record.inUseFrom = back;
+		});
+	try {
+		const now = await provider.readAgentCredential();
+		if ((now ? fingerprint(now) : null) !== (named ? fingerprint(named) : null)) {
+			await undo();
+			return now;
+		}
+		await provider.writeAgentCredential(login);
+	} catch (error) {
+		await undo();
+		throw error;
+	}
 	await updateRegistry((registry) => {
 		const record = registry.accounts.find((entry) => entry.id === owner.id);
 		if (record) delete record.renewedFrom;
 	});
+	return login;
 }

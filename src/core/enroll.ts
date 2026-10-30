@@ -10,7 +10,7 @@ import { readJson, writeJsonAtomic } from './fs.ts';
 import { cleanUpEvenIfInterrupted } from './interrupt.ts';
 import { statePath } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
-import { settled } from './renew.ts';
+import { putInUse } from './renew.ts';
 import { holdSwitch } from './switch-lock.ts';
 import type { AccountRecord, Credential, Identity, Provider, ProviderId } from './types.ts';
 import { fingerprint } from './vault.ts';
@@ -39,8 +39,8 @@ export async function enroll(
 
 /**
  * Saves a login under the account it signs in to, adding that account if it
- * is new. A login about to go in use is recorded as such, with the installed
- * login it replaces, in the same write.
+ * is new. A login about to go in use is saved with the installed login it
+ * replaces, so that login can be named as this account's until it is.
  */
 async function saveLogin(
 	providerId: ProviderId,
@@ -55,10 +55,7 @@ async function saveLogin(
 			...(identity.plan ? { plan: identity.plan } : {}),
 		});
 		record.login = structuredClone(credential);
-		if (replacing) {
-			record.inUseFrom = fingerprint(credential);
-			record.renewedFrom = fingerprint(replacing);
-		}
+		if (replacing) record.renewedFrom = fingerprint(replacing);
 		const { login: _login, ...rest } = record;
 		return rest;
 	});
@@ -148,9 +145,10 @@ export async function signInAgain(input: {
 				: undefined;
 		saved = await saveLogin(input.providerId, who, credential, replacing);
 		if (replacing) {
-			await provider.writeAgentCredential(credential);
-			await settled(saved);
-			await provider.recordIdentity?.(who).catch(() => undefined);
+			const now = await putInUse(provider, saved, credential, replacing);
+			if (now && fingerprint(now) === fingerprint(credential)) {
+				await provider.recordIdentity?.(who).catch(() => undefined);
+			}
 		}
 	} finally {
 		await held.release();

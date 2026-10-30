@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
+import { chmod, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ACTIVE_CALM_MS, CANDIDATE_MS, collectState, plainError } from '../src/core/collect.ts';
 import { publishState, saveInstalled, signInAgain } from '../src/core/enroll.ts';
 import { ServiceError } from '../src/core/errors.ts';
-import { usageCachePath } from '../src/core/paths.ts';
+import { acquireLock } from '../src/core/fs.ts';
+import { hotseatHome, usageCachePath } from '../src/core/paths.ts';
 import { loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
 import { renewInstalled, renewSaved } from '../src/core/renew.ts';
 import { prepareSession, sessionDir } from '../src/core/session.ts';
@@ -1114,11 +1116,17 @@ describe('keeping the saved copy of the login in use current', () => {
 });
 
 describe('stopping right after a login goes in', () => {
+	// The install succeeds and hotseat stops at its next step: nothing it
+	// writes after the install lands, as when the process is killed there.
 	function stopAfterNextWrite(provider: FakeProvider): void {
-		provider.afterWrite = () => {
+		provider.afterWrite = async () => {
 			provider.afterWrite = null;
-			throw new Error('hotseat stopped');
+			await chmod(hotseatHome(), 0o500);
 		};
+	}
+
+	function resume(): Promise<void> {
+		return chmod(hotseatHome(), 0o700);
 	}
 
 	function marked(account: AccountRecord, login: ReturnType<typeof cred>): Promise<void> {
@@ -1151,9 +1159,8 @@ describe('stopping right after a login goes in', () => {
 			await marked(b, cred('B-OLD'));
 			claude.rotate = '+';
 			stopAfterNextWrite(claude);
-			await expect(activate('claude', b.id, { providers, now: T })).rejects.toThrow(
-				'hotseat stopped',
-			);
+			await expect(activate('claude', b.id, { providers, now: T })).rejects.toThrow('EACCES');
+			await resume();
 			expect(tokenOf(claude.installed ?? {})).toBe('B+');
 			claude.rotate = '';
 			agentRenews(claude, 'B+', 'B++', 5, 'b@example.com');
@@ -1176,8 +1183,9 @@ describe('stopping right after a login goes in', () => {
 			claude.rotate = '+';
 			stopAfterNextWrite(claude);
 			await expect(renewInstalled(claude, a, cred('A', 0, T - MIN), () => true)).rejects.toThrow(
-				'hotseat stopped',
+				'EACCES',
 			);
+			await resume();
 			expect(tokenOf(claude.installed ?? {})).toBe('A+');
 			claude.rotate = '';
 			agentRenews(claude, 'A+', 'A++', 5, 'a@example.com');
@@ -1195,8 +1203,9 @@ describe('stopping right after a login goes in', () => {
 			await marked(a, cred('A', 0, T - MIN));
 			stopAfterNextWrite(claude);
 			await expect(renewInstalled(claude, a, cred('A', 0, T - MIN), () => true)).rejects.toThrow(
-				'hotseat stopped',
+				'EACCES',
 			);
+			await resume();
 			expect(tokenOf(claude.installed ?? {})).toBe('NEW');
 			agentRenews(claude, 'NEW', 'NEW2', 12, 'a@example.com');
 			await collectState({ providers, now: T, force: true, awake: async () => true });
@@ -1218,8 +1227,9 @@ describe('stopping right after a login goes in', () => {
 			};
 			stopAfterNextWrite(claude);
 			await expect(renewInstalled(claude, a, cred('A', 0, T - MIN), () => true)).rejects.toThrow(
-				'hotseat stopped',
+				'EACCES',
 			);
+			await resume();
 			expect(tokenOf(claude.installed ?? {})).toBe('SIGN-IN');
 			claude.rotate = '';
 			claude.duringRefresh = null;
@@ -1271,11 +1281,111 @@ describe('stopping right after a login goes in', () => {
 					now: T,
 					login: async () => cred('A-NEW'),
 				}),
-			).rejects.toThrow('hotseat stopped');
+			).rejects.toThrow('EACCES');
+			await resume();
 			expect(tokenOf(claude.installed ?? {})).toBe('A-NEW');
 			agentRenews(claude, 'A-NEW', 'A-NEW2', 5, 'a@example.com');
 			await collectState({ providers, now: T, force: true, awake: async () => true });
 			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-NEW2');
+		});
+	});
+});
+
+describe('putting a login in use when something goes wrong', () => {
+	test('a sign-in that could not be put in is not replaced by the old login the agent goes on renewing', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.identities.set('SIGN-IN', { email: 'a@example.com' });
+			claude.writeFailure = new Error('security: the keychain is locked');
+			await expect(
+				signInAgain({
+					providerId: 'claude',
+					account: a,
+					providers,
+					now: T,
+					login: async () => cred('SIGN-IN'),
+				}),
+			).rejects.toThrow('the keychain is locked');
+			claude.writeFailure = null;
+			expect(tokenOf(claude.installed ?? {})).toBe('A');
+			claude.installed = cred('A2', 5);
+			claude.identities.set('A2', { email: 'a@example.com' });
+			claude.readings.set('A2', () => reading(10));
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('SIGN-IN');
+		});
+	});
+
+	test('a login put in from outside while signing in again waits on the registry is not replaced', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.identities.set('A-NEW', { email: 'a@example.com' });
+			claude.identities.set('OUTSIDE', { email: 'b@example.com' });
+			const registry = await acquireLock(hotseatHome());
+			const signing = signInAgain({
+				providerId: 'claude',
+				account: a,
+				providers,
+				now: T,
+				login: async () => cred('A-NEW'),
+			});
+			await Bun.sleep(50);
+			claude.installed = cred('OUTSIDE');
+			await registry.release();
+			await signing;
+			expect(tokenOf(claude.installed ?? {})).toBe('OUTSIDE');
+		});
+	});
+
+	test('a login put in from outside while recovery waits on the registry is not replaced', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('NEW', 9));
+			const registry = await acquireLock(hotseatHome());
+			const recovering = renewInstalled(claude, a, cred('A', 0, T - MIN), () => true);
+			await Bun.sleep(50);
+			claude.installed = cred('OUTSIDE');
+			await registry.release();
+			await recovering;
+			expect(tokenOf(claude.installed ?? {})).toBe('OUTSIDE');
+		});
+	});
+
+	test('a login put in from outside after a switch last checked is not replaced', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const claude = providers.claude;
+			claude.identities.set('OUTSIDE', { email: 'outside@example.com' });
+			let reads = 0;
+			claude.afterRead = () => {
+				reads += 1;
+				if (reads === 3) claude.installed = cred('OUTSIDE');
+			};
+			await expect(activate('claude', b.id, { providers, now: T })).rejects.toThrow(
+				'the login in use changed while switching',
+			);
+			expect(tokenOf(claude.installed ?? {})).toBe('OUTSIDE');
+		});
+	});
+
+	test('a session folder that cannot be looked at is not taken for no session', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const claude = providers.claude;
+			claude.rotate = '+';
+			const parent = join(hotseatHome(), 'sessions', 'claude');
+			await mkdir(sessionDir(claude, b), { recursive: true });
+			await chmod(parent, 0o000);
+			try {
+				await expect(renewSaved(claude, b)).rejects.toThrow('EACCES');
+				expect(claude.refreshesOf.get('B') ?? 0).toBe(0);
+			} finally {
+				await chmod(parent, 0o700);
+			}
 		});
 	});
 });
@@ -1335,6 +1445,9 @@ describe('renewing one login from two places at once', () => {
 			expect(claude.refreshesOf.get('B')).toBe(1);
 			expect(tokenOf(claude.installed ?? {})).toBe('B+');
 			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('B+');
+			const record = (await loadRegistry()).accounts.find((entry) => entry.id === b.id);
+			expect(record?.renewedFrom).toBeUndefined();
+			expect(record?.inUseFrom).toBe(fingerprint(cred('B+', 1)));
 			expect(
 				results.flatMap((result) => (result.status === 'rejected' ? [String(result.reason)] : [])),
 			).not.toContainEqual(expect.stringContaining('invalid_grant'));

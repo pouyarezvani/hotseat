@@ -1,7 +1,7 @@
 import { liveIdentity, PROVIDERS } from './collect.ts';
 import { MIN_USABLE_HEADROOM, headroom as policyHeadroom, rankCandidates } from './policy.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
-import { renewSaved } from './renew.ts';
+import { putInUse, renewSaved } from './renew.ts';
 import { adoptIfNewer, freshestLogin, sessionRunning } from './session.ts';
 import type { AccountRecord, AccountState, Provider, ProviderId, ProviderState } from './types.ts';
 import { fingerprint, storeCredential } from './vault.ts';
@@ -185,13 +185,12 @@ export async function activate(
 	// newer sign-in already saved for that account.
 	if (live && previous && !savedLogin) await adoptIfNewer(provider, previous, live);
 
-	// Recorded before it goes in, so stopping right after installing it never
-	// leaves the agent's renewals of it unsaved.
-	await updateRegistry((current) => {
-		const record = current.accounts.find((account) => account.id === target.id);
-		if (record) record.inUseFrom = fingerprint(refreshed);
-	});
-	await provider.writeAgentCredential(refreshed);
+	const installed = await putInUse(provider, target, refreshed, live);
+	if (!installed || fingerprint(installed) !== fingerprint(refreshed)) {
+		throw new Error(
+			'the login in use changed while switching - not switching, so nothing is lost; try again',
+		);
+	}
 	if (provider.recordIdentity) {
 		const who = await provider.identify(refreshed).catch(() => ({ email: target.email }));
 		await provider.recordIdentity(who).catch(() => undefined);

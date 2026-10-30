@@ -432,8 +432,7 @@ export function rankCandidates(input: RankInput): AccountState[] {
 	const models = settings.modelLimits;
 	const active = accounts.find((account) => account.id === activeId);
 	const activeHeadroom = active ? headroom(active, models) : undefined;
-	// A login the service refused needs a person, not a switch, and its last
-	// reading says nothing about whether the others are out of room.
+	// Accounts whose login the service refused are left out of the pool.
 	const pool = accounts.filter(
 		(account) =>
 			!account.disabled && account.id !== activeId && account.usage?.errorKind !== 'auth',

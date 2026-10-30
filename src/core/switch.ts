@@ -170,9 +170,7 @@ export async function activate(
 	const refreshed = await renewSaved(provider, target);
 	if (!refreshed) throw new Error(`no saved login for ${target.email} - it was removed`);
 
-	// The agent may have renewed its login while the target was renewed. The
-	// copy read at the start would then be stale, and overwriting the newer one
-	// would lose the only working token, so the switch stops instead.
+	// The switch stops if the login in use changed since it was first read.
 	const liveNow = await provider.readAgentCredential();
 	if ((live ? fingerprint(live) : null) !== (liveNow ? fingerprint(liveNow) : null)) {
 		throw new Error(

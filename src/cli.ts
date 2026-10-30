@@ -125,8 +125,6 @@ async function seat(
 			return 0;
 		}
 		const now = Date.now();
-		// Remembered before the history line, so a history write that fails
-		// cannot leave an automatic pass free to switch straight back.
 		memory = await rememberManualSwitch({
 			provider: providerId,
 			state: before.providers[providerId],
@@ -604,10 +602,8 @@ export async function main(argv: readonly string[]): Promise<number> {
 					`running as ${account.email} in this terminal only - every other terminal stays on ${shared?.email ?? 'the shared login'}`,
 				);
 				// This process is recorded before the agent starts, and nothing starts
-				// if it cannot be: a session with no record would look idle, and its
-				// login could be renewed or removed under it.
-				// The agent is recorded too once it starts, so it is still known to be
-				// running if this process is killed first.
+				// if it cannot be.
+				// The agent is recorded too, once it starts.
 				await markRunning(session.dir, process.pid);
 				let child: ReturnType<typeof Bun.spawn> | undefined;
 				let code: number;

@@ -8,7 +8,7 @@ import { acquireLock } from '../src/core/fs.ts';
 import { hotseatHome, usageCachePath } from '../src/core/paths.ts';
 import { loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
 import { renewInstalled, renewSaved } from '../src/core/renew.ts';
-import { prepareSession, sessionDir } from '../src/core/session.ts';
+import { adoptIfNewer, prepareSession, sessionDir } from '../src/core/session.ts';
 import { activate } from '../src/core/switch.ts';
 import { holdSwitch } from '../src/core/switch-lock.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
@@ -1423,6 +1423,27 @@ describe('putting a login in use when something goes wrong', () => {
 			claude.readings.set('A2', () => reading(10));
 			await collectState({ providers, now: T, force: true, awake: async () => true });
 			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW');
+		});
+	});
+
+	test('a pass holding a login read before a replacement went in does not undo the record of it', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('NEW', 9);
+			await storeCredential(a, cred('NEW', 9));
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((entry) => entry.id === a.id);
+				if (!record) return;
+				record.inUseFrom = fingerprint(cred('NEW', 9));
+				record.renewedFrom = fingerprint(cred('A'));
+			});
+			await adoptIfNewer(claude, a, cred('A'));
+			claude.installed = cred('NEW2', 12);
+			claude.identities.set('NEW2', { email: 'a@example.com' });
+			claude.readings.set('NEW2', () => reading(10));
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW2');
 		});
 	});
 

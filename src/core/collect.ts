@@ -166,8 +166,7 @@ export async function liveIdentity(
 	}
 	// No answer from the service: the installed login is still known when it is
 	// exactly one of the saved copies, which hotseat keeps current below.
-	// The match is remembered, because renewing that account replaces the saved
-	// copy it was matched by.
+	// The match is remembered in the identity cache.
 	for (const account of accountsFor(registry, provider.id)) {
 		const saved = await loadCredential(account).catch(() => null);
 		if ((saved && fingerprint(saved) === print) || account.renewedFrom === print) {
@@ -390,8 +389,7 @@ export async function collectState(
 				} else if (!(await awake())) {
 					liveAwaitsRenewal = WAITING_FOR_WAKE;
 				} else {
-					// Renewed only once it is known whose login this is, so the
-					// renewal can be saved to that account before it goes in.
+					// Renewed only once it is known whose login this is.
 					const who = await liveIdentity(provider, installed, registry, cache);
 					const owner = who
 						? records.find((record) => record.email.toLowerCase() === who.email.toLowerCase())

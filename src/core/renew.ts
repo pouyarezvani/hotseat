@@ -43,8 +43,7 @@ export async function renewSaved(
 	try {
 		const stored = await loadCredential(account);
 		if (!stored) return null;
-		// A login in use that cannot be read may hold this same token, so
-		// nothing is renewed until it can be.
+		// Nothing is renewed while the login in use cannot be read.
 		const installed = await provider.readAgentCredential().catch(() => undefined);
 		if (installed === undefined) return stored;
 		if (installed && provider.sharesToken(installed, stored)) {
@@ -112,10 +111,10 @@ export async function renewInstalled(
 			}
 			const renewed = await provider.refreshIfNeeded(installed);
 			if (renewed === installed) return installed;
-			// Saved with the login it renewed, in one write, so the installed
-			// login can be named as this account's even after a restart. A
-			// sign-in saved to the owner meanwhile is kept, and is what gets
-			// installed in place of the spent token.
+			// Saved in one write with the login it renewed, which names the
+			// installed login as this account's until the renewal is in. A
+			// sign-in saved to the owner meanwhile is kept, and installed in place
+			// of the spent token.
 			const kept = await updateRegistry((registry): Credential | null => {
 				const record = registry.accounts.find((entry) => entry.id === owner.id);
 				if (!record) return null;
@@ -138,14 +137,11 @@ export async function renewInstalled(
 /**
  * Installs `login` as the owner's in place of `named` (null when nothing was
  * installed), and only while that is still what is installed, read again
- * after every registry write. The login is recorded as the one going in use
- * before it is installed, so a stop right after installing it never leaves
- * the agent's renewals of it unsaved. If installing fails, or something else
- * went in meanwhile, the record goes back to what it was, or to the login
- * still installed, so the agent's renewals of that one never replace a login
- * that did not go in. When `named` is the owner's own login, it is recorded as
- * the one being replaced, so a pass after a stop before the install can tell
- * the install never landed. Returns the login installed afterwards.
+ * after every registry write. The login is recorded as the one in use before
+ * it is installed; if installing fails, or something else went in meanwhile,
+ * the record goes back to what it was, or to the login still installed. When
+ * `named` is the owner's own login, it is recorded as the one being replaced.
+ * Returns the login installed afterwards.
  */
 export async function putInUse(
 	provider: Provider,

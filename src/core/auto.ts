@@ -201,8 +201,7 @@ export async function tick(
 				detail: 'the Mac is asleep - waiting until it wakes',
 			}));
 	}
-	// Read before the accounts are, so a switch made at any point after this,
-	// even while they are being read, is seen when this pass comes to act.
+	// Read before the accounts are, and compared again before this pass acts.
 	const auto = await loadAutoState();
 	const providers = options.providers ?? PROVIDERS;
 	const inUseBefore = new Map<ProviderId, string | null>();
@@ -238,8 +237,8 @@ export async function tick(
 			});
 			continue;
 		}
-		// Decided on the board as it was; once this pass may act, it checks no
-		// other switch landed in between, which it would otherwise undo.
+		// Acts only if no switch was remembered, and no other login went in,
+		// since this pass began.
 		const held = await holdSwitch(providerId);
 		try {
 			const latest = (await loadAutoState()).memory[providerId] ?? {};
@@ -252,8 +251,6 @@ export async function tick(
 				});
 				continue;
 			}
-			// A switch whose bookkeeping failed changed the login but not the
-			// memory; so does anything else that put a login in meanwhile.
 			const installed = await providers[providerId].readAgentCredential().catch(() => undefined);
 			const inUseNow =
 				installed === undefined ? undefined : installed ? fingerprint(installed) : null;
@@ -293,9 +290,7 @@ export async function tick(
 			const leftRecovery = active
 				? bindingRecoveryAt(active, policy.modelLimits, now)
 				: Number.POSITIVE_INFINITY;
-			// Memory is written before the history line, and to disk right away:
-			// once the login has changed, a crash must not leave the next pass
-			// free to change it straight back.
+			// The switch is remembered on disk before its history line is written.
 			await rememberFor(providerId, {
 				lastSwitchAt: now,
 				lastSwitchTo: chosen.id,

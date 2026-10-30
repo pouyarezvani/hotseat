@@ -118,22 +118,18 @@ export async function signInAgain(input: {
 		const saved = await enroll(input.providerId, credential, undefined, options);
 		return { signedInAs: saved.email, matched: saved.id === input.account.id, slot: saved.slot };
 	}
-	// Signing in again to the account in use is how a failed login gets fixed,
-	// so the new login is put in use too; the agent would otherwise go on with
-	// the one that failed. It is saved first, with the login it replaces, so
-	// stopping anywhere loses neither the sign-in nor the agent's renewals.
+	// A sign-in to the account in use is put in use too, after it is saved
+	// with the login it replaces.
 	let saved: AccountRecord;
 	const held = await holdSwitch(input.providerId);
 	try {
 		// Whose login is installed is read from the login itself, not from
-		// which account hotseat last put in use: one put in outside hotseat
-		// would otherwise be overwritten unsaved.
+		// which account hotseat last put in use.
 		const installed = await provider.readAgentCredential().catch(() => null);
 		const owner = installed
 			? await liveIdentity(provider, installed, await loadRegistry(), await loadCache())
 			: undefined;
-		// Naming it may have taken a request; it is replaced only if it is
-		// still the same login once that answer is in.
+		// It is replaced only if it is still the same login after naming it.
 		const still = await provider.readAgentCredential().catch(() => null);
 		const replacing =
 			installed !== null &&

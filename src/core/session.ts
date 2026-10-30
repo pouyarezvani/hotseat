@@ -75,11 +75,11 @@ export async function adoptWhileHeld(
 		const record = registry.accounts.find((entry) => entry.id === account.id);
 		if (!record) return false;
 		if (record.renewedFrom === print) {
-			// The login the saved one was put in to replace is still installed,
-			// so the saved one never went in, whatever was recorded before a
-			// stop: the login in use is this one.
+			// While the login the saved one replaces is still installed, the
+			// saved one never went in, and the login in use is recorded as this.
 			if (record.login && record.inUseFrom === fingerprint(record.login)) {
-				record.inUseFrom = print;
+				const installed = await provider.readAgentCredential().catch(() => null);
+				if (installed && fingerprint(installed) === print) record.inUseFrom = print;
 			}
 			return false;
 		}

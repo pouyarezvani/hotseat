@@ -10,9 +10,10 @@ import { readJson, writeJsonAtomic } from './fs.ts';
 import { cleanUpEvenIfInterrupted } from './interrupt.ts';
 import { statePath } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
+import { settled } from './renew.ts';
 import { holdSwitch } from './switch-lock.ts';
-import type { AccountRecord, Credential, Provider, ProviderId } from './types.ts';
-import { fingerprint, storeCredential } from './vault.ts';
+import type { AccountRecord, Credential, Identity, Provider, ProviderId } from './types.ts';
+import { fingerprint } from './vault.ts';
 
 /** Saves a credential under the account it belongs to, creating it if new. */
 export async function enroll(
@@ -27,20 +28,40 @@ export async function enroll(
 	if (!email) {
 		throw new Error('could not tell which account this login belongs to');
 	}
-	const account = await updateRegistry((registry) =>
-		upsertAccount(registry, {
-			provider: providerId,
-			email,
-			...(identity?.plan ? { plan: identity.plan } : {}),
-		}),
-	);
-	await storeCredential(account, credential);
+	const account = await saveLogin(providerId, identity ?? { email }, credential);
 	// Whatever was read, or failed, with the old login no longer applies.
 	await forgetReading(account.id);
 	// Publish the new picture immediately so the menu bar reflects the account
 	// as soon as it exists, rather than at its next scheduled read.
 	await publishState({ force: true, ...options });
 	return account;
+}
+
+/**
+ * Saves a login under the account it signs in to, adding that account if it
+ * is new. A login about to go in use is recorded as such, with the installed
+ * login it replaces, in the same write.
+ */
+async function saveLogin(
+	providerId: ProviderId,
+	identity: Identity,
+	credential: Credential,
+	replacing?: Credential,
+): Promise<AccountRecord> {
+	return updateRegistry((registry) => {
+		const record = upsertAccount(registry, {
+			provider: providerId,
+			email: identity.email,
+			...(identity.plan ? { plan: identity.plan } : {}),
+		});
+		record.login = structuredClone(credential);
+		if (replacing) {
+			record.inUseFrom = fingerprint(credential);
+			record.renewedFrom = fingerprint(replacing);
+		}
+		const { login: _login, ...rest } = record;
+		return rest;
+	});
 }
 
 /**
@@ -90,49 +111,52 @@ export async function signInAgain(input: {
 			? (email: string) => loginClaudeIsolated(email)
 			: () => loginCodexIsolated());
 	const credential = await login(input.account.email);
-	// Signing in again to the account in use is how a failed login gets fixed,
-	// so the new login is put in use too; the agent would otherwise go on with
-	// the one that failed. It goes in before it is saved, so the saved copy
-	// and the installed one are the same the moment the board is published.
-	const provider = (input.providers ?? PROVIDERS)[input.providerId];
-	const who = await provider.identify(credential).catch(() => null);
-	let putInUse = false;
-	if (who) {
-		const held = await holdSwitch(input.providerId);
-		try {
-			// Whose login is installed is read from the login itself, not from
-			// which account hotseat last put in use: one put in outside hotseat
-			// would otherwise be overwritten unsaved.
-			const installed = await provider.readAgentCredential().catch(() => null);
-			const owner = installed
-				? await liveIdentity(provider, installed, await loadRegistry(), await loadCache())
-				: undefined;
-			// Naming it may have taken a request; it is replaced only if it is
-			// still the same login once that answer is in.
-			const still = await provider.readAgentCredential().catch(() => null);
-			const unchanged =
-				installed !== null && still !== null && fingerprint(still) === fingerprint(installed);
-			if (owner && unchanged && who.email.toLowerCase() === owner.email.toLowerCase()) {
-				await provider.writeAgentCredential(credential);
-				putInUse = true;
-				await provider.recordIdentity?.(who).catch(() => undefined);
-			}
-		} finally {
-			await held.release();
-		}
-	}
-	const saved = await enroll(input.providerId, credential, undefined, {
+	const options = {
 		...(input.providers ? { providers: input.providers } : {}),
 		...(input.now !== undefined ? { now: input.now } : {}),
-	});
-	if (putInUse) {
-		await updateRegistry((registry) => {
-			const record = registry.accounts.find((entry) => entry.id === saved.id);
-			if (record?.login && fingerprint(record.login) === fingerprint(credential)) {
-				record.inUseFrom = fingerprint(credential);
-			}
-		});
+	};
+	const provider = (input.providers ?? PROVIDERS)[input.providerId];
+	const who = await provider.identify(credential).catch(() => null);
+	if (!who) {
+		const saved = await enroll(input.providerId, credential, undefined, options);
+		return { signedInAs: saved.email, matched: saved.id === input.account.id, slot: saved.slot };
 	}
+	// Signing in again to the account in use is how a failed login gets fixed,
+	// so the new login is put in use too; the agent would otherwise go on with
+	// the one that failed. It is saved first, with the login it replaces, so
+	// stopping anywhere loses neither the sign-in nor the agent's renewals.
+	let saved: AccountRecord;
+	const held = await holdSwitch(input.providerId);
+	try {
+		// Whose login is installed is read from the login itself, not from
+		// which account hotseat last put in use: one put in outside hotseat
+		// would otherwise be overwritten unsaved.
+		const installed = await provider.readAgentCredential().catch(() => null);
+		const owner = installed
+			? await liveIdentity(provider, installed, await loadRegistry(), await loadCache())
+			: undefined;
+		// Naming it may have taken a request; it is replaced only if it is
+		// still the same login once that answer is in.
+		const still = await provider.readAgentCredential().catch(() => null);
+		const replacing =
+			installed !== null &&
+			still !== null &&
+			fingerprint(still) === fingerprint(installed) &&
+			owner !== undefined &&
+			who.email.toLowerCase() === owner.email.toLowerCase()
+				? installed
+				: undefined;
+		saved = await saveLogin(input.providerId, who, credential, replacing);
+		if (replacing) {
+			await provider.writeAgentCredential(credential);
+			await settled(saved);
+			await provider.recordIdentity?.(who).catch(() => undefined);
+		}
+	} finally {
+		await held.release();
+	}
+	await forgetReading(saved.id);
+	await publishState({ force: true, ...options });
 	return {
 		signedInAs: saved.email,
 		matched: saved.id === input.account.id,

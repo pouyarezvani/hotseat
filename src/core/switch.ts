@@ -185,6 +185,12 @@ export async function activate(
 	// newer sign-in already saved for that account.
 	if (live && previous && !savedLogin) await adoptIfNewer(provider, previous, live);
 
+	// Recorded before it goes in, so stopping right after installing it never
+	// leaves the agent's renewals of it unsaved.
+	await updateRegistry((current) => {
+		const record = current.accounts.find((account) => account.id === target.id);
+		if (record) record.inUseFrom = fingerprint(refreshed);
+	});
 	await provider.writeAgentCredential(refreshed);
 	if (provider.recordIdentity) {
 		const who = await provider.identify(refreshed).catch(() => ({ email: target.email }));
@@ -194,10 +200,7 @@ export async function activate(
 	await updateRegistry((current) => {
 		current.active[providerId] = target.id;
 		const record = current.accounts.find((account) => account.id === target.id);
-		if (record) {
-			record.lastActivatedAt = new Date(now).toISOString();
-			record.inUseFrom = fingerprint(refreshed);
-		}
+		if (record) record.lastActivatedAt = new Date(now).toISOString();
 	});
 
 	return {

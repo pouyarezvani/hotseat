@@ -1113,6 +1113,173 @@ describe('keeping the saved copy of the login in use current', () => {
 	});
 });
 
+describe('stopping right after a login goes in', () => {
+	function stopAfterNextWrite(provider: FakeProvider): void {
+		provider.afterWrite = () => {
+			provider.afterWrite = null;
+			throw new Error('hotseat stopped');
+		};
+	}
+
+	function marked(account: AccountRecord, login: ReturnType<typeof cred>): Promise<void> {
+		return updateRegistry((registry) => {
+			const record = registry.accounts.find((entry) => entry.id === account.id);
+			if (record) record.inUseFrom = fingerprint(login);
+		});
+	}
+
+	function agentRenews(
+		provider: FakeProvider,
+		from: string,
+		to: string,
+		issued: number,
+		email: string,
+	): void {
+		provider.installed = cred(to, issued);
+		provider.refreshFailures.set(
+			from,
+			new ServiceError('token refresh failed with 400: invalid_grant', 400),
+		);
+		provider.identities.set(to, { email });
+		provider.readings.set(to, () => reading(10));
+	}
+
+	test("a switch that stopped once the login was in still keeps the agent's renewals, and switching back works", async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			const claude = providers.claude;
+			await marked(b, cred('B-OLD'));
+			claude.rotate = '+';
+			stopAfterNextWrite(claude);
+			await expect(activate('claude', b.id, { providers, now: T })).rejects.toThrow(
+				'hotseat stopped',
+			);
+			expect(tokenOf(claude.installed ?? {})).toBe('B+');
+			claude.rotate = '';
+			agentRenews(claude, 'B+', 'B++', 5, 'b@example.com');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(b)) ?? {})).toBe('B++');
+			claude.rotate = '+';
+			await activate('claude', a.id, { providers, now: T });
+			await activate('claude', b.id, { providers, now: T });
+			expect(tokenOf(claude.installed ?? {})).toBe('B+++');
+		});
+	});
+
+	test("renewing the login in use, stopped once the renewal was in, still keeps the agent's renewals", async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			await marked(a, cred('A', 0, T - MIN));
+			claude.rotate = '+';
+			stopAfterNextWrite(claude);
+			await expect(renewInstalled(claude, a, cred('A', 0, T - MIN), () => true)).rejects.toThrow(
+				'hotseat stopped',
+			);
+			expect(tokenOf(claude.installed ?? {})).toBe('A+');
+			claude.rotate = '';
+			agentRenews(claude, 'A+', 'A++', 5, 'a@example.com');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A++');
+		});
+	});
+
+	test("recovering the login in use, stopped once the saved login was in, still keeps the agent's renewals", async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('NEW', 9));
+			await marked(a, cred('A', 0, T - MIN));
+			stopAfterNextWrite(claude);
+			await expect(renewInstalled(claude, a, cred('A', 0, T - MIN), () => true)).rejects.toThrow(
+				'hotseat stopped',
+			);
+			expect(tokenOf(claude.installed ?? {})).toBe('NEW');
+			agentRenews(claude, 'NEW', 'NEW2', 12, 'a@example.com');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW2');
+		});
+	});
+
+	test("renewing the login in use, stopped once a sign-in kept over the renewal was in, still keeps the agent's renewals", async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			await marked(a, cred('A', 0, T - MIN));
+			claude.identities.set('SIGN-IN', { email: 'a@example.com' });
+			claude.rotate = '+';
+			claude.duringRefresh = async (login) => {
+				if (tokenOf(login) === 'A') await storeCredential(a, cred('SIGN-IN'));
+			};
+			stopAfterNextWrite(claude);
+			await expect(renewInstalled(claude, a, cred('A', 0, T - MIN), () => true)).rejects.toThrow(
+				'hotseat stopped',
+			);
+			expect(tokenOf(claude.installed ?? {})).toBe('SIGN-IN');
+			claude.rotate = '';
+			claude.duringRefresh = null;
+			agentRenews(claude, 'SIGN-IN', 'SIGN-IN2', 5, 'a@example.com');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('SIGN-IN2');
+		});
+	});
+
+	test('a sign-in that could not be put in goes in once the login it replaces expires', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('A', 0, T - MIN));
+			claude.identities.set('A-NEW', { email: 'a@example.com' });
+			claude.readings.set('A-NEW', () => reading(10));
+			claude.writeFailure = new Error('security: the keychain is locked');
+			await expect(
+				signInAgain({
+					providerId: 'claude',
+					account: a,
+					providers,
+					now: T,
+					login: async () => cred('A-NEW'),
+				}),
+			).rejects.toThrow('the keychain is locked');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-NEW');
+			claude.writeFailure = null;
+			claude.identities.delete('A');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf(claude.installed ?? {})).toBe('A-NEW');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-NEW');
+		});
+	});
+
+	test("signing in again, stopped once the sign-in was in, still keeps the agent's renewals", async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			await marked(a, cred('OTHER'));
+			claude.identities.set('A-NEW', { email: 'a@example.com' });
+			stopAfterNextWrite(claude);
+			await expect(
+				signInAgain({
+					providerId: 'claude',
+					account: a,
+					providers,
+					now: T,
+					login: async () => cred('A-NEW'),
+				}),
+			).rejects.toThrow('hotseat stopped');
+			expect(tokenOf(claude.installed ?? {})).toBe('A-NEW');
+			agentRenews(claude, 'A-NEW', 'A-NEW2', 5, 'a@example.com');
+			await collectState({ providers, now: T, force: true, awake: async () => true });
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-NEW2');
+		});
+	});
+});
+
 describe('renewing a saved login while it is signed in to again', () => {
 	test('the sign-in saved while the renewal waits on the service is kept', async () => {
 		await withHome(async () => {

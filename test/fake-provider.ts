@@ -73,6 +73,8 @@ export class FakeProvider implements Provider {
 	writeFailure: Error | null = null;
 	/** Runs while the service works on a refresh, so a test can change things meanwhile. */
 	duringRefresh: ((credential: Credential) => Promise<void>) | null = null;
+	/** Runs just after a login is installed, so a test can stop the writer right there. */
+	afterWrite: (() => void | Promise<void>) | null = null;
 	/** Runs just after the installed login is read, so a test can change it behind the reader. */
 	afterRead: (() => void | Promise<void>) | null = null;
 	session: SessionSupport;
@@ -133,6 +135,7 @@ export class FakeProvider implements Provider {
 		if (this.writeFailure) throw this.writeFailure;
 		this.calls.write += 1;
 		this.installed = structuredClone(credential);
+		await this.afterWrite?.();
 	}
 
 	async identify(credential: Credential): Promise<Identity> {

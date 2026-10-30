@@ -7,9 +7,10 @@ const SWITCH_WAIT_MS = 120_000;
 
 /**
  * Holds the right to change which login a service has in use. Every switch,
- * by hand or automatic, signing in again, removing an account and renewing the
- * installed login hold it, so none acts on what another is halfway through
- * changing. It is taken before the renewal lock, never after.
+ * by hand or automatic, signing in again, removing an account, renewing the
+ * installed login and updating a saved login from the one in use hold it, so
+ * none acts on what another is halfway through changing. It is taken before
+ * the renewal lock, never after.
  */
 export function holdSwitch(provider: ProviderId): Promise<Lock> {
 	return acquireLock(hotseatHome(), SWITCH_WAIT_MS, `switch-${provider}.lock`);

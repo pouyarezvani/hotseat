@@ -34,7 +34,8 @@ export async function exportAccounts(path: string): Promise<number> {
  * Brings in the accounts an export holds, all of them or none: every entry is
  * checked before anything is written, and everything is written at once. A
  * new account is given an id of its own here, so an id already in use cannot
- * point two accounts at one login. An account already here keeps its login
+ * point two accounts at one login, and keeps the record of which login went
+ * in use and which one it replaced. An account already here keeps its login
  * when that login is newer than the one in the file.
  */
 export async function importAccounts(path: string): Promise<number> {
@@ -85,6 +86,8 @@ export async function importAccounts(path: string): Promise<number> {
 					: {}),
 				...(typeof record.plan === 'string' && record.plan.length > 0 ? { plan: record.plan } : {}),
 				...(saved ? { login: structuredClone(saved) } : {}),
+				...(typeof record.inUseFrom === 'string' ? { inUseFrom: record.inUseFrom } : {}),
+				...(typeof record.renewedFrom === 'string' ? { renewedFrom: record.renewedFrom } : {}),
 			});
 		}
 		return entries.length;

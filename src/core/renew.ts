@@ -107,7 +107,7 @@ export async function renewInstalled(
 					record?.renewedFrom === fingerprint(installed) ||
 					provider.session.compareAge(saved, installed) > 0;
 				if (!replacesInstalled) return installed;
-				return putInUse(provider, owner, saved, named, true);
+				return await putInUse(provider, owner, saved, named, true);
 			}
 			const renewed = await provider.refreshIfNeeded(installed);
 			if (renewed === installed) return installed;
@@ -125,7 +125,7 @@ export async function renewInstalled(
 				record.login = structuredClone(renewed);
 				return null;
 			});
-			return putInUse(provider, owner, kept ?? renewed, named, true);
+			return await putInUse(provider, owner, kept ?? renewed, named, true);
 		} finally {
 			await lock.release();
 		}

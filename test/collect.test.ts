@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { chmod, mkdir } from 'node:fs/promises';
+import { chmod, mkdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ACTIVE_CALM_MS, CANDIDATE_MS, collectState, plainError } from '../src/core/collect.ts';
 import { publishState, saveInstalled, signInAgain } from '../src/core/enroll.ts';
@@ -11,6 +12,7 @@ import { renewInstalled, renewSaved } from '../src/core/renew.ts';
 import { adoptIfNewer, prepareSession, sessionDir } from '../src/core/session.ts';
 import { activate } from '../src/core/switch.ts';
 import { holdSwitch } from '../src/core/switch-lock.ts';
+import { exportAccounts, importAccounts } from '../src/core/transfer.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
 import { fingerprint, loadCredential, storeCredential } from '../src/core/vault.ts';
 import { cred, type FakeProvider, fakeProviders, tokenOf } from './fake-provider.ts';
@@ -1445,6 +1447,53 @@ describe('putting a login in use when something goes wrong', () => {
 			await collectState({ providers, now: T, force: true, awake: async () => true });
 			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('NEW2');
 		});
+	});
+
+	test('the switch lock is held until a recovered or renewed login is in', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			const claude = providers.claude;
+			const lockFree: boolean[] = [];
+			claude.afterWrite = async () => {
+				const probe = await acquireLock(hotseatHome(), 20, 'switch-claude.lock').catch(() => null);
+				lockFree.push(probe !== null);
+				await probe?.release();
+			};
+			claude.installed = cred('A', 0, T - MIN);
+			await storeCredential(a, cred('NEW', 9));
+			await renewInstalled(claude, a, cred('A', 0, T - MIN), () => true);
+			claude.installed = cred('NEW', 9, T - MIN);
+			await storeCredential(a, cred('NEW', 9, T - MIN));
+			claude.rotate = '+';
+			await renewInstalled(claude, a, cred('NEW', 9, T - MIN), () => true);
+			expect(tokenOf(claude.installed ?? {})).toBe('NEW+');
+			expect(lockFree).toEqual([false, false]);
+		});
+	});
+
+	test('accounts brought in from an export keep a sign-in from being replaced by the login in use', async () => {
+		const file = join(tmpdir(), `hotseat-export-${process.pid}-${Date.now()}.json`);
+		try {
+			const providers = await withHome(async () => {
+				const { providers, b } = await world();
+				await activate('claude', b.id, { providers, now: T });
+				await storeCredential(b, cred('SIGN-IN'));
+				await exportAccounts(file);
+				return providers;
+			});
+			await withHome(async () => {
+				const claude = providers.claude;
+				await importAccounts(file);
+				claude.installed = cred('B2', 5);
+				claude.identities.set('B2', { email: 'b@example.com' });
+				claude.readings.set('B2', () => reading(10));
+				await collectState({ providers, now: T, force: true, awake: async () => true });
+				const b = (await loadRegistry()).accounts.find((entry) => entry.email === 'b@example.com');
+				expect(tokenOf(b?.login ?? {})).toBe('SIGN-IN');
+			});
+		} finally {
+			await rm(file, { force: true });
+		}
 	});
 
 	test('a session folder that cannot be looked at is not taken for no session', async () => {

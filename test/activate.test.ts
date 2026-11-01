@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import { forgivenNames, rememberManualSwitch, tick } from '../src/core/auto.ts';
 import { collectState } from '../src/core/collect.ts';
 import { ServiceError } from '../src/core/errors.ts';
@@ -171,6 +172,201 @@ describe('switching automatically', () => {
 				leftAtPercent: 95,
 			});
 			expect(b.id).toBeDefined();
+		});
+	});
+
+	test('moves on when the week of the account in use resets and another account resets sooner', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.readings.set('A', () => reading(3, 164));
+			providers.claude.readings.set('B', () => reading(48, 51));
+			const reports = await tick({ providers, now: T });
+			expect(reports[0]).toMatchObject({
+				provider: 'claude',
+				outcome: 'switched',
+				trigger: 'expiring',
+				to: 'b@example.com',
+				detail: 'switched to b@example.com, whose week resets sooner',
+			});
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('B');
+			expect((await loadRegistry()).active.claude).toBe(b.id);
+			const again = await tick({ providers, now: T + 3_600_000 });
+			expect(again[0]?.outcome).toBe('holding');
+		});
+	});
+
+	test('an account left for one whose week resets sooner can be gone back to once that one fills', async () => {
+		await withHome(async () => {
+			const { providers } = await world();
+			providers.claude.readings.set('A', () => reading(85, 100));
+			providers.claude.readings.set('B', () => reading(80, 20));
+			const first = await tick({ providers, now: T });
+			expect(first[0]).toMatchObject({
+				outcome: 'switched',
+				trigger: 'expiring',
+				to: 'b@example.com',
+			});
+			providers.claude.readings.set('B', () => reading(92, 20));
+			const second = await tick({ providers, now: T + 600_000 });
+			expect(second[0]).toMatchObject({
+				outcome: 'switched',
+				trigger: 'proactive',
+				to: 'a@example.com',
+			});
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+
+	test('an account chosen by hand before its week was known stays until the first week seen for it resets', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.readings.set('A', () => ({
+				fetchedAt: new Date(T).toISOString(),
+				windows: [
+					{
+						key: 'five_hour',
+						label: '5h',
+						percent: 1,
+						resetsAt: new Date(T + 3_600_000).toISOString(),
+					},
+				],
+			}));
+			providers.claude.readings.set('B', () => reading(48, 51));
+			const before = await collectState({ providers, now: T });
+			const memory = await rememberManualSwitch({
+				provider: 'claude',
+				state: before.providers.claude,
+				fromId: b.id,
+				toId: a.id,
+				settings: await loadSettings(),
+				now: T,
+			});
+			expect(memory.chosenResetAt).toBeNull();
+			providers.claude.readings.set('A', () => reading(3, 164));
+			const first = await tick({ providers, now: T + 3_600_000 });
+			expect(first[0]).toMatchObject({
+				outcome: 'holding',
+				detail: 'staying on the account you chose until its week resets',
+			});
+			const stored = await Bun.file(join(process.env.HOTSEAT_HOME ?? '', 'auto-state.json')).json();
+			expect(stored.memory.claude.chosenResetAt).toBe(T + 164 * 3_600_000);
+			expect((await tick({ providers, now: T + 7_200_000 }))[0]?.outcome).toBe('holding');
+			providers.claude.readings.set('A', () => reading(3, 400));
+			const rolled = await tick({ providers, now: T + 10_800_000 });
+			expect(rolled[0]).toMatchObject({
+				outcome: 'switched',
+				trigger: 'expiring',
+				to: 'b@example.com',
+			});
+		});
+	});
+
+	test('an account chosen by hand before its week was known is held only through the first week seen, even when nothing resets sooner then', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.readings.set('A', () => ({
+				fetchedAt: new Date(T).toISOString(),
+				windows: [
+					{
+						key: 'five_hour',
+						label: '5h',
+						percent: 1,
+						resetsAt: new Date(T + 3_600_000).toISOString(),
+					},
+				],
+			}));
+			providers.claude.readings.set('B', () => reading(10, 100));
+			const before = await collectState({ providers, now: T });
+			await rememberManualSwitch({
+				provider: 'claude',
+				state: before.providers.claude,
+				fromId: b.id,
+				toId: a.id,
+				settings: await loadSettings(),
+				now: T,
+			});
+			providers.claude.readings.set('A', () => reading(3, 20));
+			expect((await tick({ providers, now: T + 3_600_000 }))[0]?.outcome).toBe('holding');
+			providers.claude.readings.set('A', () => reading(3, 188));
+			const rolled = await tick({ providers, now: T + 7_200_000 });
+			expect(rolled[0]).toMatchObject({
+				outcome: 'switched',
+				trigger: 'expiring',
+				to: 'b@example.com',
+			});
+		});
+	});
+
+	test('holding a hand-chosen account to its first week never rewrites a switch made by hand meanwhile', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			const noWeek = (): UsageSnapshot => ({
+				fetchedAt: new Date(T).toISOString(),
+				windows: [
+					{
+						key: 'five_hour',
+						label: '5h',
+						percent: 1,
+						resetsAt: new Date(T + 3_600_000).toISOString(),
+					},
+				],
+			});
+			providers.claude.readings.set('A', noWeek);
+			providers.claude.readings.set('B', () => reading(48, 51));
+			const first = await collectState({ providers, now: T });
+			await rememberManualSwitch({
+				provider: 'claude',
+				state: first.providers.claude,
+				fromId: b.id,
+				toId: a.id,
+				settings: await loadSettings(),
+				now: T,
+			});
+			providers.claude.readings.set('A', () => reading(3, 164));
+			providers.claude.readings.set('B', noWeek);
+			providers.claude.fetchDelayMs = 150;
+			const automatic = tick({ providers, now: T + 3_600_000 });
+			while (providers.claude.calls.fetchUsage === 0) await Bun.sleep(5);
+			providers.claude.fetchDelayMs = 0;
+			const byHand = await holdSwitch('claude');
+			const second = await collectState({ providers, now: T + 3_600_000 });
+			await activate('claude', b.id, { providers, now: T + 3_600_000 });
+			await rememberManualSwitch({
+				provider: 'claude',
+				state: second.providers.claude,
+				fromId: a.id,
+				toId: b.id,
+				settings: await loadSettings(),
+				now: T + 3_600_000,
+			});
+			await byHand.release();
+			await automatic;
+			const stored = await Bun.file(join(process.env.HOTSEAT_HOME ?? '', 'auto-state.json')).json();
+			expect(stored.memory.claude).toMatchObject({ lastSwitchTo: b.id, chosenResetAt: null });
+		});
+	});
+
+	test('an account chosen by hand is remembered with the week it was chosen in', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.readings.set('A', () => reading(3, 164));
+			providers.claude.readings.set('B', () => reading(48, 51));
+			const before = await collectState({ providers, now: T });
+			const memory = await rememberManualSwitch({
+				provider: 'claude',
+				state: before.providers.claude,
+				fromId: b.id,
+				toId: a.id,
+				settings: await loadSettings(),
+				now: T,
+			});
+			expect(memory.chosenResetAt).toBe(T + 164 * 3_600_000);
+			const reports = await tick({ providers, now: T + 3_600_000 });
+			expect(reports[0]).toMatchObject({
+				outcome: 'holding',
+				detail: 'staying on the account you chose until its week resets',
+			});
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
 		});
 	});
 

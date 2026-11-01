@@ -6,13 +6,19 @@ import type { AccountState, UsageWindow } from './types.ts';
  * fixture and the same scenarios can be replayed against it forever.
  */
 
-export type Trigger = 'proactive' | 'at-limit' | 'failover';
+/**
+ * Why a switch is made: the account in use is near its limit (proactive), out
+ * of room (at-limit), or failing (failover); or another account with room
+ * resets its week sooner (expiring).
+ */
+export type Trigger = 'proactive' | 'at-limit' | 'failover' | 'expiring';
 
 /**
  * There is one rule for where to go: the account whose weekly quota resets
  * soonest, among those that still have room. That quota is what expires
  * unused otherwise. An account that resets in five days can wait; one that
- * resets tomorrow with a quarter left cannot.
+ * resets tomorrow with a quarter left cannot. The account in use is left for
+ * such an account even when it has room of its own.
  */
 export interface PolicySettings {
 	thresholdPercent: number;
@@ -49,6 +55,12 @@ export interface SwitchMemory {
 	 * knew, and chose it anyway, so they are not a reason to move you off it.
 	 */
 	forgiven?: ForgivenWindow[];
+	/**
+	 * When the weekly window of an account chosen by hand was due to reset at
+	 * the time it was chosen. It is not left for one that resets sooner until
+	 * that window has reset.
+	 */
+	chosenResetAt?: number | null;
 }
 
 /** Seconds an account's reset must beat another's by to count as sooner. */
@@ -248,6 +260,8 @@ export function recoveryIsUseful(
 export interface Verdict {
 	trigger?: Trigger;
 	hold?: string;
+	/** Holding because the account in use is below its limits. */
+	belowLimits?: true;
 }
 
 /** Decides whether this tick should switch at all, and why. */
@@ -281,7 +295,10 @@ export function decideTrigger(
 		const used = found.window.percent;
 		if (used < found.threshold) {
 			// Floored, so a reading a hair under the limit never prints as at it.
-			return { hold: `at ${Math.floor(used)}%, below the ${found.threshold}% limit` };
+			return {
+				hold: `at ${Math.floor(used)}%, below the ${found.threshold}% limit`,
+				belowLimits: true,
+			};
 		}
 		// Out of room means out on the windows that still count: a limit you
 		// forgave when you chose this account is not what stops it working.
@@ -368,7 +385,11 @@ export function leftAccountRecovered(
 	return recovery < was - RECOVERY_HYSTERESIS_S * 1000;
 }
 
-/** The account a proactive switch may not return to yet, if any. */
+/**
+ * The account a proactive switch may not return to yet, if any. An account
+ * left only because another resets sooner was left with room, and is never
+ * barred.
+ */
 export function noReturnAccount(
 	trigger: Trigger,
 	memory: SwitchMemory,
@@ -378,7 +399,9 @@ export function noReturnAccount(
 	settings: PolicySettings,
 ): string | undefined {
 	const cameFrom = memory.lastSwitchFrom;
-	if (trigger !== 'proactive' || cameFrom === undefined) return undefined;
+	if (trigger !== 'proactive' || cameFrom === undefined || memory.leftTrigger === 'expiring') {
+		return undefined;
+	}
 	// The bar only applies while still on the account that switch landed on.
 	if (
 		memory.lastSwitchTo !== undefined &&
@@ -440,6 +463,7 @@ export function rankCandidates(input: RankInput): AccountState[] {
 
 	const measured = pool.filter((account) => headroom(account, models) !== undefined);
 	const allAbove =
+		trigger !== 'expiring' &&
 		active !== undefined &&
 		overThreshold(active, settings) &&
 		measured.length > 0 &&
@@ -450,6 +474,9 @@ export function rankCandidates(input: RankInput): AccountState[] {
 	);
 	const activeRecoveryAt = allAbove && active ? bindingRecoveryAt(active, models, now) : 0;
 
+	// A move made while the account in use still works lands only somewhere
+	// healthy, never on a sliver.
+	const healthyMove = trigger === 'proactive' || trigger === 'expiring';
 	const qualifying: [Key, AccountState][] = [];
 	const fallback: [Key, AccountState][] = [];
 	// Accounts with a sliver left: the last resort of an escape, most room first.
@@ -464,14 +491,14 @@ export function rankCandidates(input: RankInput): AccountState[] {
 		// another switch. When the current account is out, a sliver still
 		// beats stopping, but only once nothing better exists.
 		if (h < MIN_USABLE_HEADROOM && !(allAbove && trigger === 'proactive')) {
-			if (trigger !== 'proactive') slivers.push([[-h], candidate]);
+			if (!healthyMove) slivers.push([[-h], candidate]);
 			continue;
 		}
 		const resetAt = weeklyResetAt(candidate, now) ?? Number.POSITIVE_INFINITY;
 		const recoveryAt = allAbove ? bindingRecoveryAt(candidate, models, now) : 0;
 		let byRecovery = false;
 
-		if (trigger === 'proactive') {
+		if (healthyMove) {
 			// A proactive move lands somewhere healthy: an account that is itself
 			// over a limit would only trigger the next switch.
 			if (overThreshold(candidate, settings) && !allAbove) continue;

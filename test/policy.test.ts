@@ -410,12 +410,177 @@ describe('the whole decision', () => {
 	test('a model limit only matters once that model is named', () => {
 		const accounts = [
 			account('a', { fiveHour: [40, 2], weekly: [50, 100], models: { Fable: [97, 100] } }),
-			account('b', { weekly: [10, 5] }, 2),
+			account('b', { weekly: [10, 150] }, 2),
 		];
 		expect(decide(state(accounts, 'a'), policy, {}, 0, NOW).hold).toContain('below the 90% limit');
 		expect(
 			decide(state(accounts, 'a'), { ...policy, modelLimits: ['Fable'] }, {}, 0, NOW).target?.id,
 		).toBe('b');
+	});
+});
+
+describe('moving to the account whose week resets sooner', () => {
+	test('the account in use resetting hands over to the next account to reset that has room', () => {
+		const verdict = decide(
+			state(
+				[
+					account('a', { weekly: [3, 164] }),
+					account('b', { weekly: [48, 51] }, 2),
+					account('c', { weekly: [3, 115] }, 3),
+				],
+				'a',
+			),
+			policy,
+			{},
+			0,
+			NOW,
+		);
+		expect(verdict.trigger).toBe('expiring');
+		expect(verdict.target?.id).toBe('b');
+		expect(verdict.targets.map((target) => target.id)).toEqual(['b', 'c']);
+	});
+
+	test('the account in use stays while its week resets soonest', () => {
+		const verdict = decide(
+			state([account('a', { weekly: [40, 20] }), account('b', { weekly: [10, 100] }, 2)], 'a'),
+			policy,
+			{},
+			0,
+			NOW,
+		);
+		expect(verdict.target).toBeUndefined();
+		expect(verdict.hold).toBe('at 40%, below the 90% limit');
+	});
+
+	test('an account that resets sooner but is over a limit, or nearly spent, is not moved to', () => {
+		for (const sooner of [
+			account('b', { weekly: [92, 10] }, 2),
+			account('b', { weekly: [86, 10], fiveHour: [96, 2] }, 2),
+		]) {
+			const verdict = decide(
+				state([account('a', { weekly: [3, 164] }), sooner], 'a'),
+				policy,
+				{},
+				0,
+				NOW,
+			);
+			expect(verdict.target).toBeUndefined();
+		}
+	});
+
+	test('an account that resets sooner with only a sliver left is not moved to, even under a high limit', () => {
+		const verdict = decide(
+			state([account('a', { weekly: [3, 164] }), account('b', { weekly: [96, 10] }, 2)], 'a'),
+			{ ...policy, thresholdPercent: 97 },
+			{},
+			0,
+			NOW,
+		);
+		expect(verdict.target).toBeUndefined();
+	});
+
+	test('an account over a limit is not moved to even when the account in use is only over a limit you chose to accept', () => {
+		const verdict = decide(
+			state(
+				[
+					account('a', { fiveHour: [95, 5], weekly: [3, 164] }),
+					account('b', { weekly: [94, 2] }, 2),
+				],
+				'a',
+			),
+			policy,
+			{
+				lastSwitchTo: 'a',
+				forgiven: [{ key: 'five_hour', resetsAt: inHours(5) }],
+				chosenResetAt: Date.parse(inHours(-4)),
+			},
+			0,
+			NOW,
+		);
+		expect(verdict.target).toBeUndefined();
+	});
+
+	test('an account chosen by hand before its week was known is held to the first week seen for it', () => {
+		const verdict = decide(
+			state([account('a', { weekly: [3, 164] }), account('b', { weekly: [48, 51] }, 2)], 'a'),
+			policy,
+			{ lastSwitchAt: NOW - 3 * H, lastSwitchTo: 'a', chosenResetAt: null },
+			0,
+			NOW,
+		);
+		expect(verdict.target).toBeUndefined();
+		expect(verdict.hold).toBe('staying on the account you chose until its week resets');
+		expect(verdict.chosenResetAt).toBe(Date.parse(inHours(164)));
+	});
+
+	test('an account that resets only minutes sooner is not a reason to move', () => {
+		const verdict = decide(
+			state(
+				[account('a', { weekly: [3, 164] }), account('b', { weekly: [10, 164 - 3 / 60] }, 2)],
+				'a',
+			),
+			policy,
+			{},
+			0,
+			NOW,
+		);
+		expect(verdict.target).toBeUndefined();
+	});
+
+	test('a disabled account, or one whose login was refused, is not moved to', () => {
+		const refused = account('c', { weekly: [10, 20] }, 3);
+		refused.usage = {
+			...(refused.usage ?? { fetchedAt: inHours(0), windows: [] }),
+			errorKind: 'auth',
+		};
+		const verdict = decide(
+			state(
+				[
+					account('a', { weekly: [3, 164] }),
+					account('b', { weekly: [10, 20], disabled: true }, 2),
+					refused,
+				],
+				'a',
+			),
+			policy,
+			{},
+			0,
+			NOW,
+		);
+		expect(verdict.target).toBeUndefined();
+	});
+
+	test('waits out the cooldown after a switch', () => {
+		const verdict = decide(
+			state([account('a', { weekly: [3, 164] }), account('b', { weekly: [48, 51] }, 2)], 'a'),
+			policy,
+			{ lastSwitchAt: NOW - 60_000, lastSwitchTo: 'a' },
+			0,
+			NOW,
+		);
+		expect(verdict.target).toBeUndefined();
+		expect(verdict.hold).toBe('cooling down for another 240s');
+	});
+
+	test('an account chosen by hand stays until its own week resets', () => {
+		const accounts = [account('a', { weekly: [3, 164] }), account('b', { weekly: [48, 51] }, 2)];
+		const chosen: SwitchMemory = {
+			lastSwitchAt: NOW - 3 * H,
+			lastSwitchTo: 'a',
+			chosenResetAt: Date.parse(inHours(164)),
+		};
+		const held = decide(state(accounts, 'a'), policy, chosen, 0, NOW);
+		expect(held.target).toBeUndefined();
+		expect(held.hold).toBe('staying on the account you chose until its week resets');
+		const rolledOver = decide(
+			state(accounts, 'a'),
+			policy,
+			{ ...chosen, chosenResetAt: Date.parse(inHours(-4)) },
+			0,
+			NOW,
+		);
+		expect(rolledOver.target?.id).toBe('b');
+		expect(rolledOver.trigger).toBe('expiring');
 	});
 });
 

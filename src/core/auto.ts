@@ -10,9 +10,11 @@ import {
 	leftAccountRecovered,
 	noReturnAccount,
 	type PolicySettings,
+	RECOVERY_HYSTERESIS_S,
 	rankCandidates,
 	type SwitchMemory,
 	type Trigger,
+	weeklyResetAt,
 	windowsOverThreshold,
 } from './policy.ts';
 import { accountsFor, loadRegistry } from './registry.ts';
@@ -50,6 +52,28 @@ async function loadAutoState(): Promise<AutoState> {
 	return { version: 2, memory: stored.memory ?? {} };
 }
 
+/**
+ * Holds an account chosen by hand before its week was known to the first week
+ * seen for it, unless another account has been switched to since.
+ */
+async function bindChosenReset(
+	provider: ProviderId,
+	seen: SwitchMemory,
+	resetAt: number,
+): Promise<void> {
+	const lock = await acquireLock(hotseatHome(), 10_000, 'auto.lock');
+	try {
+		const auto = await loadAutoState();
+		const latest = auto.memory[provider];
+		if (!latest || latest.lastSwitchTo !== seen.lastSwitchTo || latest.chosenResetAt !== null)
+			return;
+		latest.chosenResetAt = resetAt;
+		await writeJsonAtomic(autoStatePath(), auto, 0o600);
+	} finally {
+		await lock.release();
+	}
+}
+
 /** Rewrites one service's memory under the lock, so two passes cannot lose each other's. */
 async function rememberFor(provider: ProviderId, memory: SwitchMemory): Promise<void> {
 	const lock = await acquireLock(hotseatHome(), 10_000, 'auto.lock');
@@ -80,6 +104,11 @@ export interface Decision {
 	targets: { id: string; email: string }[];
 	trigger?: Trigger;
 	hold?: string;
+	/**
+	 * The weekly reset to hold an account chosen by hand to, when it was chosen
+	 * before its week was known and this is the first week seen for it.
+	 */
+	chosenResetAt?: number;
 }
 
 /** One provider's decision, from a state fixture and a memory. Pure. */
@@ -97,7 +126,10 @@ export function decide(
 
 	const verdict = decideTrigger(active, policy, memory, unhealthyTicks, now);
 	if (verdict.hold !== undefined || verdict.trigger === undefined) {
-		return { hold: verdict.hold ?? 'nothing to do', targets: [] };
+		const hold = verdict.hold ?? 'nothing to do';
+		return verdict.belowLimits
+			? soonerReset(providerState, active, policy, memory, now, hold)
+			: { hold, targets: [] };
 	}
 	const trigger = verdict.trigger;
 
@@ -130,6 +162,56 @@ export function decide(
 }
 
 /**
+ * Leaves the account in use, which is below its limits, for the account with
+ * room whose week resets soonest, when that is sooner than its own. An account
+ * chosen by hand stays until its own week has reset, and the cooldown after a
+ * switch applies.
+ */
+function soonerReset(
+	providerState: ProviderState,
+	active: AccountState,
+	policy: PolicySettings,
+	memory: SwitchMemory,
+	now: number,
+	hold: string,
+): Decision {
+	const activeReset = weeklyResetAt(active, now);
+	if (activeReset === undefined) return { hold, targets: [] };
+	const margin = RECOVERY_HYSTERESIS_S * 1000;
+	const chosenAt = memory.chosenResetAt;
+	const chosenByHand = memory.lastSwitchTo === active.id && chosenAt !== undefined;
+	const bind = chosenByHand && chosenAt === null ? { chosenResetAt: activeReset } : {};
+	const ranked = rankCandidates({
+		trigger: 'expiring',
+		accounts: providerState.accounts,
+		activeId: active.id,
+		noReturn: undefined,
+		settings: policy,
+		now,
+	})
+		.filter((account) => {
+			const resetAt = weeklyResetAt(account, now);
+			return resetAt !== undefined && resetAt < activeReset - margin;
+		})
+		.map((account) => ({ id: account.id, email: account.email }));
+	const [target] = ranked;
+	if (!target) return { hold, targets: [], ...bind };
+	if (chosenByHand && (chosenAt === null || Math.abs(activeReset - chosenAt) <= margin)) {
+		return {
+			hold: 'staying on the account you chose until its week resets',
+			targets: [],
+			...bind,
+		};
+	}
+	const last = memory.lastSwitchAt;
+	if (last !== undefined && now - last < policy.cooldownSeconds * 1000) {
+		const remaining = Math.round((policy.cooldownSeconds * 1000 - (now - last)) / 1000);
+		return { hold: `cooling down for another ${remaining}s`, targets: [] };
+	}
+	return { target, targets: ranked, trigger: 'expiring' };
+}
+
+/**
  * Records a switch the user made by hand so the automatic pass treats it the
  * way it treats its own: the cooldown applies, and the account left is held
  * back from an immediate return. Without this the next pass could reverse a
@@ -153,6 +235,7 @@ export async function rememberManualSwitch(input: {
 	// Whatever was already over its limit on the account chosen is not a
 	// reason to move off it again: it was on screen, and chosen anyway.
 	const forgiven = arriving ? windowsOverThreshold(arriving, policy) : [];
+	const chosenResetAt = arriving ? weeklyResetAt(arriving, now) : undefined;
 	const memory: SwitchMemory = {
 		lastSwitchAt: now,
 		lastSwitchTo: input.toId,
@@ -162,6 +245,7 @@ export async function rememberManualSwitch(input: {
 			leftRecovery !== undefined && Number.isFinite(leftRecovery) ? leftRecovery : null,
 		leftTrigger: 'proactive',
 		...(forgiven.length > 0 ? { forgiven } : {}),
+		chosenResetAt: chosenResetAt ?? null,
 	};
 	await rememberFor(input.provider, memory);
 	return memory;
@@ -228,6 +312,9 @@ export async function tick(
 		const unhealthy = active?.usage?.failedReads ?? 0;
 
 		const decision = decide(providerState, policy, memory, unhealthy, now);
+		if (decision.chosenResetAt !== undefined) {
+			await bindChosenReset(providerId, memory, decision.chosenResetAt);
+		}
 		if (!decision.target) {
 			reports.push({
 				provider: providerId,
@@ -315,7 +402,7 @@ export async function tick(
 			reports.push({
 				provider: providerId,
 				outcome: 'switched',
-				detail: `switched to ${result.to}${restart}${passedOver}`,
+				detail: `switched to ${result.to}${trigger === 'expiring' ? ', whose week resets sooner' : ''}${restart}${passedOver}`,
 				trigger,
 				to: result.to,
 			});

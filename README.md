@@ -143,9 +143,11 @@ Work already running is not touched. The brake clears itself once spending
 calms down; `hotseat guard resume` clears it at once, and `brakePoints 0`
 turns it off. `hotseat guard` shows the recent burn.
 
-**A log.** `hotseat logs [--days N]` shows what hotseat did: switches, brake
-trips and clears, and every helper the hook allowed or refused. One file per
-day in `~/.hotseat/logs`, kept 30 days.
+**One log.** `hotseat logs [--days N]` shows everything hotseat did, in one
+timeline: switches, brake trips and clears, and every helper the hook allowed
+or refused. `hotseat logs --switches` shows only switches, which is what the
+menu bar's recent switches read. One file per day in `~/.hotseat/logs`, kept
+30 days; an older `history.jsonl` is moved into it once.
 
 ## Two accounts at the same time
 
@@ -183,8 +185,8 @@ root covers the whole project.
 | `hotseat status` | every account and how full each limit is |
 | `hotseat list` | one line per account |
 | `hotseat title` | one-line summary, for a shell prompt |
-| `hotseat history` | recent switches |
-| `hotseat logs [--days N]` | what hotseat did: switches, brakes, refused helpers (kept 30 days) |
+| `hotseat logs [--days N]` | everything hotseat did: switches, brakes, refused helpers (kept 30 days) |
+| `hotseat logs --switches` | recent switches only |
 | `hotseat guard` | the helper limit, recent burn and whether the brake is on |
 | `hotseat guard resume [service]` | clear the brake now |
 | `hotseat refresh` | read every account again now |
@@ -292,7 +294,8 @@ Everything hotseat stores lives in `~/.hotseat`, owner-readable only:
 ├── settings.json     your settings
 ├── state.json        the last board, which the menu bar watches
 ├── usage.json        cached readings
-├── history.jsonl     a line per switch
+├── guard.json        the helper reservations, readings and brakes
+├── logs/             one file per day: switches, brakes, helper decisions (30 days)
 ├── auto-state.json   what the last automatic switch left behind
 ├── mappings.json     folder rules
 └── sessions/         one folder per account run on its own, with its history

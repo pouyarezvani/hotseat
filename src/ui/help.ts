@@ -17,11 +17,11 @@ const GROUPS: Group[] = [
 			{ usage: 'status', what: 'every account and how full each limit is' },
 			{ usage: 'list', what: 'one line per account' },
 			{ usage: 'title', what: 'one-line summary, for a shell prompt' },
-			{ usage: 'history', what: 'recent switches' },
 			{
 				usage: 'logs [--days N]',
-				what: 'what hotseat did: switches, brakes, refused helpers (kept 30 days)',
+				what: 'everything hotseat did: switches, brakes, refused helpers (kept 30 days)',
 			},
+			{ usage: 'logs --switches', what: 'recent switches only' },
 			{ usage: 'guard', what: 'helper limit, recent burn and whether the brake is on' },
 			{ usage: 'guard resume [service]', what: 'clear the brake now instead of waiting' },
 		],

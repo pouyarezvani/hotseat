@@ -34,9 +34,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	/// refresh finishes, rather than being dropped on the floor.
 	private var queued: [[String]] = []
 	/// The latest switches, for the History menu, read in the background
-	/// whenever the history file changes.
+	/// whenever the newest log file changes.
 	private var history: [HistoryEntry] = []
-	/// The history file as it was when it was last read whole.
+	/// The newest log file as it was when the switches were last read.
 	private var historyStamp: String?
 	/// Settings changed from the menu whose writes have not finished, kept on
 	/// the board over whatever a refresh loads until they have.
@@ -163,13 +163,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		}
 	}
 
-	/// The history file's size and when it last changed, or nothing while there
-	/// is no history yet. Any switch changes both.
+	/// The newest daily log's name, size and when it last changed, or nothing
+	/// while there is no log yet. Any switch changes them.
 	private static func historyFileStamp() -> String? {
-		let path = (homePath as NSString).appendingPathComponent("history.jsonl")
-		guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+		let dir = (homePath as NSString).appendingPathComponent("logs")
+		guard
+			let newest = (try? FileManager.default.contentsOfDirectory(atPath: dir))?
+				.filter({ $0.hasSuffix(".jsonl") }).max(),
+			let attributes = try? FileManager.default.attributesOfItem(
+				atPath: (dir as NSString).appendingPathComponent(newest))
+		else { return nil }
 		let changed = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-		return "\(changed)|\((attributes[.size] as? NSNumber)?.intValue ?? 0)"
+		return "\(newest)|\(changed)|\((attributes[.size] as? NSNumber)?.intValue ?? 0)"
 	}
 
 	/// Says what the pass did, once per change: a switch, a switch that could

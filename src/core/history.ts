@@ -1,6 +1,6 @@
-import { appendFile, mkdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { logEvent } from './log.ts';
+import { readFile, rename, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
+import { logEvent, readAllEvents } from './log.ts';
 import { hotseatHome } from './paths.ts';
 import type { ProviderId } from './types.ts';
 
@@ -16,31 +16,56 @@ export interface HistoryEntry {
 	leftAtPercent?: number;
 }
 
-function historyPath(): string {
-	return join(hotseatHome(), 'history.jsonl');
+function timeOf(entry: HistoryEntry): number {
+	const time = Date.parse(entry.at);
+	return Number.isFinite(time) ? time : Date.now();
 }
 
-/**
- * Append-only so a crash mid-write costs one line rather than the whole log,
- * and so two processes switching at once cannot lose each other's entry.
- */
+/** Switches are kept in the event log, filed under the day they happened. */
 export async function recordSwitch(entry: HistoryEntry): Promise<void> {
-	await mkdir(dirname(historyPath()), { recursive: true, mode: 0o700 });
-	await appendFile(historyPath(), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-	await logEvent('switch', { ...entry });
+	await logEvent('switch', { ...entry }, timeOf(entry));
 }
 
 export async function readHistory(limit = 20): Promise<HistoryEntry[]> {
-	const file = Bun.file(historyPath());
-	if (!(await file.exists())) return [];
-	const lines = (await file.text()).split('\n').filter((line) => line.trim().length > 0);
-	const entries: HistoryEntry[] = [];
-	for (const line of lines.slice(-limit).reverse()) {
-		try {
-			entries.push(JSON.parse(line) as HistoryEntry);
-		} catch {
-			// A torn final line from an interrupted append is skipped, not fatal.
-		}
+	const switches = (await readAllEvents()).filter((event) => event.kind === 'switch');
+	return switches
+		.reverse()
+		.slice(0, limit)
+		.map(({ kind: _kind, ...entry }) => entry as unknown as HistoryEntry);
+}
+
+/**
+ * Moves switches from the old `history.jsonl` into the event log, once. The
+ * file is renamed before it is read, so two processes cannot both import it,
+ * and an import cut short is finished on the next run without duplicates.
+ */
+export async function migrateHistory(): Promise<void> {
+	const legacy = join(hotseatHome(), 'history.jsonl');
+	const importing = `${legacy}.importing`;
+	await rename(legacy, importing).catch(() => undefined);
+	let text: string;
+	try {
+		text = await readFile(importing, 'utf8');
+	} catch {
+		return;
 	}
-	return entries;
+	const seen = new Set(
+		(await readAllEvents())
+			.filter((event) => event.kind === 'switch')
+			.map((event) => `${event.at}|${String(event.provider)}|${String(event.to)}`),
+	);
+	for (const line of text.split('\n')) {
+		if (line.trim().length === 0) continue;
+		let entry: HistoryEntry;
+		try {
+			entry = JSON.parse(line) as HistoryEntry;
+		} catch {
+			continue;
+		}
+		const key = `${entry.at}|${entry.provider}|${entry.to}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		await recordSwitch(entry);
+	}
+	await unlink(importing).catch(() => undefined);
 }

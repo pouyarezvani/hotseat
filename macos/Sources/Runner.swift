@@ -184,7 +184,7 @@ final class Runner {
 	func board() -> Board? { decode(Board.self, ["status", "--json"]) }
 	/// The latest switches, or nothing when they could not be read.
 	func history(limit: Int) -> [HistoryEntry]? {
-		decode([HistoryEntry].self, ["history", "--json", "--limit", String(limit)])
+		decode([HistoryEntry].self, ["logs", "--switches", "--json", "--limit", String(limit)])
 	}
 }
 

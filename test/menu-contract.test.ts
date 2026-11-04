@@ -509,7 +509,8 @@ describe('the History menu', () => {
 		const body = refresh.slice(0, refresh.indexOf('\n\t}\n'));
 		expect(body).toContain('historyFileStamp()');
 		expect(body).toContain('if let history {');
-		expect(menu).toContain('"history.jsonl"');
+		expect(menu).toContain('"logs"');
+		expect(menu).not.toContain('"history.jsonl"');
 	});
 });
 

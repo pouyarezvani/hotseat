@@ -59,11 +59,10 @@ export async function logEvent(
 	}
 }
 
-/** Events from the last `days` local days, oldest first. */
-export async function readEvents(days: number, now = Date.now()): Promise<LogEvent[]> {
+async function readDayFiles(names: string[]): Promise<LogEvent[]> {
 	const events: LogEvent[] = [];
-	for (let back = Math.max(1, days) - 1; back >= 0; back--) {
-		const file = Bun.file(join(logDir(), dayFile(now - back * DAY_MS)));
+	for (const name of names) {
+		const file = Bun.file(join(logDir(), name));
 		if (!(await file.exists())) continue;
 		for (const line of (await file.text()).split('\n')) {
 			if (line.trim().length === 0) continue;
@@ -72,5 +71,24 @@ export async function readEvents(days: number, now = Date.now()): Promise<LogEve
 			} catch {}
 		}
 	}
-	return events;
+	return events.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+}
+
+/** Events from the last `days` local days, oldest first. */
+export async function readEvents(days: number, now = Date.now()): Promise<LogEvent[]> {
+	const names: string[] = [];
+	for (let back = Math.max(1, days) - 1; back >= 0; back--)
+		names.push(dayFile(now - back * DAY_MS));
+	return readDayFiles(names);
+}
+
+/** Every event still kept, oldest first. */
+export async function readAllEvents(): Promise<LogEvent[]> {
+	let names: string[];
+	try {
+		names = (await readdir(logDir())).filter((name) => DAY_FILE.test(name));
+	} catch {
+		return [];
+	}
+	return readDayFiles(names);
 }

@@ -36,6 +36,12 @@ export interface Settings {
 	/** Which providers auto-rotation may touch. */
 	autoProviders: string[];
 	barWidth: number;
+	/** Most helpers one chat may run at once; the hook refuses the next. */
+	guardChatAgents: number;
+	/** Weekly-limit points a provider may burn within brakeMinutes before the brake; 0 turns it off. */
+	brakePoints: number;
+	/** The window, in minutes, the brake measures burn over. */
+	brakeMinutes: number;
 }
 
 export const DEFAULTS: Settings = {
@@ -54,6 +60,9 @@ export const DEFAULTS: Settings = {
 	autoCooldownSeconds: 300,
 	autoProviders: ['claude', 'codex'],
 	barWidth: 14,
+	guardChatAgents: 5,
+	brakePoints: 25,
+	brakeMinutes: 60,
 };
 
 interface Bound {
@@ -75,6 +84,9 @@ const BOUNDS: Partial<Record<keyof Settings, Bound>> = {
 	autoCooldownSeconds: { min: 0, max: 86_400 },
 	autoUnhealthyTicks: { min: 1, max: 100 },
 	barWidth: { min: 6, max: 40 },
+	guardChatAgents: { min: 1, max: 20 },
+	brakePoints: { min: 0, max: 100 },
+	brakeMinutes: { min: 10, max: 180 },
 };
 
 const CHOICES: Partial<Record<keyof Settings, readonly string[]>> = {

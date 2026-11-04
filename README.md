@@ -116,6 +116,37 @@ touches Codex.
 The menu bar app shows a notification when it switches, when it could not,
 and when every account is out of room.
 
+## Keeping agents from running away
+
+Two guards stop one chat from burning a whole week of limits.
+
+**A helper limit.** Install the hook once and Claude Code asks hotseat before
+every `Agent`, `Task` or `SendMessage` call:
+
+```json
+{ "hooks": { "PreToolUse": [ { "matcher": "^(Agent|Task|SendMessage)$",
+  "hooks": [{ "type": "command", "command": "hotseat guard hook", "timeout": 10 }] } ] } }
+```
+
+in `~/.claude/settings.json`. A chat may run at most `guardChatAgents` (5)
+helpers at once, and a helper may never start its own. A refused call tells
+the agent to do that piece itself or wait. If the hook itself fails it lets
+the call through, so it can never stop your work. For Codex, set
+`max_concurrent_threads_per_session = 5` under `[agents]` in
+`~/.codex/config.toml`.
+
+**A spending brake.** Every automatic pass records each account's weekly
+percentage. If a service burns `brakePoints` (25) points within
+`brakeMinutes` (60), hotseat stops switching that service's accounts, so a
+runaway cannot move on to the next one, and the hook refuses new helpers.
+Work already running is not touched. The brake clears itself once spending
+calms down; `hotseat guard resume` clears it at once, and `brakePoints 0`
+turns it off. `hotseat guard` shows the recent burn.
+
+**A log.** `hotseat logs [--days N]` shows what hotseat did: switches, brake
+trips and clears, and every helper the hook allowed or refused. One file per
+day in `~/.hotseat/logs`, kept 30 days.
+
 ## Two accounts at the same time
 
 ```sh
@@ -153,6 +184,9 @@ root covers the whole project.
 | `hotseat list` | one line per account |
 | `hotseat title` | one-line summary, for a shell prompt |
 | `hotseat history` | recent switches |
+| `hotseat logs [--days N]` | what hotseat did: switches, brakes, refused helpers (kept 30 days) |
+| `hotseat guard` | the helper limit, recent burn and whether the brake is on |
+| `hotseat guard resume [service]` | clear the brake now |
 | `hotseat refresh` | read every account again now |
 
 Add `--json` to `status`, `title` or `history` for machine-readable output.

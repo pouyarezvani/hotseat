@@ -167,3 +167,32 @@ describe('a settings file with the wrong shapes', () => {
 		});
 	});
 });
+
+describe('agent guard settings', () => {
+	test('guard defaults', async () => {
+		await withHome(async () => {
+			const settings = await loadSettings();
+			expect(settings.guardChatAgents).toBe(5);
+			expect(settings.brakePoints).toBe(25);
+			expect(settings.brakeMinutes).toBe(60);
+		});
+	});
+
+	test('guard bounds clamp', async () => {
+		await withHome(async (home) => {
+			await Bun.write(
+				join(home, 'settings.json'),
+				JSON.stringify({ version: 1, guardChatAgents: 0, brakeMinutes: 5, brakePoints: 500 }),
+			);
+			const settings = await loadSettings();
+			expect(settings.guardChatAgents).toBe(1);
+			expect(settings.brakeMinutes).toBe(10);
+			expect(settings.brakePoints).toBe(100);
+		});
+	});
+
+	test('a brake threshold of 0 is allowed and means off', () => {
+		expect(coerce('brakePoints', '0')).toBe(0);
+		expect(() => coerce('brakeMinutes', '200')).toThrow();
+	});
+});

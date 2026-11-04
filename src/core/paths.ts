@@ -33,3 +33,7 @@ export function lockPath(): string {
 export function logDir(): string {
 	return join(hotseatHome(), 'logs');
 }
+
+export function guardPath(): string {
+	return join(hotseatHome(), 'guard.json');
+}

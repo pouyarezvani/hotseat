@@ -14,7 +14,9 @@ import {
 	saveInstalled,
 	signInAgain,
 } from './core/enroll.ts';
+import { guardStatus, resumeBrake, runHook } from './core/guard.ts';
 import { readHistory, recordSwitch, type SwitchReason } from './core/history.ts';
+import { readEvents } from './core/log.ts';
 import { listMappings, mappingFor, removeMapping, setMapping } from './core/mappings.ts';
 import {
 	findApp,
@@ -259,6 +261,10 @@ async function showConfig(json: boolean): Promise<number> {
 
 export async function main(argv: readonly string[]): Promise<number> {
 	const [command, ...rest] = argv;
+	if (command === 'guard' && rest[0] === 'hook') {
+		process.stdout.write(await runHook(await new Response(Bun.stdin.stream()).text()));
+		return 0;
+	}
 	try {
 		await migrateVault();
 		switch (command) {
@@ -648,6 +654,40 @@ export async function main(argv: readonly string[]): Promise<number> {
 					return 0;
 				}
 				process.stdout.write(`deleted ${await purge()}\n`);
+				return 0;
+			}
+			case 'guard': {
+				if (rest[0] === 'resume') {
+					const target = rest[1] ?? 'all';
+					const cleared = await resumeBrake(target === 'all' ? 'all' : parseProvider(target));
+					process.stdout.write(
+						cleared.length > 0 ? `brake cleared for ${cleared.join(', ')}\n` : 'no brake was on\n',
+					);
+					return 0;
+				}
+				if (rest[0] === undefined || rest[0] === 'status') {
+					process.stdout.write(`${(await guardStatus()).join('\n')}\n`);
+					return 0;
+				}
+				throw new Error('use: hotseat guard [status | resume [claude|codex|all] | hook]');
+			}
+			case 'logs': {
+				const days = Number.parseInt(flagValue(rest, '--days') ?? '1', 10);
+				const events = await readEvents(Number.isFinite(days) && days > 0 ? days : 1);
+				if (rest.includes('--json')) {
+					process.stdout.write(`${JSON.stringify(events)}\n`);
+					return 0;
+				}
+				if (events.length === 0) process.stdout.write('nothing logged yet\n');
+				for (const { at, kind, ...fields } of events) {
+					const detail = Object.entries(fields)
+						.map(
+							([key, value]) =>
+								`${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`,
+						)
+						.join(' ');
+					process.stdout.write(`${new Date(at).toLocaleString()}  ${kind}  ${detail}\n`);
+				}
 				return 0;
 			}
 			case 'help':

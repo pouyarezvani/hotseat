@@ -1,7 +1,9 @@
 import { join } from 'node:path';
 import { collectState, PROVIDERS } from './collect.ts';
 import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
+import { applyBrake, loadGuard } from './guard.ts';
 import { recordSwitch } from './history.ts';
+import { logEvent } from './log.ts';
 import { hotseatHome } from './paths.ts';
 import {
 	bindingRecoveryAt,
@@ -265,6 +267,8 @@ export async function tick(
 		providers?: Record<ProviderId, Provider>;
 		now?: number;
 		awake?: () => Promise<boolean>;
+		/** Runs just before the switch lock is taken; tests use it to act in between. */
+		beforeSwitchLock?: () => Promise<void>;
 	} = {},
 ): Promise<TickReport[]> {
 	const settings = await loadSettings();
@@ -297,9 +301,18 @@ export async function tick(
 	}
 	const state = await collectState(options);
 	const now = options.now ?? Date.now();
+	const brakeReports = await applyBrake(state, settings, now).catch(async (error: unknown) => {
+		await logEvent('brake-error', {
+			message: error instanceof Error ? error.message : String(error),
+		});
+		return [] as TickReport[];
+	});
+	reports.push(...brakeReports);
+	const braked = new Set(brakeReports.map((report) => report.provider));
 
 	for (const providerId of Object.keys(PROVIDERS) as ProviderId[]) {
 		if (!settings.autoProviders.includes(providerId)) continue;
+		if (braked.has(providerId)) continue;
 		const providerState = state.providers[providerId];
 		if (providerState.accounts.length < 2) continue;
 
@@ -326,8 +339,17 @@ export async function tick(
 		}
 		// Acts only if no switch was remembered, and no other login went in,
 		// since this pass began.
+		await options.beforeSwitchLock?.();
 		const held = await holdSwitch(providerId);
 		try {
+			if ((await loadGuard().catch(() => null))?.brakes[providerId]) {
+				reports.push({
+					provider: providerId,
+					outcome: 'blocked',
+					detail: 'brake: the brake came on while this pass was deciding, so it did not switch',
+				});
+				continue;
+			}
 			const latest = (await loadAutoState()).memory[providerId] ?? {};
 			if (latest.lastSwitchAt !== memory.lastSwitchAt) {
 				reports.push({

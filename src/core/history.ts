@@ -1,5 +1,6 @@
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { logEvent } from './log.ts';
 import { hotseatHome } from './paths.ts';
 import type { ProviderId } from './types.ts';
 
@@ -26,6 +27,7 @@ function historyPath(): string {
 export async function recordSwitch(entry: HistoryEntry): Promise<void> {
 	await mkdir(dirname(historyPath()), { recursive: true, mode: 0o700 });
 	await appendFile(historyPath(), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+	await logEvent('switch', { ...entry });
 }
 
 export async function readHistory(limit = 20): Promise<HistoryEntry[]> {

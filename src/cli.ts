@@ -15,7 +15,13 @@ import {
 	signInAgain,
 } from './core/enroll.ts';
 import { guardStatus, resumeBrake, runHook } from './core/guard.ts';
-import { readHistory, recordSwitch, type SwitchReason } from './core/history.ts';
+import {
+	type HistoryEntry,
+	migrateHistory,
+	readHistory,
+	recordSwitch,
+	type SwitchReason,
+} from './core/history.ts';
 import { readEvents } from './core/log.ts';
 import { listMappings, mappingFor, removeMapping, setMapping } from './core/mappings.ts';
 import {
@@ -259,6 +265,11 @@ async function showConfig(json: boolean): Promise<number> {
 	return 0;
 }
 
+function switchLine(entry: HistoryEntry): string {
+	const when = new Date(entry.at).toLocaleString();
+	return `${when}  switch  ${entry.provider}  ${entry.from ?? '-'} → ${entry.to}  (${entry.reason})`;
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
 	const [command, ...rest] = argv;
 	if (command === 'guard' && rest[0] === 'hook') {
@@ -267,6 +278,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 	}
 	try {
 		await migrateVault();
+		await migrateHistory();
 		switch (command) {
 			case undefined:
 			case 'status':
@@ -416,21 +428,6 @@ export async function main(argv: readonly string[]): Promise<number> {
 							`${active} ${providerId} ${account.slot}  ${account.alias ?? account.email}${state}\n`,
 						);
 					}
-				}
-				return 0;
-			}
-			case 'history': {
-				const asked = Number.parseInt(flagValue(rest, '--limit') ?? '20', 10);
-				const entries = await readHistory(Number.isFinite(asked) && asked > 0 ? asked : 20);
-				if (rest.includes('--json')) {
-					process.stdout.write(`${JSON.stringify(entries)}\n`);
-					return 0;
-				}
-				for (const entry of entries) {
-					const when = new Date(entry.at).toLocaleString();
-					process.stdout.write(
-						`${when}  ${entry.provider}  ${entry.from ?? '-'} → ${entry.to}  (${entry.reason})\n`,
-					);
 				}
 				return 0;
 			}
@@ -649,7 +646,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 			case 'purge': {
 				if (!rest.includes('--yes')) {
 					process.stdout.write(
-						'this deletes every account, saved login, setting and the history.\nyour Claude and Codex logins are not touched.\nrun "hotseat purge --yes" to go ahead\n',
+						'this deletes every account, saved login, setting and the logs.\nyour Claude and Codex logins are not touched.\nrun "hotseat purge --yes" to go ahead\n',
 					);
 					return 0;
 				}
@@ -672,14 +669,28 @@ export async function main(argv: readonly string[]): Promise<number> {
 				throw new Error('use: hotseat guard [status | resume [claude|codex|all] | hook]');
 			}
 			case 'logs': {
-				const days = Number.parseInt(flagValue(rest, '--days') ?? '1', 10);
-				const events = await readEvents(Number.isFinite(days) && days > 0 ? days : 1);
+				if (rest.includes('--switches')) {
+					const asked = Number.parseInt(flagValue(rest, '--limit') ?? '20', 10);
+					const entries = await readHistory(Number.isFinite(asked) && asked > 0 ? asked : 20);
+					if (rest.includes('--json')) {
+						process.stdout.write(`${JSON.stringify(entries)}\n`);
+						return 0;
+					}
+					for (const entry of entries) process.stdout.write(`${switchLine(entry)}\n`);
+					return 0;
+				}
+				const days = Number.parseInt(flagValue(rest, '--days') ?? '7', 10);
+				const events = await readEvents(Number.isFinite(days) && days > 0 ? days : 7);
 				if (rest.includes('--json')) {
 					process.stdout.write(`${JSON.stringify(events)}\n`);
 					return 0;
 				}
 				if (events.length === 0) process.stdout.write('nothing logged yet\n');
 				for (const { at, kind, ...fields } of events) {
+					if (kind === 'switch') {
+						process.stdout.write(`${switchLine({ at, ...fields } as unknown as HistoryEntry)}\n`);
+						continue;
+					}
 					const detail = Object.entries(fields)
 						.map(
 							([key, value]) =>

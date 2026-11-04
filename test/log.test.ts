@@ -42,3 +42,14 @@ describe('the event log', () => {
 		});
 	});
 });
+
+describe('reading the log back', () => {
+	test('events come back in time order even when a day file was written out of order', async () => {
+		await withHome(async () => {
+			const now = Date.now();
+			await logEvent('later', {}, now);
+			await logEvent('earlier', {}, now - 60_000);
+			expect((await readEvents(1, now)).map((event) => event.kind)).toEqual(['earlier', 'later']);
+		});
+	});
+});

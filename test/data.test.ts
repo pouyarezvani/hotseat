@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readHistory, recordSwitch } from '../src/core/history.ts';
+import { migrateHistory, readHistory, recordSwitch } from '../src/core/history.ts';
+import { dayFile, logEvent } from '../src/core/log.ts';
 import { listMappings, mappingFor, removeMapping, setMapping } from '../src/core/mappings.ts';
 import { hotseatHome } from '../src/core/paths.ts';
 import {
@@ -317,13 +318,83 @@ describe('history', () => {
 				to: 'good@example.com',
 				reason: 'manual',
 			});
-			await Bun.write(
-				join(home, 'history.jsonl'),
-				`${await Bun.file(join(home, 'history.jsonl')).text()}{"at":"broken`,
-			);
+			const file = join(home, 'logs', dayFile(Date.parse('2026-09-16T10:00:00Z')));
+			await Bun.write(file, `${await Bun.file(file).text()}{"at":"broken`);
 			const entries = await readHistory();
 			expect(entries).toHaveLength(1);
 			expect(entries[0]?.to).toBe('good@example.com');
+		});
+	});
+
+	test('switches live only in the logs, one timeline with everything else', async () => {
+		await withHome(async (home) => {
+			await logEvent(
+				'brake-trip',
+				{ provider: 'claude', points: 30 },
+				Date.parse('2026-09-16T09:00:00Z'),
+			);
+			await recordSwitch({
+				at: '2026-09-16T10:00:00Z',
+				provider: 'claude',
+				to: 'one@example.com',
+				reason: 'auto',
+			});
+			expect(await Bun.file(join(home, 'history.jsonl')).exists()).toBe(false);
+			const day = await Bun.file(
+				join(home, 'logs', dayFile(Date.parse('2026-09-16T10:00:00Z'))),
+			).text();
+			expect(
+				day
+					.split('\n')
+					.filter(Boolean)
+					.map((line) => JSON.parse(line).kind),
+			).toEqual(['brake-trip', 'switch']);
+			const switches = await readHistory();
+			expect(switches).toHaveLength(1);
+			expect(switches[0]?.to).toBe('one@example.com');
+		});
+	});
+
+	test('an old history file is moved into the logs once, then removed', async () => {
+		await withHome(async (home) => {
+			const now = Date.now();
+			const lines = [
+				{
+					at: new Date(now - 3_600_000).toISOString(),
+					provider: 'claude',
+					to: 'a@x.com',
+					reason: 'auto',
+				},
+				{
+					at: new Date(now - 60_000).toISOString(),
+					provider: 'claude',
+					from: 'a@x.com',
+					to: 'b@x.com',
+					reason: 'manual',
+				},
+			];
+			await Bun.write(
+				join(home, 'history.jsonl'),
+				`${lines.map((line) => JSON.stringify(line)).join('\n')}\n`,
+			);
+			await migrateHistory();
+			await migrateHistory();
+			expect(await Bun.file(join(home, 'history.jsonl')).exists()).toBe(false);
+			const entries = await readHistory();
+			expect(entries.map((entry) => entry.to)).toEqual(['b@x.com', 'a@x.com']);
+			expect(entries[0]).not.toHaveProperty('kind');
+		});
+	});
+
+	test('an import cut short is finished without duplicating what already moved', async () => {
+		await withHome(async (home) => {
+			const at = new Date(Date.now() - 60_000).toISOString();
+			const entry = { at, provider: 'claude', to: 'a@x.com', reason: 'auto' } as const;
+			await recordSwitch(entry);
+			await Bun.write(join(home, 'history.jsonl.importing'), `${JSON.stringify(entry)}\n`);
+			await migrateHistory();
+			expect(await readHistory()).toHaveLength(1);
+			expect(await Bun.file(join(home, 'history.jsonl.importing')).exists()).toBe(false);
 		});
 	});
 
@@ -356,6 +427,9 @@ describe('purge', () => {
 			await purge();
 			expect(await Bun.file(join(home, 'accounts.json')).exists()).toBe(false);
 			expect(await Bun.file(join(home, 'history.jsonl')).exists()).toBe(false);
+			expect(
+				await Bun.file(join(home, 'logs', dayFile(Date.parse('2026-09-16T10:00:00Z')))).exists(),
+			).toBe(false);
 			expect((await loadRegistry()).accounts).toEqual([]);
 		});
 	});

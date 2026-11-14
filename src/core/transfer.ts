@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { PROVIDERS } from './collect.ts';
-import { readJson, writeJsonAtomic } from './fs.ts';
+import { type Lock, readJson, writeJsonAtomic } from './fs.ts';
 import { hotseatHome } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry } from './registry.ts';
+import { holdRenewal } from './renew.ts';
 import { forgetSession } from './session.ts';
+import { holdSwitch } from './switch-lock.ts';
 import type { AccountRecord, Credential, Provider, ProviderId, Registry } from './types.ts';
 import { PROVIDER_IDS } from './types.ts';
 
@@ -28,6 +30,18 @@ export async function exportAccounts(path: string): Promise<number> {
 	};
 	await writeJsonAtomic(path, bundle, 0o600);
 	return registry.accounts.length;
+}
+
+/**
+ * Whether the export recorded this account's login as held by an open session.
+ * Such a login is held here too, until the agents running now are known: its
+ * holder may still be open, and the process numbers it was recorded under mean
+ * nothing on another run, so they are not copied.
+ */
+function importedHold(record: Partial<AccountRecord>): boolean {
+	return (
+		(Array.isArray(record.heldBy) && record.heldBy.length > 0) || record.holdUnsettled === true
+	);
 }
 
 /**
@@ -56,42 +70,60 @@ export async function importAccounts(path: string): Promise<number> {
 		if (!shaped) throw new Error(`${path} has an account entry that is not a hotseat account`);
 		return { record, saved: login ?? credential ?? undefined };
 	});
-	return updateRegistry((registry) => {
-		for (const { record, saved } of entries) {
-			const existing = registry.accounts.find(
-				(candidate) =>
-					candidate.provider === record.provider &&
-					candidate.email.toLowerCase() === record.email.toLowerCase(),
-			);
-			if (existing) {
-				const newerHere =
-					existing.login !== undefined &&
-					saved !== undefined &&
-					PROVIDERS[record.provider].session.compareAge(saved, existing.login) < 0;
-				if (saved && !newerHere) existing.login = structuredClone(saved);
-				continue;
+	// Logins are replaced only while no switch or renewal of the same services
+	// is under way, so none can settle or clear a hold written here.
+	const involved = PROVIDER_IDS.filter((id) =>
+		entries.some(({ record }) => record.provider === id),
+	);
+	const locks: Lock[] = [];
+	try {
+		for (const id of involved) locks.push(await holdSwitch(id));
+		for (const id of involved) locks.push(await holdRenewal(id));
+		return await updateRegistry((registry) => {
+			for (const { record, saved } of entries) {
+				const existing = registry.accounts.find(
+					(candidate) =>
+						candidate.provider === record.provider &&
+						candidate.email.toLowerCase() === record.email.toLowerCase(),
+				);
+				if (existing) {
+					const newerHere =
+						existing.login !== undefined &&
+						saved !== undefined &&
+						PROVIDERS[record.provider].session.compareAge(saved, existing.login) < 0;
+					if (saved && !newerHere) {
+						existing.login = structuredClone(saved);
+						if (importedHold(record)) existing.holdUnsettled = true;
+					}
+					continue;
+				}
+				const taken = new Set(accountsFor(registry, record.provider).map((a) => a.slot));
+				let slot = record.slot;
+				while (taken.has(slot)) slot += 1;
+				registry.accounts.push({
+					id: randomUUID(),
+					provider: record.provider,
+					email: record.email,
+					slot,
+					disabled: record.disabled === true,
+					addedAt: typeof record.addedAt === 'string' ? record.addedAt : new Date().toISOString(),
+					...(typeof record.alias === 'string' && record.alias.length > 0
+						? { alias: record.alias }
+						: {}),
+					...(typeof record.plan === 'string' && record.plan.length > 0
+						? { plan: record.plan }
+						: {}),
+					...(saved ? { login: structuredClone(saved) } : {}),
+					...(typeof record.inUseFrom === 'string' ? { inUseFrom: record.inUseFrom } : {}),
+					...(typeof record.renewedFrom === 'string' ? { renewedFrom: record.renewedFrom } : {}),
+					...(importedHold(record) ? { holdUnsettled: true } : {}),
+				});
 			}
-			const taken = new Set(accountsFor(registry, record.provider).map((a) => a.slot));
-			let slot = record.slot;
-			while (taken.has(slot)) slot += 1;
-			registry.accounts.push({
-				id: randomUUID(),
-				provider: record.provider,
-				email: record.email,
-				slot,
-				disabled: record.disabled === true,
-				addedAt: typeof record.addedAt === 'string' ? record.addedAt : new Date().toISOString(),
-				...(typeof record.alias === 'string' && record.alias.length > 0
-					? { alias: record.alias }
-					: {}),
-				...(typeof record.plan === 'string' && record.plan.length > 0 ? { plan: record.plan } : {}),
-				...(saved ? { login: structuredClone(saved) } : {}),
-				...(typeof record.inUseFrom === 'string' ? { inUseFrom: record.inUseFrom } : {}),
-				...(typeof record.renewedFrom === 'string' ? { renewedFrom: record.renewedFrom } : {}),
-			});
-		}
-		return entries.length;
-	});
+			return entries.length;
+		});
+	} finally {
+		for (const lock of locks.reverse()) await lock.release();
+	}
 }
 
 /** Exchanges two accounts' numbers, so the order matches how you think about them. */

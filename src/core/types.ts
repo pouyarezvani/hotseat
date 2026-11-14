@@ -1,7 +1,7 @@
 import type { FailureKind } from './errors.ts';
-export type ProviderId = 'claude' | 'codex';
+export type ProviderId = 'claude' | 'codex' | 'antigravity' | 'grok';
 
-export const PROVIDER_IDS: readonly ProviderId[] = ['claude', 'codex'];
+export const PROVIDER_IDS: readonly ProviderId[] = ['claude', 'codex', 'grok', 'antigravity'];
 
 export interface AccountRecord {
 	id: string;
@@ -29,6 +29,18 @@ export interface AccountRecord {
 	 * sign-in, the login in use no longer does.
 	 */
 	inUseFrom?: string;
+	/**
+	 * The agent processes that were running when this account was switched away
+	 * from, for an agent that keeps its login until it restarts. While one is
+	 * still running it may hold this login, so it is not renewed from here.
+	 */
+	heldBy?: number[];
+	/**
+	 * Set from the moment a switch away from this account begins until the
+	 * agents running after it are known. While set, any agent found running may
+	 * hold this login, so it is not renewed until those are known and gone.
+	 */
+	holdUnsettled?: boolean;
 }
 
 export interface Registry {
@@ -44,6 +56,17 @@ export interface UsageWindow {
 	label: string;
 	percent: number;
 	resetsAt?: string;
+	/**
+	 * How long this limit runs before it resets, when the service says. Without
+	 * it, the limit is told apart by its key and name.
+	 */
+	span?: '5h' | 'week' | 'month';
+	/** Left off the board because it was asked to be; still read, counted and recorded. */
+	hidden?: boolean;
+	/** When this limit will be full at the pace it has been filling, if that is before it resets. */
+	fullAt?: string;
+	/** The last week of this limit, as evenly spaced values, oldest first. */
+	trend?: number[];
 }
 
 export interface UsageSnapshot {
@@ -51,6 +74,11 @@ export interface UsageSnapshot {
 	fetchedAt: string;
 	windows: UsageWindow[];
 	spendPercent?: number;
+	/**
+	 * What a good read says when it brings no limits: the service answered, and
+	 * has none to report for this account.
+	 */
+	note?: string;
 	/** What the latest read said when it failed, with the last good numbers kept. */
 	error?: string;
 	/** What kind of failure that was. Only an auth failure counts against the login. */

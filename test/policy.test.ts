@@ -5,6 +5,8 @@ import {
 	decideTrigger,
 	everyAccountAboveThreshold,
 	headroom,
+	isFiveHourWindow,
+	isWeeklyWindow,
 	leftAccountRecovered,
 	noReturnAccount,
 	type PolicySettings,
@@ -14,6 +16,7 @@ import {
 	type SwitchMemory,
 	weeklyResetAt,
 	windowsOverThreshold,
+	windowThreshold,
 } from '../src/core/policy.ts';
 import type { AccountState, ProviderState, UsageWindow } from '../src/core/types.ts';
 
@@ -926,5 +929,35 @@ describe('an account whose login was refused', () => {
 			}).map((candidate) => candidate.id);
 		expect(rank([active, available])).toEqual(['available']);
 		expect(rank([active, available, refused])).toEqual(['available']);
+	});
+});
+
+describe('a limit that says how long it runs', () => {
+	const settings = { thresholdPercent: 90, thresholdFiveHour: 99, thresholdWeekly: 80 } as never;
+
+	test('a weekly one is held to the weekly threshold, whatever it is called', () => {
+		const window = { key: 'gemini-weekly', label: 'Gemini week', span: 'week' as const };
+		expect(isWeeklyWindow(window)).toBe(true);
+		expect(isFiveHourWindow(window)).toBe(false);
+		expect(windowThreshold(window, settings)).toBe(80);
+	});
+
+	test('a five-hour one is held to the five-hour threshold', () => {
+		const window = { key: 'gemini-5h', label: 'Gemini 5h', span: '5h' as const };
+		expect(isFiveHourWindow(window)).toBe(true);
+		expect(windowThreshold(window, settings)).toBe(99);
+	});
+
+	test('a monthly one is neither, and is held to the general threshold', () => {
+		const window = { key: 'month', label: 'month', span: 'month' as const };
+		expect(isWeeklyWindow(window)).toBe(false);
+		expect(isFiveHourWindow(window)).toBe(false);
+		expect(windowThreshold(window, settings)).toBe(90);
+	});
+
+	test('one that does not say is still told apart by its key and name', () => {
+		expect(isWeeklyWindow({ key: 'secondary', label: 'week' })).toBe(true);
+		expect(isFiveHourWindow({ key: 'primary', label: '5h' })).toBe(true);
+		expect(isWeeklyWindow({ key: 'gemini-weekly', label: 'Gemini week' })).toBe(false);
 	});
 });

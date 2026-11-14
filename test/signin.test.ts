@@ -6,7 +6,7 @@ import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from '../src
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
 import { loadCredential, storeCredential } from '../src/core/vault.ts';
 import { loginArgs } from '../src/providers/claude/login.ts';
-import { cred, type FakeProvider, fakeProviders, tokenOf } from './fake-provider.ts';
+import { cred, fakeProviders, tokenOf } from './fake-provider.ts';
 import { withHome } from './helpers.ts';
 
 const T = Date.parse('2026-09-16T12:00:00Z');
@@ -26,7 +26,7 @@ function reading(percent: number): UsageSnapshot {
 }
 
 async function world(): Promise<{
-	providers: { claude: FakeProvider; codex: FakeProvider };
+	providers: ReturnType<typeof fakeProviders>;
 	a: AccountRecord;
 	b: AccountRecord;
 }> {

@@ -13,6 +13,7 @@ import {
 	updateRegistry,
 	upsertAccount,
 } from '../src/core/registry.ts';
+import { holdRenewal } from '../src/core/renew.ts';
 import {
 	exportAccounts,
 	importAccounts,
@@ -221,6 +222,13 @@ describe('account order', () => {
 	});
 });
 
+/** A login whose age is `generation`: a higher one is a later sign-in. */
+function aged(token: string, generation: number): Record<string, unknown> {
+	const login = credential(token);
+	const oauth = login.claudeAiOauth as Record<string, unknown>;
+	return { ...login, claudeAiOauth: { ...oauth, refreshTokenExpiresAt: generation * 86_400_000 } };
+}
+
 describe('moving between machines', () => {
 	test('an export carries every account and its login back in', async () => {
 		const file = await scratchFile('accounts.json');
@@ -235,6 +243,103 @@ describe('moving between machines', () => {
 			if (!imported) throw new Error('nothing imported');
 			expect(imported.email).toBe('one@example.com');
 			expect(await loadCredential(imported)).toEqual(credential('abc'));
+		});
+	});
+
+	test('a login the export recorded as held comes back held, until the agents running now are known', async () => {
+		const file = await scratchFile('accounts.json');
+		await withHome(async () => {
+			const account = await add('one@example.com');
+			await storeCredential(account, credential('abc'));
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((entry) => entry.id === account.id);
+				if (record) record.heldBy = [7310];
+			});
+			await exportAccounts(file);
+		});
+		await withHome(async () => {
+			await importAccounts(file);
+			const [imported] = (await loadRegistry()).accounts;
+			expect(imported?.holdUnsettled).toBe(true);
+			expect(imported?.heldBy).toBeUndefined();
+		});
+	});
+
+	test.each([
+		['a list of the sessions holding it', { heldBy: [7310] }],
+		['a hold not yet settled', { holdUnsettled: true }],
+	])(
+		'a held login imported over an older one of an account already here comes back held (%s)',
+		async (_, hold) => {
+			const file = await scratchFile('accounts.json');
+			await withHome(async () => {
+				const account = await add('one@example.com');
+				await storeCredential(account, aged('newer', 2));
+				await updateRegistry((registry) => {
+					const record = registry.accounts.find((entry) => entry.id === account.id);
+					if (record) Object.assign(record, hold);
+				});
+				await exportAccounts(file);
+			});
+			await withHome(async () => {
+				const account = await add('one@example.com');
+				await storeCredential(account, aged('older', 1));
+				await importAccounts(file);
+				const [here] = (await loadRegistry()).accounts;
+				expect(here?.login).toEqual(aged('newer', 2));
+				expect(here?.holdUnsettled).toBe(true);
+				expect(here?.heldBy).toBeUndefined();
+			});
+		},
+	);
+
+	test('an account here whose login is newer than the export keeps its login and its own hold', async () => {
+		const file = await scratchFile('accounts.json');
+		await withHome(async () => {
+			const account = await add('one@example.com');
+			await storeCredential(account, aged('older', 1));
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((entry) => entry.id === account.id);
+				if (record) record.heldBy = [7310];
+			});
+			await exportAccounts(file);
+		});
+		await withHome(async () => {
+			const account = await add('one@example.com');
+			await storeCredential(account, aged('newer', 2));
+			await importAccounts(file);
+			const [here] = (await loadRegistry()).accounts;
+			expect(here?.login).toEqual(aged('newer', 2));
+			expect(here?.holdUnsettled).toBeUndefined();
+		});
+	});
+
+	test('an import waits for a renewal of the same service under way, so neither undoes the other', async () => {
+		const file = await scratchFile('accounts.json');
+		await withHome(async () => {
+			await storeCredential(await add('one@example.com'), aged('newer', 2));
+			await exportAccounts(file);
+		});
+		await withHome(async () => {
+			const renewing = await holdRenewal('claude');
+			const importing = importAccounts(file);
+			await Bun.sleep(30);
+			expect((await loadRegistry()).accounts).toEqual([]);
+			await renewing.release();
+			expect(await importing).toBe(1);
+			expect((await loadRegistry()).accounts).toHaveLength(1);
+		});
+	});
+
+	test('a login the export did not record as held comes back as it was', async () => {
+		const file = await scratchFile('accounts.json');
+		await withHome(async () => {
+			await storeCredential(await add('one@example.com'), credential('abc'));
+			await exportAccounts(file);
+		});
+		await withHome(async () => {
+			await importAccounts(file);
+			expect((await loadRegistry()).accounts[0]?.holdUnsettled).toBeUndefined();
 		});
 	});
 

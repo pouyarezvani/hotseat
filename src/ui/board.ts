@@ -1,3 +1,4 @@
+import { type ServiceStatus, worthShowing } from '../core/service-status.ts';
 import { headroom, MIN_USABLE_HEADROOM } from '../core/switch.ts';
 import type { AccountState, ProviderId, State, UsageWindow } from '../core/types.ts';
 import {
@@ -12,7 +13,12 @@ import {
 	visibleLength,
 } from './style.ts';
 
-const PROVIDER_LABEL: Record<ProviderId, string> = { claude: 'Claude', codex: 'Codex' };
+const PROVIDER_LABEL: Record<ProviderId, string> = {
+	claude: 'Claude',
+	codex: 'Codex',
+	antigravity: 'Antigravity',
+	grok: 'Grok',
+};
 
 export interface BoardOptions {
 	readonly theme: Theme;
@@ -20,6 +26,8 @@ export interface BoardOptions {
 	readonly now: number;
 	/** Which models' own limits count, mirroring the switching setting. */
 	readonly modelLimits?: string[];
+	/** What each service's status page says, shown only when it reports trouble. */
+	readonly services?: Partial<Record<ProviderId, ServiceStatus>>;
 }
 
 type Level = 'success' | 'warn' | 'danger';
@@ -64,6 +72,10 @@ export function renderBoard(state: State, options: BoardOptions): string {
 			dim(t, spare === 0 ? 'nothing to switch to' : `${spare} to switch to`),
 			'',
 		];
+		const service = options.services?.[providerId];
+		if (worthShowing(service)) {
+			lines.splice(2, 0, paint(t, service.level === 'minor' ? 'warn' : 'danger', service.summary));
+		}
 		for (const account of providerState.accounts) {
 			lines.push(...renderAccount(account, account.id === providerState.activeAccountId, options));
 		}
@@ -94,10 +106,12 @@ function renderAccount(account: AccountState, isActive: boolean, options: BoardO
 	const plan = account.plan ? `  ${paint(t, 'faint', account.plan)}` : '';
 	const head = ` ${paint(t, markColor, mark)} ${number}  ${title}${plan}`;
 
-	const windows = account.usage?.windows ?? [];
+	const windows = (account.usage?.windows ?? []).filter((window) => !window.hidden);
 	const error = account.usage?.error;
 	if (windows.length === 0) {
-		const said = error ? paint(t, 'danger', error) : dim(t, 'no reading yet');
+		const said = error
+			? paint(t, 'danger', error)
+			: dim(t, account.usage?.note ?? 'no reading yet');
 		return [head, `   ${paint(t, 'faint', glyphs.corner)} ${said}`, ''];
 	}
 	const labelWidth = Math.max(...windows.map((window) => visibleLength(window.label)));
@@ -126,7 +140,10 @@ function renderWindow(
 	const label = paint(t, 'muted', pad(window.label, labelWidth));
 	const value = paint(t, levelFor(window.percent), `${Math.round(window.percent)}%`.padStart(4));
 	const reset = untilReset(window.resetsAt, options.now);
-	const tail = reset ? `  ${paint(t, 'faint', reset)}` : '';
+	const pace = window.fullAt
+		? `  ${paint(t, 'warn', `full in ${untilReset(window.fullAt, options.now)} at this pace`)}`
+		: '';
+	const tail = `${reset ? `  ${paint(t, 'faint', reset)}` : ''}${pace}`;
 	return `   ${connector} ${label}  ${meter(t, window.percent, options.barWidth)} ${value}${tail}`;
 }
 

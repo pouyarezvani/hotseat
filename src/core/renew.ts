@@ -1,14 +1,23 @@
 import { ServiceError } from './errors.ts';
-import { acquireLock } from './fs.ts';
+import { acquireLock, type Lock } from './fs.ts';
+import { heldByOpenSession } from './hold.ts';
 import { hotseatHome } from './paths.ts';
 import { loadRegistry, updateRegistry } from './registry.ts';
 import { sessionRunning } from './session.ts';
 import { holdSwitch } from './switch-lock.ts';
-import type { AccountRecord, Credential, Provider } from './types.ts';
+import type { AccountRecord, Credential, Provider, ProviderId } from './types.ts';
 import { fingerprint, loadCredential, storeCredentialUnless } from './vault.ts';
 
 /** Long enough to wait out another process's renewal, which may itself wait on the service. */
 const RENEW_LOCK_WAIT_MS = 45_000;
+
+/**
+ * Holds the right to renew a service's saved logins, or to replace one. Taken
+ * after the switch lock, never before.
+ */
+export function holdRenewal(provider: ProviderId): Promise<Lock> {
+	return acquireLock(hotseatHome(), RENEW_LOCK_WAIT_MS, `renew-${provider}.lock`);
+}
 
 /** A renewal the service refused, naming the exact copy it refused. */
 export class RenewalFailed extends ServiceError {
@@ -38,8 +47,9 @@ export class RenewalFailed extends ServiceError {
 export async function renewSaved(
 	provider: Provider,
 	account: Pick<AccountRecord, 'id' | 'email'>,
+	options: { forSwitch?: boolean } = {},
 ): Promise<Credential | null> {
-	const lock = await acquireLock(hotseatHome(), RENEW_LOCK_WAIT_MS, `renew-${provider.id}.lock`);
+	const lock = await holdRenewal(provider.id);
 	try {
 		const stored = await loadCredential(account);
 		if (!stored) return null;
@@ -51,6 +61,17 @@ export async function renewSaved(
 		}
 		if (await sessionRunning(provider, account)) {
 			throw new Error(`${account.email} is open in another terminal (hotseat run)`);
+		}
+		// An agent that keeps its login until it restarts may still hold this
+		// one after a switch away from it. Renewing it here would spend the
+		// token that session renews with, so it is used as it is: read with
+		// while its key still works, and put back in use unrenewed.
+		if (await heldByOpenSession(provider, account)) {
+			const expires = provider.expiresAt?.(stored);
+			if (options.forSwitch || expires === undefined || expires > Date.now()) return stored;
+			throw new Error(
+				`${account.email} may still be in use by an open ${provider.displayName} session - it is renewed once that closes`,
+			);
 		}
 		let renewed: Credential;
 		try {
@@ -90,7 +111,7 @@ export async function renewInstalled(
 ): Promise<Credential | null> {
 	const held = await holdSwitch(provider.id);
 	try {
-		const lock = await acquireLock(hotseatHome(), RENEW_LOCK_WAIT_MS, `renew-${provider.id}.lock`);
+		const lock = await holdRenewal(provider.id);
 		try {
 			const installed = await provider.readAgentCredential();
 			if (!installed || fingerprint(installed) !== fingerprint(named)) return installed;

@@ -108,7 +108,7 @@ describe('running one terminal as another account', () => {
 			const session = await prepareSession(claude, b);
 			await claude.session.writeLogin(session.dir, cred('B-rotated', 300));
 			claude.identities.set('B-rotated', { email: 'b@example.com' });
-			await activate('claude', b.id, { providers: { claude, codex: fakeProviders().codex } });
+			await activate('claude', b.id, { providers: { ...fakeProviders(), claude } });
 			expect(claude.installed).toEqual(cred('B-rotated', 300));
 			expect(await loadCredential(b)).toEqual(cred('B-rotated', 300));
 		});

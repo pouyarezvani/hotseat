@@ -1,5 +1,7 @@
+import { AntigravityProvider } from '../providers/antigravity/index.ts';
 import { ClaudeProvider } from '../providers/claude/index.ts';
 import { CodexProvider } from '../providers/codex/index.ts';
+import { GrokProvider } from '../providers/grok/index.ts';
 import { classify, ServiceError } from './errors.ts';
 import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
 import { hotseatHome, usageCachePath } from './paths.ts';
@@ -26,6 +28,8 @@ import { fullyAwake } from './wake.ts';
 export const PROVIDERS: Record<ProviderId, Provider> = {
 	claude: new ClaudeProvider(),
 	codex: new CodexProvider(),
+	grok: new GrokProvider(),
+	antigravity: new AntigravityProvider(),
 };
 
 /**
@@ -280,8 +284,17 @@ export function plainError(error: unknown): string {
 }
 
 /** The account as it may be shown or written anywhere: without its login. */
-function shown(record: AccountRecord): Omit<AccountRecord, 'login' | 'renewedFrom' | 'inUseFrom'> {
-	const { login: _login, renewedFrom: _renewedFrom, inUseFrom: _inUseFrom, ...rest } = record;
+function shown(
+	record: AccountRecord,
+): Omit<AccountRecord, 'login' | 'renewedFrom' | 'inUseFrom' | 'heldBy' | 'holdUnsettled'> {
+	const {
+		login: _login,
+		renewedFrom: _renewedFrom,
+		inUseFrom: _inUseFrom,
+		heldBy: _heldBy,
+		holdUnsettled: _holdUnsettled,
+		...rest
+	} = record;
 	return rest;
 }
 
@@ -488,6 +501,12 @@ export async function collectState(
 				const attempt = await readUsage(provider, record, live, now, cached?.deadLogin, awake);
 				touched.add(record.id);
 				const usage = attempt.usage;
+				if (usage.windows.length === 0 && usage.note !== undefined && !attempt.failure) {
+					// The service answered and has no limit to report: a good read
+					// with nothing to draw, not a failed one.
+					cache.entries[record.id] = { snapshot: usage, fetchedAtMs: now, attemptedAtMs: now };
+					return { ...shown(record), usage };
+				}
 				if (usage.windows.length > 0 && !attempt.failure) {
 					if (
 						good &&

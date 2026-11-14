@@ -9,6 +9,7 @@ import {
 	loadSettings,
 	resetSetting,
 	SETTING_KEYS,
+	setListMember,
 	setSetting,
 } from '../src/core/settings.ts';
 import { withHome } from './helpers.ts';
@@ -115,6 +116,81 @@ describe('rejecting bad values', () => {
 	});
 });
 
+describe('the services named in the menu bar', () => {
+	test('Claude and Codex by default, and not a service that is only shown', () => {
+		expect(DEFAULTS.titleProviders).toEqual(['claude', 'codex']);
+	});
+
+	test('any known service may be chosen', () => {
+		expect(coerce('titleProviders', 'antigravity, claude')).toEqual(['antigravity', 'claude']);
+	});
+
+	test('the last one cannot be taken out, and the refusal says why', () => {
+		expect(() => coerce('titleProviders', '')).toThrow('at least one service');
+		expect(() => coerce('titleProviders', ' , ')).toThrow('at least one service');
+	});
+
+	test('a name that is not a service is refused, naming the ones that are', () => {
+		expect(() => coerce('titleProviders', 'claude,gemini')).toThrow(
+			'claude, codex, grok, antigravity',
+		);
+	});
+
+	test('an empty or unknown list on disk falls back to the default rather than an empty bar', async () => {
+		await withHome(async () => {
+			await Bun.write(settingsPath(), JSON.stringify({ version: 1, titleProviders: [] }));
+			expect((await loadSettings()).titleProviders).toEqual(['claude', 'codex']);
+			await Bun.write(settingsPath(), JSON.stringify({ version: 1, titleProviders: ['nope'] }));
+			expect((await loadSettings()).titleProviders).toEqual(['claude', 'codex']);
+			await Bun.write(
+				settingsPath(),
+				JSON.stringify({ version: 1, titleProviders: ['nope', 'codex'] }),
+			);
+			expect((await loadSettings()).titleProviders).toEqual(['codex']);
+		});
+	});
+});
+
+describe('the services looked for by themselves', () => {
+	test('every service, to begin with', () => {
+		expect(DEFAULTS.autoDetectProviders).toEqual(['claude', 'codex', 'grok', 'antigravity']);
+	});
+
+	test('all of them may be turned off, unlike the menu bar, which keeps one', () => {
+		expect(coerce('autoDetectProviders', '')).toEqual([]);
+	});
+
+	test('a name that is not a service is refused', () => {
+		expect(() => coerce('autoDetectProviders', 'claude,gemini')).toThrow('gemini');
+	});
+});
+
+describe('adding a name to a list, or taking one out', () => {
+	test('two changes made at once both survive', async () => {
+		await withHome(async () => {
+			await Promise.all([
+				setListMember('autoDetectProviders', 'grok', false),
+				setListMember('autoDetectProviders', 'antigravity', false),
+			]);
+			expect((await loadSettings()).autoDetectProviders).toEqual(['claude', 'codex']);
+		});
+	});
+
+	test('a name put back goes in its usual place, and only once', async () => {
+		await withHome(async () => {
+			await setListMember('autoDetectProviders', 'codex', false);
+			await setListMember('autoDetectProviders', 'codex', true);
+			await setListMember('autoDetectProviders', 'codex', true);
+			expect((await loadSettings()).autoDetectProviders).toEqual([
+				'claude',
+				'codex',
+				'grok',
+				'antigravity',
+			]);
+		});
+	});
+});
+
 describe('surviving a damaged settings file', () => {
 	test('an out-of-range number on disk is clamped rather than obeyed', async () => {
 		await withHome(async () => {
@@ -162,7 +238,7 @@ describe('a settings file with the wrong shapes', () => {
 				JSON.stringify({ autoProviders: 5, autoModelLimits: ['fable', 3, null] }),
 			);
 			const settings = await loadSettings();
-			expect(settings.autoProviders).toEqual(['claude', 'codex']);
+			expect(settings.autoProviders).toEqual(DEFAULTS.autoProviders);
 			expect(settings.autoModelLimits).toEqual(['fable']);
 		});
 	});

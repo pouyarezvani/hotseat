@@ -1,4 +1,5 @@
 import { liveIdentity, PROVIDERS } from './collect.ts';
+import { heldByOpenSession } from './hold.ts';
 import { MIN_USABLE_HEADROOM, headroom as policyHeadroom, rankCandidates } from './policy.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
 import { putInUse, renewSaved } from './renew.ts';
@@ -93,13 +94,26 @@ export function nextAvailable(
 export async function activate(
 	providerId: ProviderId,
 	accountId: string,
-	options: { providers?: Record<ProviderId, Provider>; now?: number } = {},
+	options: {
+		providers?: Record<ProviderId, Provider>;
+		now?: number;
+		/** Asked for by the person, rather than chosen by the automatic pass. */
+		manual?: boolean;
+	} = {},
 ): Promise<SwitchResult> {
 	const provider = (options.providers ?? PROVIDERS)[providerId];
 	const now = options.now ?? Date.now();
 	let registry = await loadRegistry();
 	const target = accountsFor(registry, providerId).find((account) => account.id === accountId);
 	if (!target) throw new Error(`no ${provider.displayName} account with id ${accountId}`);
+
+	// A session still open on this account's login would be signed out the
+	// first time either copy renews it, so only a person moves back to it.
+	if (!options.manual && (await heldByOpenSession(provider, target))) {
+		throw new Error(
+			`${target.email} may still be in use by an open ${provider.displayName} session - not moving to it automatically`,
+		);
+	}
 
 	// A session running as this account may hold a newer token than the saved
 	// copy; installing the older one would fail at its next refresh.
@@ -141,7 +155,8 @@ export async function activate(
 		savedLogin = { email: previous.email, slot: previous.slot };
 	}
 
-	const running = await provider.runningProcesses().catch(() => []);
+	const scanned = await provider.runningProcesses().catch(() => null);
+	const running = scanned ?? [];
 	const base = {
 		provider: providerId,
 		to: target.email,
@@ -167,7 +182,30 @@ export async function activate(
 		);
 	}
 
-	const refreshed = await renewSaved(provider, target);
+	// An agent that keeps its login until it restarts goes on using the
+	// account left. Without knowing which sessions are open, that login could
+	// be renewed out from under one of them.
+	const keepsLogin = !provider.liveSwap && live !== null && previous !== undefined;
+	if (keepsLogin && scanned === null) {
+		throw new Error(
+			`could not tell whether ${provider.displayName} is running - not switching, so nothing is lost; try again`,
+		);
+	}
+
+	// Marked before anything else can take long, and kept until the agents
+	// running after the switch are known: one may start, and read the login
+	// left, at any moment until the new login is in.
+	const left = keepsLogin ? previous?.id : undefined;
+	if (left) {
+		await updateRegistry((current) => {
+			const record = current.accounts.find((account) => account.id === left);
+			if (!record) return;
+			record.holdUnsettled = true;
+			if (running.length > 0) record.heldBy = running.map((process) => process.pid);
+		});
+	}
+
+	const refreshed = await renewSaved(provider, target, { forSwitch: true });
 	if (!refreshed) throw new Error(`no saved login for ${target.email} - it was removed`);
 
 	// The switch stops if the login in use changed since it was first read.
@@ -189,6 +227,22 @@ export async function activate(
 			'the login in use changed while switching - not switching, so nothing is lost; try again',
 		);
 	}
+	// Every agent running now may have read the login left. When they cannot
+	// be listed the hold stays unsettled, and the next renewal attempt settles it.
+	const after = left ? await provider.runningProcesses().catch(() => null) : null;
+	if (left && after !== null) {
+		await updateRegistry((current) => {
+			const record = current.accounts.find((account) => account.id === left);
+			if (!record) return;
+			const holders = [
+				...new Set([...(record.heldBy ?? []), ...after.map((process) => process.pid)]),
+			];
+			if (holders.length > 0) record.heldBy = holders;
+			else delete record.heldBy;
+			delete record.holdUnsettled;
+		});
+	}
+
 	if (provider.recordIdentity) {
 		const who = await provider.identify(refreshed).catch(() => ({ email: target.email }));
 		await provider.recordIdentity(who).catch(() => undefined);
@@ -197,7 +251,11 @@ export async function activate(
 	await updateRegistry((current) => {
 		current.active[providerId] = target.id;
 		const record = current.accounts.find((account) => account.id === target.id);
-		if (record) record.lastActivatedAt = new Date(now).toISOString();
+		if (record) {
+			record.lastActivatedAt = new Date(now).toISOString();
+			delete record.heldBy;
+			delete record.holdUnsettled;
+		}
 	});
 
 	return {

@@ -189,6 +189,16 @@ export class FakeProvider implements Provider {
 	}
 }
 
-export function fakeProviders(): { claude: FakeProvider; codex: FakeProvider } {
-	return { claude: new FakeProvider('claude'), codex: new FakeProvider('codex') };
+export function fakeProviders(): {
+	claude: FakeProvider;
+	codex: FakeProvider;
+	antigravity: FakeProvider;
+	grok: FakeProvider;
+} {
+	return {
+		claude: new FakeProvider('claude'),
+		codex: new FakeProvider('codex'),
+		grok: new FakeProvider('grok'),
+		antigravity: new FakeProvider('antigravity'),
+	};
 }

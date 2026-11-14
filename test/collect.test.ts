@@ -35,7 +35,7 @@ function reading(
 }
 
 interface World {
-	providers: { claude: FakeProvider; codex: FakeProvider };
+	providers: ReturnType<typeof fakeProviders>;
 	a: AccountRecord;
 	b: AccountRecord;
 }

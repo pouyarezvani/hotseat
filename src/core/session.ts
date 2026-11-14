@@ -1,6 +1,8 @@
 import { lstat, mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { markRunning } from '../providers/process.ts';
 import { orIfMissing } from './fs.ts';
+import { heldByOpenSession } from './hold.ts';
 import { hotseatHome } from './paths.ts';
 import { loadRegistry, updateRegistry } from './registry.ts';
 import { holdSwitch } from './switch-lock.ts';
@@ -177,14 +179,16 @@ export function needsSession(state: ProviderState, accountId: string): boolean {
 }
 
 /**
- * Makes the account's folder ready: links the shared setup into it, puts the
- * freshest login where the agent will look, and seeds whatever else the
- * agent needs to start there. Returns the environment that points the agent
- * at it.
+ * Gets a folder ready for the agent to run as this account in one terminal,
+ * and records `reserveFor` as running there before anything else can switch.
+ * Done under the switch lock, so no switch can make the account the one in
+ * use, or leave its login held by an open session, between the checks here and
+ * the login being copied in.
  */
 export async function prepareSession(
 	provider: Provider,
 	account: Pick<AccountRecord, 'id' | 'email'>,
+	options: { reserveFor?: number } = {},
 ): Promise<{ dir: string; env: Record<string, string> }> {
 	const dir = sessionDir(provider, account);
 	await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -199,10 +203,28 @@ export async function prepareSession(
 		await symlink(await realpath(source), target);
 	}
 
-	const login = await freshestLogin(provider, account);
-	if (!login) throw new Error(`no saved login for ${account.email}`);
-	await provider.session.writeLogin(dir, login);
-	await provider.session.seed?.(dir);
+	const held = await holdSwitch(provider.id);
+	try {
+		if ((await loadRegistry()).active[provider.id] === account.id) {
+			throw new Error(
+				`${account.email} became the account in use - run the command again to use the shared login`,
+			);
+		}
+		// A second copy of a login an open session still holds would sign one
+		// of the two out the first time either renews it.
+		if (await heldByOpenSession(provider, account)) {
+			throw new Error(
+				`${account.email} may still be in use by an open ${provider.displayName} session - close it, or switch back to ${account.email}, before running it on its own`,
+			);
+		}
+		const login = await freshestLogin(provider, account);
+		if (!login) throw new Error(`no saved login for ${account.email}`);
+		await provider.session.writeLogin(dir, login);
+		await provider.session.seed?.(dir);
+		if (options.reserveFor !== undefined) await markRunning(dir, options.reserveFor);
+	} finally {
+		await held.release();
+	}
 	return { dir, env: { [provider.session.homeVariable]: dir } };
 }
 

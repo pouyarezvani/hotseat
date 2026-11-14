@@ -18,6 +18,11 @@ const GROUPS: Group[] = [
 			{ usage: 'list', what: 'one line per account' },
 			{ usage: 'title', what: 'one-line summary, for a shell prompt' },
 			{
+				usage: 'statusline [service]',
+				what: "one line for an agent's status bar; reads no service",
+			},
+			{ usage: 'statusline install', what: "put that line in Claude Code's status bar" },
+			{
 				usage: 'logs [--days N]',
 				what: 'everything hotseat did: switches, brakes, refused helpers (kept 30 days)',
 			},
@@ -107,7 +112,7 @@ export function renderHelp(): string {
 	}
 	lines.push(
 		'',
-		dim(t, `${glyphs.bullet} a service is claude or codex`),
+		dim(t, `${glyphs.bullet} a service is claude, codex, antigravity or grok`),
 		dim(t, `${glyphs.bullet} an account is its number, its email, or the name you gave it`),
 		'',
 	);

@@ -17,7 +17,7 @@ import { setSetting } from '../src/core/settings.ts';
 import { holdSwitch } from '../src/core/switch-lock.ts';
 import type { AccountRecord, State, UsageSnapshot } from '../src/core/types.ts';
 import { storeCredential } from '../src/core/vault.ts';
-import { cred, type FakeProvider, fakeProviders, tokenOf } from './fake-provider.ts';
+import { cred, fakeProviders, tokenOf } from './fake-provider.ts';
 import { withHome } from './helpers.ts';
 
 const MIN = 60_000;
@@ -315,9 +315,117 @@ function stateWith(percent: number, fetchedAt: number): State {
 				],
 			},
 			codex: { accounts: [] },
+			antigravity: { accounts: [] },
+			grok: { accounts: [] },
 		},
 	};
 }
+
+function antigravityWith(gemini: number, argon: number, fetchedAt: number): State {
+	const state = stateWith(0, fetchedAt);
+	state.providers.claude.accounts = [];
+	state.providers.antigravity = {
+		activeAccountId: 'acct-g',
+		accounts: [
+			{
+				id: 'acct-g',
+				provider: 'antigravity',
+				email: 'g@example.com',
+				slot: 1,
+				disabled: false,
+				addedAt: '2026-01-01T00:00:00Z',
+				usage: {
+					fetchedAt: new Date(fetchedAt).toISOString(),
+					windows: [
+						{ key: 'gemini-5h', label: 'Gemini 5h', span: '5h', percent: 99, resetsAt: WEEK },
+						{
+							key: 'gemini-weekly',
+							label: 'Gemini week',
+							span: 'week',
+							percent: gemini,
+							resetsAt: WEEK,
+						},
+						{
+							key: 'argon-weekly',
+							label: 'Gemini 4 Argon week',
+							span: 'week',
+							percent: argon,
+							resetsAt: WEEK,
+						},
+					],
+				},
+			},
+		],
+	};
+	return state;
+}
+
+describe('samples kept from before every weekly limit was sampled', () => {
+	test('stay in the same series, so a rise across the upgrade still counts', async () => {
+		await withHome(async () => {
+			const settings = await setSetting('brakePoints', '25');
+			const t0 = AT('09:00');
+			await updateGuard((guard) => {
+				guard.samples.push({
+					t: t0,
+					provider: 'claude',
+					accountId: 'acct-a',
+					percent: 10,
+					resetsAt: WEEK,
+				});
+			});
+			const reports = await applyBrake(stateWith(40, t0 + 30 * MIN), settings, t0 + 30 * MIN);
+			expect(reports).toEqual([
+				expect.objectContaining({ provider: 'claude', outcome: 'blocked' }),
+			]);
+			expect((await loadGuard()).brakes.claude?.points).toBe(30);
+		});
+	});
+});
+
+describe('a service with weekly limits under other names', () => {
+	test('each weekly limit feeds the brake, whatever it is called', async () => {
+		await withHome(async () => {
+			const settings = await setSetting('brakePoints', '25');
+			const t0 = AT('09:00');
+			await applyBrake(antigravityWith(10, 0, t0), settings, t0);
+			const reports = await applyBrake(
+				antigravityWith(95, 0, t0 + 30 * MIN),
+				settings,
+				t0 + 30 * MIN,
+			);
+			expect(reports).toEqual([
+				expect.objectContaining({ provider: 'antigravity', outcome: 'blocked' }),
+			]);
+			expect((await loadGuard()).brakes.antigravity?.points).toBe(85);
+		});
+	});
+
+	test('two weekly limits rising together count once, as the one that rose most', async () => {
+		await withHome(async () => {
+			const settings = await setSetting('brakePoints', '50');
+			const t0 = AT('09:00');
+			await applyBrake(antigravityWith(10, 10, t0), settings, t0);
+			expect(
+				await applyBrake(antigravityWith(40, 30, t0 + 30 * MIN), settings, t0 + 30 * MIN),
+			).toEqual([]);
+			expect(burnPoints((await loadGuard()).samples, 'antigravity', t0 - MIN, t0 + 30 * MIN)).toBe(
+				30,
+			);
+		});
+	});
+
+	test('a five-hour limit, however full, is not counted as weekly spending', async () => {
+		await withHome(async () => {
+			const settings = await setSetting('brakePoints', '25');
+			const t0 = AT('09:00');
+			await applyBrake(antigravityWith(10, 0, t0), settings, t0);
+			expect(
+				await applyBrake(antigravityWith(11, 0, t0 + 30 * MIN), settings, t0 + 30 * MIN),
+			).toEqual([]);
+		});
+	});
+});
 
 describe('the brake', () => {
 	test('trips at the threshold, reports, and clears itself once spending calms down', async () => {
@@ -406,7 +514,7 @@ function reading(percent: number): UsageSnapshot {
 }
 
 async function world(): Promise<{
-	providers: { claude: FakeProvider; codex: FakeProvider };
+	providers: ReturnType<typeof fakeProviders>;
 	b: AccountRecord;
 }> {
 	const providers = fakeProviders();

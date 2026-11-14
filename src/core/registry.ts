@@ -81,6 +81,10 @@ function readEntry(
 			: {}),
 		...(typeof entry.renewedFrom === 'string' ? { renewedFrom: entry.renewedFrom } : {}),
 		...(typeof entry.inUseFrom === 'string' ? { inUseFrom: entry.inUseFrom } : {}),
+		...(Array.isArray(entry.heldBy) && entry.heldBy.length > 0
+			? { heldBy: entry.heldBy.filter((pid): pid is number => Number.isInteger(pid)) }
+			: {}),
+		...(entry.holdUnsettled === true ? { holdUnsettled: true } : {}),
 		...(login ? { login } : {}),
 	};
 	return { record, changed };

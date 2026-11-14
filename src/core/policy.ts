@@ -106,13 +106,14 @@ export function headroom(account: AccountState, modelLimits: string[]): number |
 }
 
 /** The account-wide short window, however the service names it. */
-export function isFiveHourWindow(window: Pick<UsageWindow, 'key' | 'label'>): boolean {
+export function isFiveHourWindow(window: Pick<UsageWindow, 'key' | 'label' | 'span'>): boolean {
+	if (window.span !== undefined) return window.span === '5h';
 	return window.key === 'five_hour' || (!isModelWindow(window) && !isWeeklyWindow(window));
 }
 
 /** The limit that applies to one window: its own, when set, else the general one. */
 export function windowThreshold(
-	window: Pick<UsageWindow, 'key' | 'label'>,
+	window: Pick<UsageWindow, 'key' | 'label' | 'span'>,
 	settings: PolicySettings,
 ): number {
 	if (isModelWindow(window)) return settings.thresholdPercent;
@@ -198,7 +199,8 @@ function parseReset(iso: string | undefined, now: number): number | undefined {
 }
 
 /** The account-wide weekly window, whichever service is reporting it. */
-export function isWeeklyWindow(window: Pick<UsageWindow, 'key' | 'label'>): boolean {
+export function isWeeklyWindow(window: Pick<UsageWindow, 'key' | 'label' | 'span'>): boolean {
+	if (window.span !== undefined) return window.span === 'week';
 	return window.key === 'seven_day' || (!isModelWindow(window) && window.label === 'week');
 }
 

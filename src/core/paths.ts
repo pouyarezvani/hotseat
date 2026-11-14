@@ -34,6 +34,11 @@ export function logDir(): string {
 	return join(hotseatHome(), 'logs');
 }
 
+/** The board as last worked out, for a status line to read. */
+export function snapshotPath(): string {
+	return join(hotseatHome(), 'statusline.json');
+}
+
 export function guardPath(): string {
 	return join(hotseatHome(), 'guard.json');
 }

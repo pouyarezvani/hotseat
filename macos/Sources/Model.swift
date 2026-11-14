@@ -5,14 +5,41 @@ struct UsageWindow: Decodable {
 	let label: String
 	let percent: Double
 	let resetsAt: String?
+	/// Left off the board because it was asked to be; still counted toward
+	/// what can be switched to.
+	var hidden: Bool? = nil
+	/// When this limit will be full at the pace it has been filling, if that is before it resets.
+	var fullAt: String? = nil
+	/// The last week of this limit as evenly spaced values, oldest first.
+	var trend: [Double]? = nil
+}
+
+/// What a service's own status page says about it.
+struct ServiceStatus: Decodable {
+	let level: String
+	let summary: String
+	let url: String
+	/// Whether the page lists this agent on its own, or speaks for a whole company.
+	var scoped: Bool? = nil
+
+	var isTrouble: Bool { level != "ok" }
+	/// Trouble worth a tag: any in the agent's own entry, and only an outage on
+	/// a page that covers a whole company, where a small issue is usually
+	/// about some other product.
+	var isShown: Bool { isTrouble && (scoped == true || level == "major" || level == "critical") }
 }
 
 struct UsageSnapshot: Decodable {
 	let fetchedAt: String
 	let windows: [UsageWindow]
 	let error: String?
+	/// What a good read says when it brings no limits to show.
+	var note: String? = nil
 	/// "auth" when the service refused the login, which no switch can use.
 	var errorKind: String? = nil
+
+	/// The limits that are drawn: every one but those asked to be left off.
+	var shown: [UsageWindow] { windows.filter { $0.hidden != true } }
 }
 
 struct Account: Decodable {
@@ -29,7 +56,7 @@ struct Account: Decodable {
 	static let minimumUsableHeadroom: Double = 5
 
 	var displayName: String { alias ?? email }
-	var worstPercent: Double { usage?.windows.map(\.percent).max() ?? 0 }
+	var worstPercent: Double { usage?.shown.map(\.percent).max() ?? 0 }
 
 	/// The names of the model-scoped limits this account reports, for the
 	/// settings menu to offer as choices.
@@ -57,6 +84,18 @@ struct Account: Decodable {
 struct ProviderState: Decodable {
 	var activeAccountId: String?
 	let accounts: [Account]
+
+	/// How many accounts could be switched to right now, by the same rule the
+	/// switcher applies, so the number never contradicts what choosing an
+	/// account would do. The one in use is not somewhere to switch.
+	func switchableCount(countingModels models: [String]) -> Int {
+		accounts.filter { account in
+			guard !account.disabled, account.id != activeAccountId else { return false }
+			guard account.usage?.errorKind != "auth" else { return false }
+			guard let room = account.headroom(countingModels: models) else { return false }
+			return room >= Account.minimumUsableHeadroom
+		}.count
+	}
 }
 
 /// Every field has a default, and decoding never fails on a missing one. A
@@ -74,10 +113,15 @@ struct Settings: Decodable {
 	/// A limit of its own for the weekly window; 0 means the general one applies.
 	var autoThresholdWeekly = 0.0
 	var autoModelLimits: [String] = []
+	/// Which services appear in the menu bar text. Never empty.
+	var titleProviders: [String] = ["claude", "codex"]
+	/// Which services hotseat adds by itself when it finds one signed in.
+	var autoDetectProviders: [String] = Board.providerOrder
 
 	private enum Keys: String, CodingKey {
 		case titleCompact, titleShowAccount, titlePercentage, titleShowModelLimits
 		case titleShortenEmail, autoThresholdPercent, autoThresholdFiveHour, autoThresholdWeekly, autoModelLimits
+		case titleProviders, autoDetectProviders
 	}
 
 	init() {}
@@ -99,6 +143,15 @@ struct Settings: Decodable {
 			copy.autoModelLimits = value.split(separator: ",")
 				.map { $0.trimmingCharacters(in: .whitespaces) }
 				.filter { !$0.isEmpty }
+		case "autoDetectProviders":
+			copy.autoDetectProviders = value.split(separator: ",")
+				.map { $0.trimmingCharacters(in: .whitespaces) }
+				.filter { !$0.isEmpty }
+		case "titleProviders":
+			let chosen = value.split(separator: ",")
+				.map { $0.trimmingCharacters(in: .whitespaces) }
+				.filter { !$0.isEmpty }
+			if !chosen.isEmpty { copy.titleProviders = chosen }
 		default: break
 		}
 		return copy
@@ -119,6 +172,10 @@ struct Settings: Decodable {
 		autoThresholdWeekly =
 			try c.decodeIfPresent(Double.self, forKey: .autoThresholdWeekly) ?? autoThresholdWeekly
 		autoModelLimits = try c.decodeIfPresent([String].self, forKey: .autoModelLimits) ?? autoModelLimits
+		autoDetectProviders =
+			try c.decodeIfPresent([String].self, forKey: .autoDetectProviders) ?? autoDetectProviders
+		let shown = try c.decodeIfPresent([String].self, forKey: .titleProviders) ?? titleProviders
+		if !shown.isEmpty { titleProviders = shown }
 	}
 }
 
@@ -160,14 +217,17 @@ struct Board: Decodable {
 	var providers: [String: ProviderState]
 	/// Missing settings fall back to defaults rather than failing the board.
 	var settings: Settings
+	/// What each service's status page says; absent for one that has none.
+	var services: [String: ServiceStatus] = [:]
 
-	private enum Keys: String, CodingKey { case updatedAt, providers, settings }
+	private enum Keys: String, CodingKey { case updatedAt, providers, settings, services }
 
 	init(from decoder: Decoder) throws {
 		let c = try decoder.container(keyedBy: Keys.self)
 		updatedAt = try c.decode(String.self, forKey: .updatedAt)
 		providers = try c.decode([String: ProviderState].self, forKey: .providers)
 		settings = try c.decodeIfPresent(Settings.self, forKey: .settings) ?? Settings()
+		services = (try? c.decodeIfPresent([String: ServiceStatus].self, forKey: .services)) ?? [:]
 	}
 
 	/// The board as it will look once a switch to this account lands. Shown the
@@ -189,8 +249,10 @@ struct Board: Decodable {
 		return copy
 	}
 
-	static let providerOrder = ["claude", "codex"]
-	static let providerTitles = ["claude": "Claude", "codex": "Codex"]
+	static let providerOrder = ["claude", "codex", "grok", "antigravity"]
+	static let providerTitles = [
+		"claude": "Claude", "codex": "Codex", "antigravity": "Antigravity", "grok": "Grok",
+	]
 
 	var orderedProviders: [(id: String, title: String, state: ProviderState)] {
 		Board.providerOrder.compactMap { id in
@@ -227,7 +289,7 @@ enum TitleBuilder {
 	static func spans(for board: Board) -> [TitleSpan] {
 		let settings = board.settings
 		var spans: [TitleSpan] = []
-		for entry in board.orderedProviders {
+		for entry in board.orderedProviders where settings.titleProviders.contains(entry.id) {
 			guard let active = entry.state.accounts.first(where: { $0.id == entry.state.activeAccountId })
 			else { continue }
 			if !spans.isEmpty {
@@ -243,7 +305,7 @@ enum TitleBuilder {
 				spans.append(TitleSpan(text: separator + name, percent: nil, provider: nil))
 			}
 			if settings.titlePercentage == "none" { continue }
-			let all = active.usage?.windows ?? []
+			let all = active.usage?.shown ?? []
 			let windows = settings.titleShowModelLimits
 				? all : all.filter { !$0.key.hasPrefix("weekly_scoped:") }
 			guard let worst = windows.map(\.percent).max() else { continue }
@@ -328,11 +390,4 @@ enum Countdown {
 		}
 		return nil
 	}
-}
-
-/// A menu item's payload: what comes before its first bar, and everything
-/// after it, which may hold bars of its own, as an account id may.
-func menuPayload(_ payload: String) -> [String] {
-	guard let bar = payload.firstIndex(of: "|") else { return [payload] }
-	return [String(payload[..<bar]), String(payload[payload.index(after: bar)...])]
 }

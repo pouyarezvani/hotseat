@@ -2,8 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
 import { forgivenNames, rememberManualSwitch, tick } from '../src/core/auto.ts';
 import { collectState } from '../src/core/collect.ts';
-import { ServiceError } from '../src/core/errors.ts';
+import { classify, ServiceError } from '../src/core/errors.ts';
 import { readHistory } from '../src/core/history.ts';
+import { heldByOpenSession } from '../src/core/hold.ts';
 import {
 	accountsFor,
 	loadRegistry,
@@ -11,12 +12,14 @@ import {
 	updateRegistry,
 	upsertAccount,
 } from '../src/core/registry.ts';
+import { renewSaved } from '../src/core/renew.ts';
 import { prepareSession, sessionDir } from '../src/core/session.ts';
 import { loadSettings, setSetting } from '../src/core/settings.ts';
 import { activate } from '../src/core/switch.ts';
 import { holdSwitch } from '../src/core/switch-lock.ts';
 import type { AccountRecord, UsageSnapshot } from '../src/core/types.ts';
 import { dropCredential, loadCredential, storeCredential } from '../src/core/vault.ts';
+import { clearRunMark, markedRunning } from '../src/providers/process.ts';
 import { cred, type FakeProvider, fakeProviders, tokenOf } from './fake-provider.ts';
 import { withHome } from './helpers.ts';
 
@@ -43,7 +46,7 @@ function reading(percent: number, resetsInHours = 24): UsageSnapshot {
 }
 
 async function world(): Promise<{
-	providers: { claude: FakeProvider; codex: FakeProvider };
+	providers: ReturnType<typeof fakeProviders>;
 	a: AccountRecord;
 	b: AccountRecord;
 }> {
@@ -67,6 +70,368 @@ async function world(): Promise<{
 	claude.installed = cred('A');
 	return { providers, a, b };
 }
+
+/** A held account's saved login comes back as it is: nothing renews it. */
+async function expectHeld(provider: FakeProvider, account: AccountRecord): Promise<void> {
+	const before = provider.calls.refresh;
+	expect(tokenOf((await renewSaved(provider, account)) ?? {})).toBe('A');
+	expect(provider.calls.refresh).toBe(before);
+}
+
+describe('an agent that keeps its login until it restarts', () => {
+	test('the sessions open at a switch are remembered against the account left, and its login is not renewed while one is', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			providers.claude.rotate = '+';
+			await activate('claude', b.id, { providers, now: T });
+			const left = (await loadRegistry()).accounts.find((account) => account.id === a.id);
+			expect(left?.heldBy).toEqual([4242]);
+			const before = providers.claude.calls.refresh;
+			await expectHeld(providers.claude, a);
+			expect(providers.claude.calls.refresh).toBe(before);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A');
+		});
+	});
+
+	test('once those sessions are gone the login is renewed again, and the record is cleared', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await activate('claude', b.id, { providers, now: T });
+			providers.claude.running = [{ pid: 9999, command: 'a later session' }];
+			providers.claude.rotate = '+';
+			expect(tokenOf((await renewSaved(providers.claude, a)) ?? {})).toBe('A+');
+			const left = (await loadRegistry()).accounts.find((account) => account.id === a.id);
+			expect(left?.heldBy).toBeUndefined();
+		});
+	});
+
+	test('when the running agents cannot be listed, the login is taken to be held', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await activate('claude', b.id, { providers, now: T });
+			providers.claude.scanFailure = new Error('ps failed');
+			await expectHeld(providers.claude, a);
+		});
+	});
+
+	test('a held login whose key has run out is not renewed either, and says why without calling the login dead', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await storeCredential(a, cred('A', 0, T - 60_000));
+			providers.claude.installed = cred('A', 0, T - 60_000);
+			await activate('claude', b.id, { providers, now: T });
+			providers.claude.rotate = '+';
+			const attempt = renewSaved(providers.claude, a);
+			await expect(attempt).rejects.toThrow('may still be in use by an open');
+			expect(classify(await attempt.catch((error: unknown) => error))).not.toBe('auth');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A');
+		});
+	});
+
+	test('a held account is still read, with the key it has, so its numbers and the brake keep up', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await activate('claude', b.id, { providers, now: T });
+			providers.claude.rotate = '+';
+			providers.claude.readings.set('A', () => reading(60));
+			const state = await collectState({ providers, now: T, force: true, awake: async () => true });
+			const shown = state.providers.claude.accounts.find((account) => account.id === a.id);
+			expect(shown?.usage?.error).toBeUndefined();
+			expect(shown?.usage?.windows[1]?.percent).toBe(60);
+			expect(providers.claude.refreshesOf.get('A') ?? 0).toBe(0);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A');
+		});
+	});
+
+	test('the automatic pass does not move back to a held account; it takes the next one with room', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await activate('claude', b.id, { providers, now: T, manual: true });
+			const c = await updateRegistry((registry) =>
+				upsertAccount(registry, { provider: 'claude', email: 'c@example.com' }),
+			);
+			await storeCredential(c, cred('C'));
+			providers.claude.identities.set('C', { email: 'c@example.com' });
+			providers.claude.readings.set('A', () => reading(10, 1));
+			providers.claude.readings.set('B', () => reading(100));
+			providers.claude.readings.set('C', () => reading(50, 100));
+			providers.claude.rotate = '+';
+			const reports = await tick({ providers, now: T + 3_600_000 });
+			expect(reports).toEqual([
+				expect.objectContaining({ provider: 'claude', outcome: 'switched', to: 'c@example.com' }),
+			]);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A');
+		});
+	});
+
+	test('an automatic switch to a held account is refused, and changes nothing', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await activate('claude', b.id, { providers, now: T });
+			await expect(activate('claude', a.id, { providers, now: T })).rejects.toThrow(
+				'not moving to it automatically',
+			);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('B');
+		});
+	});
+
+	test('switching back to the account by hand goes ahead, unrenewed, and clears the record', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await activate('claude', b.id, { providers, now: T });
+			await activate('claude', a.id, { providers, now: T, manual: true });
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+			const accounts = (await loadRegistry()).accounts;
+			expect(accounts.find((account) => account.id === a.id)?.heldBy).toBeUndefined();
+			expect(accounts.find((account) => account.id === b.id)?.heldBy).toEqual([4242]);
+		});
+	});
+
+	test('the hold is in place before the login is replaced, so a renewal at that moment is refused', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			providers.claude.rotate = '+';
+			let during: unknown;
+			providers.claude.afterWrite = async () => {
+				providers.claude.afterWrite = null;
+				during = tokenOf((await renewSaved(providers.claude, a)) ?? {});
+			};
+			await activate('claude', b.id, { providers, now: T });
+			expect(during).toBe('A');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A');
+		});
+	});
+
+	test('a session that starts while the switch is under way holds the login left too', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [];
+			providers.claude.duringRefresh = async () => {
+				providers.claude.duringRefresh = null;
+				// It starts while the new account's login is being renewed, and reads the old one.
+				providers.claude.running = [{ pid: 5555, command: 'agent started mid-switch' }];
+			};
+			let during: unknown;
+			providers.claude.afterWrite = async () => {
+				providers.claude.afterWrite = null;
+				providers.claude.rotate = '+';
+				during = tokenOf((await renewSaved(providers.claude, a)) ?? {});
+			};
+			await activate('claude', b.id, { providers, now: T });
+			expect(during).toBe('A');
+			const left = (await loadRegistry()).accounts.find((account) => account.id === a.id);
+			expect(left?.heldBy).toEqual([5555]);
+			expect(left?.holdUnsettled).toBeUndefined();
+			await expectHeld(providers.claude, a);
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A');
+		});
+	});
+
+	test('the switch itself lists the agents running once the login is in, and records them', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [];
+			providers.claude.duringRefresh = async () => {
+				providers.claude.duringRefresh = null;
+				providers.claude.running = [{ pid: 5555, command: 'agent started mid-switch' }];
+			};
+			await activate('claude', b.id, { providers, now: T });
+			const left = (await loadRegistry()).accounts.find((account) => account.id === a.id);
+			expect(left?.heldBy).toEqual([5555]);
+			expect(left?.holdUnsettled).toBeUndefined();
+			providers.claude.rotate = '+';
+			await expectHeld(providers.claude, a);
+		});
+	});
+
+	test('when the agents cannot be listed once the login is in, the hold stays until they can', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [];
+			providers.claude.afterWrite = () => {
+				providers.claude.afterWrite = null;
+				providers.claude.scanFailure = new Error('ps failed');
+			};
+			await activate('claude', b.id, { providers, now: T });
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('B');
+			let left = (await loadRegistry()).accounts.find((account) => account.id === a.id);
+			expect(left?.holdUnsettled).toBe(true);
+			providers.claude.rotate = '+';
+			await expectHeld(providers.claude, a);
+			providers.claude.scanFailure = null;
+			providers.claude.running = [{ pid: 7777, command: 'agent' }];
+			await expectHeld(providers.claude, a);
+			left = (await loadRegistry()).accounts.find((account) => account.id === a.id);
+			expect(left?.heldBy).toEqual([7777]);
+			expect(left?.holdUnsettled).toBeUndefined();
+			providers.claude.running = [];
+			expect(tokenOf((await renewSaved(providers.claude, a)) ?? {})).toBe('A+');
+		});
+	});
+
+	test('with no agent running before or after the switch, nothing holds the login left', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [];
+			await activate('claude', b.id, { providers, now: T });
+			const left = (await loadRegistry()).accounts.find((account) => account.id === a.id);
+			expect(left?.heldBy).toBeUndefined();
+			expect(left?.holdUnsettled).toBeUndefined();
+			providers.claude.rotate = '+';
+			expect(tokenOf((await renewSaved(providers.claude, a)) ?? {})).toBe('A+');
+		});
+	});
+
+	test('when the running agents cannot be listed, the switch is refused and nothing changes', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.scanFailure = new Error('ps failed');
+			await expect(activate('claude', b.id, { providers, now: T })).rejects.toThrow(
+				'could not tell whether',
+			);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+			expect(providers.claude.calls.write).toBe(0);
+		});
+	});
+
+	test('an agent that picks a new login up as it runs is switched even when they cannot be listed', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			providers.claude.scanFailure = new Error('ps failed');
+			await activate('claude', b.id, { providers, now: T });
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('B');
+		});
+	});
+
+	test('a held account cannot be run on its own, which would put a second copy of its login in use', async () => {
+		await withHome(async (home) => {
+			const { providers, a, b } = await world();
+			providers.claude.home = join(home, 'agent');
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await activate('claude', b.id, { providers, now: T });
+			await expect(prepareSession(providers.claude, a)).rejects.toThrow(
+				'may still be in use by an open',
+			);
+			expect(await providers.claude.session.readLogin(sessionDir(providers.claude, a))).toBeNull();
+			providers.claude.running = [];
+			const session = await prepareSession(providers.claude, a);
+			expect(tokenOf((await providers.claude.session.readLogin(session.dir)) ?? {})).toBe('A');
+		});
+	});
+
+	test('preparing a session waits for a switch under way, then sees the hold that switch left', async () => {
+		await withHome(async (home) => {
+			const { providers, a } = await world();
+			providers.claude.home = join(home, 'agent');
+			await updateRegistry((registry) => {
+				registry.active.claude = 'someone-else';
+			});
+			const lock = await holdSwitch('claude');
+			const pending = prepareSession(providers.claude, a).catch((error: unknown) => error);
+			await Bun.sleep(20);
+			// While the session waited, a switch left this account held.
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((account) => account.id === a.id);
+				if (record) record.heldBy = [4242];
+			});
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await lock.release();
+			expect(String(await pending)).toContain('may still be in use by an open');
+			expect(await providers.claude.session.readLogin(sessionDir(providers.claude, a))).toBeNull();
+		});
+	});
+
+	test('a session is not prepared for the account that became the one in use meanwhile', async () => {
+		await withHome(async (home) => {
+			const { providers, a } = await world();
+			providers.claude.home = join(home, 'agent');
+			await expect(prepareSession(providers.claude, a)).rejects.toThrow(
+				'became the account in use',
+			);
+		});
+	});
+
+	test('the terminal asking for a session is recorded as running there before a switch can act', async () => {
+		await withHome(async (home) => {
+			const { providers, b } = await world();
+			providers.claude.home = join(home, 'agent');
+			const session = await prepareSession(providers.claude, b, { reserveFor: process.pid });
+			expect(await markedRunning(session.dir)).toBe(true);
+			await clearRunMark(session.dir, process.pid);
+		});
+	});
+
+	test('a hold set while a check was listing the agents is kept, and counts as held', async () => {
+		await withHome(async () => {
+			const { providers, a } = await world();
+			await updateRegistry((registry) => {
+				const record = registry.accounts.find((account) => account.id === a.id);
+				if (record) record.heldBy = [999];
+			});
+			const list = providers.claude.runningProcesses.bind(providers.claude);
+			providers.claude.runningProcesses = async () => {
+				// Meanwhile an import, or a switch, sets a hold of its own.
+				await updateRegistry((registry) => {
+					const record = registry.accounts.find((account) => account.id === a.id);
+					if (record) record.holdUnsettled = true;
+				});
+				return list();
+			};
+			providers.claude.running = [];
+			expect(await heldByOpenSession(providers.claude, a)).toBe(true);
+			const record = (await loadRegistry()).accounts.find((account) => account.id === a.id);
+			expect(record?.holdUnsettled).toBe(true);
+			expect(record?.heldBy).toBeUndefined();
+		});
+	});
+
+	test('an agent that picks a new login up as it runs holds nothing', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await activate('claude', b.id, { providers, now: T });
+			const left = (await loadRegistry()).accounts.find((account) => account.id === a.id);
+			expect(left?.heldBy).toBeUndefined();
+		});
+	});
+
+	test('what holds a login never reaches the board', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await world();
+			providers.claude.liveSwap = false;
+			providers.claude.running = [{ pid: 4242, command: 'agent' }];
+			await activate('claude', b.id, { providers, now: T });
+			const state = await collectState({ providers, now: T, awake: async () => true });
+			const shown = state.providers.claude.accounts.find((account) => account.id === a.id);
+			expect(shown).toBeDefined();
+			expect('heldBy' in (shown ?? {})).toBe(false);
+		});
+	});
+});
 
 describe('switching', () => {
 	test('a login in use that cannot be read is not overwritten', async () => {

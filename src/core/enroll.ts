@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { credentialFromToken } from '../providers/claude/index.ts';
 import { oauthOf } from '../providers/claude/keychain.ts';
 import { loginIsolated } from '../providers/claude/login.ts';
+import { loginIn } from '../providers/grok/index.ts';
 import { agentCommand } from './agent-command.ts';
 import { collectState, forgetReading, liveIdentity, loadCache, PROVIDERS } from './collect.ts';
 import { readJson, writeJsonAtomic } from './fs.ts';
@@ -11,8 +12,16 @@ import { cleanUpEvenIfInterrupted } from './interrupt.ts';
 import { statePath } from './paths.ts';
 import { accountsFor, loadRegistry, updateRegistry, upsertAccount } from './registry.ts';
 import { putInUse } from './renew.ts';
+import { loadSettings } from './settings.ts';
 import { holdSwitch } from './switch-lock.ts';
-import type { AccountRecord, Credential, Identity, Provider, ProviderId } from './types.ts';
+import {
+	type AccountRecord,
+	type Credential,
+	type Identity,
+	PROVIDER_IDS,
+	type Provider,
+	type ProviderId,
+} from './types.ts';
 import { fingerprint } from './vault.ts';
 
 /** Saves a credential under the account it belongs to, creating it if new. */
@@ -67,13 +76,23 @@ async function saveLogin(
  */
 export async function saveInstalled(
 	providerId: ProviderId,
-	options: { providers?: Record<ProviderId, Provider> } = {},
+	options: {
+		providers?: Record<ProviderId, Provider>;
+		/** Save only while the service still has no account, decided as the save is made. */
+		onlyIfNone?: boolean;
+	} = {},
 ): Promise<{ account: AccountRecord; email: string } | null> {
 	const provider = (options.providers ?? PROVIDERS)[providerId];
 	const credential = await provider.readAgentCredential();
 	if (!credential) return null;
 	const identity = await provider.identify(credential);
 	const account = await updateRegistry((registry) => {
+		// Naming the login took a request, and another pass may have added or
+		// renewed this service's account meanwhile. What it saved is newer
+		// than the login read before the request, so it is left alone.
+		if (options.onlyIfNone && registry.accounts.some((entry) => entry.provider === providerId)) {
+			return null;
+		}
 		const record = upsertAccount(registry, {
 			provider: providerId,
 			email: identity.email,
@@ -85,7 +104,41 @@ export async function saveInstalled(
 		const { login: _login, ...rest } = record;
 		return rest;
 	});
-	return { account, email: identity.email };
+	return account ? { account, email: identity.email } : null;
+}
+
+/**
+ * Adds the account each service is signed in to on this Mac, for a service
+ * that has none saved and is still looked for. So a service appears on its own
+ * once it is installed and signed in, with nothing to run. One that cannot be
+ * read or named right now is left for the next pass.
+ */
+export async function detectInstalled(
+	options: { providers?: Record<ProviderId, Provider> } = {},
+): Promise<{ provider: ProviderId; email: string }[]> {
+	const wanted = (await loadSettings()).autoDetectProviders;
+	const registry = await loadRegistry();
+	const found: { provider: ProviderId; email: string }[] = [];
+	for (const provider of PROVIDER_IDS) {
+		if (!wanted.includes(provider)) continue;
+		if (registry.accounts.some((account) => account.provider === provider)) continue;
+		// Under the switch lock, which removing an account also holds, and with
+		// the setting read again there: an account removed meanwhile, with the
+		// service no longer looked for, is not added straight back.
+		const held = await holdSwitch(provider);
+		const saved = await (async () => {
+			try {
+				if (!(await loadSettings()).autoDetectProviders.includes(provider)) return null;
+				return await saveInstalled(provider, { ...options, onlyIfNone: true });
+			} catch {
+				return null;
+			} finally {
+				await held.release();
+			}
+		})();
+		if (saved) found.push({ provider, email: saved.email });
+	}
+	return found;
 }
 
 /**
@@ -102,11 +155,7 @@ export async function signInAgain(input: {
 	providers?: Record<ProviderId, Provider>;
 	now?: number;
 }): Promise<{ signedInAs: string; matched: boolean; slot: number }> {
-	const login =
-		input.login ??
-		(input.providerId === 'claude'
-			? (email: string) => loginClaudeIsolated(email)
-			: () => loginCodexIsolated());
+	const login = input.login ?? isolatedLogin(input.providerId);
 	const credential = await login(input.account.email);
 	const options = {
 		...(input.providers ? { providers: input.providers } : {}),
@@ -207,6 +256,26 @@ export async function enrollFromToken(
 	);
 }
 
+/** The browser sign-in each service has, run where it cannot disturb the login in use. */
+function isolatedLogin(providerId: ProviderId): (email: string) => Promise<Credential> {
+	switch (providerId) {
+		case 'claude':
+			return (email) => loginClaudeIsolated(email);
+		case 'codex':
+			return () => loginCodexIsolated();
+		case 'grok':
+			return () => loginGrokIsolated();
+		case 'antigravity':
+			// It keeps one login, in the Keychain, and signs in only from inside
+			// itself, so there is nowhere apart to sign in from here.
+			return async (email) => {
+				throw new Error(
+					`Antigravity signs in from inside its own app - sign in there as ${email}, then run: hotseat add antigravity`,
+				);
+			};
+	}
+}
+
 /** A full Claude sign-in, isolated so the current login is left alone. */
 export function loginClaudeIsolated(email?: string): Promise<Credential> {
 	return loginIsolated(email);
@@ -240,6 +309,37 @@ export async function loginCodexIsolated(): Promise<Credential> {
 			if (code !== 0) throw new Error(`the Codex sign-in ended with status ${code}`);
 			const credential = await readJson<Credential>(join(home, 'auth.json'));
 			if (!credential) throw new Error('the Codex sign-in produced no credential');
+			return credential;
+		},
+	);
+}
+
+/**
+ * Signs in to Grok against a throwaway home directory, then keeps the login
+ * that lands there, so the one in use is left alone.
+ */
+export async function loginGrokIsolated(): Promise<Credential> {
+	const home = await mkdtemp(join(tmpdir(), 'hotseat-grok-'));
+	let child: ReturnType<typeof Bun.spawn> | undefined;
+	const lookup = new AbortController();
+	return cleanUpEvenIfInterrupted(
+		async () => {
+			lookup.abort();
+			child?.kill();
+			await rm(home, { recursive: true, force: true });
+		},
+		async () => {
+			const grok = await agentCommand('grok', { signal: lookup.signal });
+			child = Bun.spawn([grok.executable, 'login'], {
+				env: { ...grok.env, GROK_HOME: home },
+				stdin: process.stdin.isTTY ? 'inherit' : 'ignore',
+				stdout: 'inherit',
+				stderr: 'inherit',
+			});
+			const code = await child.exited;
+			if (code !== 0) throw new Error(`the Grok sign-in ended with status ${code}`);
+			const credential = loginIn(await readJson<unknown>(join(home, 'auth.json')));
+			if (!credential) throw new Error('the Grok sign-in produced no credential');
 			return credential;
 		},
 	);

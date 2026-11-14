@@ -10,9 +10,11 @@ async function read(path: string): Promise<string> {
 	return readFile(join(ROOT, path), 'utf8');
 }
 
-const menu = await read('macos/Sources/main.swift');
+const app = await read('macos/Sources/main.swift');
+const panel = await read('macos/Sources/Panel.swift');
+/** Everything the menu bar app does and shows: the app itself and its dropdown. */
+const menu = `${app}\n${panel}`;
 const model = await read('macos/Sources/Model.swift');
-const row = await read('macos/Sources/AccountRowView.swift');
 const cli = await read('src/cli.ts');
 const build = await read('macos/build.sh');
 const loginItem = await read('macos/Sources/LoginItem.swift').catch(() => '');
@@ -53,9 +55,9 @@ describe('the menu only asks for commands the CLI has', () => {
 	test('every settings key the menu writes is a real setting', () => {
 		// Only the two helpers that change a setting. A keyboard shortcut uses a
 		// `key:` label too, and is not a setting.
-		const written = [...menu.matchAll(/(?:toggle|choiceItem)\([^)]*?key:\s*"([A-Za-z]+)"/gs)].map(
-			(match) => match[1] as string,
-		);
+		const written = [
+			...panel.matchAll(/(?:ToggleRow|ChoiceChip)\([^)]*?key:\s*"([A-Za-z]+)"/gs),
+		].map((match) => match[1] as string);
 		expect(written.length).toBeGreaterThan(3);
 		for (const key of written) {
 			expect(SETTING_KEYS as string[]).toContain(key);
@@ -67,7 +69,7 @@ describe('the menu only asks for commands the CLI has', () => {
 		// it, so both are checked. This is what catches a menu offering a choice
 		// the CLI would reject, such as a threshold past its ceiling.
 		const literals = [
-			...menu.matchAll(/choiceItem\([^)]*?key:\s*"([A-Za-z]+)",\s*value:\s*"([A-Za-z0-9-]+)"/gs),
+			...panel.matchAll(/ChoiceChip\([^)]*?key:\s*"([A-Za-z]+)",\s*value:\s*"([A-Za-z0-9-]+)"/gs),
 		].map(([, key, value]) => ({ key, value }));
 
 		const choices = /thresholdChoices: \[Int\] = \[([^\]]+)\] \+ Array\((\d+)\.\.\.(\d+)\)/.exec(
@@ -119,31 +121,43 @@ describe('the menu only asks for commands the CLI has', () => {
 	});
 });
 
-describe('the menu does not repeat the crash it already caused', () => {
-	// Giving a menu item a submenu makes AppKit replace the item's action with an
-	// internal one belonging to the menu. A row that invoked the item's action
-	// sent that selector to an NSMenu, which does not implement it, and the app
-	// died the moment an account row was clicked.
-	test('no code performs a menu item action reflectively', () => {
-		expect(menu).not.toContain('.perform(action');
-		expect(row).not.toContain('.perform(action');
+describe("the dropdown is the app's own window, not a system menu", () => {
+	test('the menu bar button opens the dropdown itself', () => {
+		expect(app).toContain('statusItem.button?.action = #selector(toggleDropdown)');
+		expect(app).not.toContain('statusItem.menu');
+		expect(menu).not.toContain('NSMenuItem');
 	});
 
-	test('an account row is given its own click handler instead', () => {
-		expect(menu).toContain('onClick:');
+	test('a click anywhere else closes it, and so does Escape', () => {
+		expect(panel).toContain('addGlobalMonitorForEvents');
+		expect(panel).toContain('addLocalMonitorForEvents');
+		expect(panel).toContain('override func cancelOperation');
 	});
 
-	test('the row does not read the menu item to decide what a click does', () => {
-		const mouseUp = row.slice(row.indexOf('override func mouseUp'));
-		expect(mouseUp).toContain('onClick()');
-		expect(mouseUp).not.toContain('item.action');
+	test('it follows its content, and scrolls only once it would run off the screen', () => {
+		expect(panel).toContain('hosting.fittingSize');
+		expect(panel).toContain('.frame(height: min(max(height, 1), maxHeight))');
+	});
+
+	test('a dialog never opens underneath it', () => {
+		for (const marker of [
+			'private func remove(provider',
+			'private func addFromToken',
+			'private func report(failure',
+		]) {
+			const start = app.indexOf(marker);
+			expect(start).toBeGreaterThan(-1);
+			const body = app.slice(start, app.indexOf('\n\t}\n', start));
+			expect(body.indexOf('dropdown.close()')).toBeGreaterThan(-1);
+			expect(body.indexOf('dropdown.close()')).toBeLessThan(body.indexOf('NSAlert()'));
+		}
 	});
 });
 
 describe('destructive actions ask first', () => {
 	test('removing an account shows a confirmation before it runs', () => {
-		const remove = menu.slice(menu.indexOf('func removeSelector'));
-		const body = remove.slice(0, remove.indexOf('@objc private func toggleSetting'));
+		const remove = app.slice(app.indexOf('private func remove(provider'));
+		const body = remove.slice(0, remove.indexOf('private func changeSetting'));
 		expect(body).toContain('NSAlert');
 		expect(body).toContain('alertFirstButtonReturn');
 		// The command must come after the confirmation, never before it.
@@ -151,8 +165,12 @@ describe('destructive actions ask first', () => {
 	});
 
 	test('switching and settings changes do not nag with a dialog', () => {
-		const settings = menu.slice(menu.indexOf('func fillSettings'), menu.indexOf('func caption'));
-		expect(settings).not.toContain('NSAlert');
+		for (const marker of ['private func seat(', 'private func changeSetting(']) {
+			const start = app.indexOf(marker);
+			expect(start).toBeGreaterThan(-1);
+			expect(app.slice(start, app.indexOf('\n\t}\n', start))).not.toContain('NSAlert');
+		}
+		expect(panel).not.toContain('NSAlert');
 	});
 });
 
@@ -164,7 +182,7 @@ describe('the menu never holds a credential', () => {
 	});
 
 	test('it makes no network request of its own', async () => {
-		const sources = [menu, model, row, await read('macos/Sources/Runner.swift')];
+		const sources = [menu, model, await read('macos/Sources/Runner.swift')];
 		for (const source of sources) {
 			expect(source).not.toContain('URLSession');
 			expect(source).not.toContain('https://');
@@ -193,15 +211,15 @@ describe('the ready count agrees with what switching would do', () => {
 		expect(Number(declared)).toBe(MIN_USABLE_HEADROOM);
 	});
 
+	const count = model.slice(model.indexOf('func switchableCount'));
+	const body = count.slice(0, count.indexOf('\n\t}\n'));
+
 	test('the count excludes the account already in use', () => {
-		const header = menu.slice(menu.indexOf('func providerHeader'));
-		const body = header.slice(0, header.indexOf('private func accountItem'));
-		expect(body).toContain('activeAccountId');
+		expect(body).toContain('account.id != activeAccountId');
 		expect(body).toContain('minimumUsableHeadroom');
+		expect(panel).toContain('switchableCount(countingModels: board.settings.autoModelLimits)');
 	});
 	test('the count leaves out an account whose login the service refused, as the switcher does', () => {
-		const header = menu.slice(menu.indexOf('func providerHeader'));
-		const body = header.slice(0, header.indexOf('private func accountItem'));
 		expect(body).toContain('account.usage?.errorKind != "auth"');
 		expect(model).toMatch(/var errorKind: String\?/);
 	});
@@ -236,57 +254,45 @@ function calls(source: string, name: string): string[] {
 	}
 }
 
-describe('every menu item explains itself on hover', () => {
-	const body = menu.slice(menu.indexOf('// MARK: - Menu'));
-	const optionalTip = ['caption', 'action', 'bound'];
+describe('everything in the dropdown explains itself on hover', () => {
+	const body = panel;
+	const controls = ['ActionButton', 'ToggleRow', 'ChoiceChip', 'SectionLabel'];
 
-	test.each(optionalTip)('every %s(…) item passes a tooltip', (helper) => {
-		const sites = calls(body, helper).filter((site) => !site.startsWith(`${helper}(_ `));
+	test.each(controls)('every %s(…) is given a tooltip', (control) => {
+		const sites = calls(body, control);
 		expect(sites.length).toBeGreaterThan(0);
 		for (const site of sites) {
 			expect(site).toContain('tip:');
 		}
 	});
 
-	test('the helpers that always take a tooltip really assign it', () => {
-		for (const helper of [
-			'live',
-			'toggle',
-			'choiceItem',
-			'submenuItem',
-			'caption',
-			'action',
-			'bound',
-		]) {
-			const definition = menu.slice(menu.indexOf(`func ${helper}(`));
-			const signature = definition.slice(0, definition.indexOf('{'));
-			expect(signature).toContain('tip');
-			const implementation = definition.slice(0, definition.indexOf('\n\t}\n'));
-			expect(implementation).toMatch(/toolTip = tip|tip: tip/);
-		}
+	test.each(controls)('%s cannot be made without a tooltip, and shows it', (control) => {
+		const definition = body.slice(body.indexOf(`struct ${control}: View`));
+		const implementation = definition.slice(0, definition.indexOf('\n}\n'));
+		expect(implementation).toMatch(/\n\tlet tip: String\n/);
+		expect(implementation).toContain('.help(tip)');
 	});
 
-	test('items built by hand set a tooltip too', () => {
-		for (const marker of ['func providerHeader', 'func accountItem', 'func fillHistory']) {
+	test('the parts built by hand show a tooltip too', () => {
+		for (const marker of [
+			'struct AccountCard: View',
+			'struct AccountsPage: View',
+			'struct HistoryPage: View',
+			'struct AddPage: View',
+		]) {
 			const start = body.indexOf(marker);
 			expect(start).toBeGreaterThan(-1);
-			const section = body.slice(start, body.indexOf('\n\t}\n', start));
-			expect(section).toContain('toolTip =');
+			expect(body.slice(start, body.indexOf('\n}\n', start))).toContain('.help(');
 		}
-	});
-
-	test('an account row shows its tooltip on the view the mouse is over', () => {
-		expect(row).toContain('override var toolTip');
-		expect(row).toContain('set { content.toolTip = newValue }');
 	});
 
 	/**
-	 * Every string literal that follows `tip:` or `toolTip =`, read with a small
-	 * scanner because an interpolation may itself contain quotes.
+	 * Every string literal that follows `tip:` or opens a `.help(`, read with a
+	 * small scanner because an interpolation may itself contain quotes.
 	 */
 	function tooltipLiterals(): string[] {
 		const found: string[] = [];
-		for (const match of body.matchAll(/(?:tip:|toolTip =)\s*"/g)) {
+		for (const match of body.matchAll(/(?:tip:|\.help\(|return)\s*"/g)) {
 			let depth = 0;
 			let index = (match.index ?? 0) + match[0].length;
 			const start = index;
@@ -300,20 +306,23 @@ describe('every menu item explains itself on hover', () => {
 				if (depth > 0 && char === ')') depth -= 1;
 				else if (depth === 0 && char === '"') break;
 			}
-			found.push(body.slice(start, index));
+			const literal = body.slice(start, index);
+			// A `return` of a short word is a label or a reason, not a tooltip.
+			if (match[0].startsWith('return') && literal.length < 60) continue;
+			found.push(literal);
 		}
 		return found;
 	}
 	const tips = tooltipLiterals();
 
-	test('there are tooltips for every kind of item', () => {
+	test('there are tooltips for every kind of control', () => {
 		expect(tips.length).toBeGreaterThan(30);
 	});
 
 	test.each(tips)('"%s" is a full plain-English sentence', (tip) => {
 		const prose = tip.replace(/\\\([^)]*\)/g, 'X').replace(/\\u\{[0-9a-f]+\}/gi, "'");
 		expect(prose.length).toBeGreaterThan(30);
-		expect(prose.trim()).toMatch(/[.X]$/);
+		expect(prose.trim()).toMatch(/[.X]$|[.X] $/);
 		const words = prose.toLowerCase().replace(/hotseat/g, '');
 		for (const jargon of [
 			'bench',
@@ -340,6 +349,30 @@ describe('every menu item explains itself on hover', () => {
 	});
 });
 
+describe('which services sit in the menu bar', () => {
+	test('is chosen in the dropdown, and the choice is a real setting', () => {
+		expect(panel).toContain('key: "titleProviders"');
+		expect(SETTING_KEYS as string[]).toContain('titleProviders');
+	});
+
+	test('the last one left cannot be taken out, and says why', () => {
+		expect(panel).toContain('let last = isOn && visible.count <= 1');
+		expect(panel).toContain('locked: last');
+		expect(panel).toContain('one has to stay');
+	});
+
+	test('the title leaves out a service that was not chosen, the way the command line does', () => {
+		expect(model).toContain('where settings.titleProviders.contains(entry.id)');
+		expect(model).toContain('var titleProviders: [String] = ["claude", "codex"]');
+	});
+
+	test('every service is switched the same way: none is only shown', () => {
+		expect(model).not.toContain('displayOnly');
+		expect(menu).not.toContain('displayOnly');
+		expect(panel).toContain('private var canSwitch: Bool { !isActive && !account.disabled }');
+	});
+});
+
 describe('the files the menu opens for editing', () => {
 	test('are the two files hotseat documents as editable, under the hotseat folder', () => {
 		expect(menu).toContain('openInEditor("accounts.json"');
@@ -356,7 +389,13 @@ describe('the files the menu opens for editing', () => {
 		for (const id of PROVIDER_IDS) {
 			expect(logo).toContain(`case "${id}": return "`);
 		}
-		for (const file of ['claude.svg', 'openai.svg']) {
+		for (const file of [
+			'claude.svg',
+			'openai.svg',
+			'antigravity.svg',
+			'antigravity-color.png',
+			'grok.svg',
+		]) {
 			expect(require('node:fs').existsSync(join(ROOT, 'macos/Logos', file))).toBe(true);
 		}
 	});
@@ -380,18 +419,6 @@ describe('the menu bar hears what the automatic pass did', () => {
 		const auto = cli.slice(cli.indexOf("case 'auto'"), cli.indexOf("case 'move'"));
 		expect(auto).toContain("rest.includes('--json')");
 		expect(auto).toContain('JSON.stringify(reports)');
-	});
-});
-
-describe('hovering an account row', () => {
-	test('a report of the mouse leaving is checked against where the cursor is', () => {
-		const exited = row.slice(row.indexOf('override func mouseExited'));
-		expect(exited.slice(0, exited.indexOf('\n\t}\n'))).toContain('if isMouseInside() { return }');
-	});
-
-	test('only the tracking area the row added is ever removed', () => {
-		expect(row).not.toContain('for area in trackingAreas');
-		expect(row).toContain('if let tracking { removeTrackingArea(tracking) }');
 	});
 });
 
@@ -466,24 +493,25 @@ describe('signing the app', () => {
 
 describe('the menu acts on the account it showed', () => {
 	test('names an account by its id alone, which neither renumbering nor a name can move to another account', () => {
-		expect(menu).toContain('"\\(providerId)|id:\\(account.id)"');
-		expect(menu).toContain('perform(["switch", provider, "id:\\(account.id)"])');
-		expect(menu).not.toContain('"\\(providerId)|\\(account.id)"');
-		expect(menu).not.toContain('$0.id == parts[1]');
-		expect(menu).not.toContain('|\\(account.slot)');
-		expect(menu).not.toContain('String($0.slot) == parts[1]');
-		expect(menu).not.toContain('String(account.slot)');
+		expect(app).toContain('perform(["switch", provider, "id:\\(account.id)"])');
+		expect(app).toContain('perform(["remove", provider, "id:\\(account.id)"])');
+		expect(app).toContain(
+			'perform([enabled ? "enable" : "disable", provider, "id:\\(account.id)"])',
+		);
+		expect(app).toContain('let selector = "id:\\(account.id)"');
+		expect(app).not.toContain('account.slot');
+		expect(app).not.toContain('account.email]');
 	});
 
 	test('a turned-off account can still be switched to from its menu, as its tooltip says', () => {
-		const body = menu.slice(menu.indexOf('func accountMenu'), menu.indexOf('func appendFooter'));
+		const body = panel.slice(panel.indexOf('private var options: some View'));
 		const before = body.slice(0, body.indexOf('"Switch to this account"'));
 		expect(before).toContain('if !isActive {');
 		expect(before).not.toContain('!account.disabled {');
 	});
 
 	test('Switch now waits its turn like any other action, and says when it fails', () => {
-		const body = menu.slice(menu.indexOf('func switchToBest'), menu.indexOf('func addFromToken'));
+		const body = app.slice(app.indexOf('func switchToBest'), app.indexOf('func addFromToken'));
 		expect(body).toContain('perform(["best"');
 		expect(body).not.toContain('runner.run');
 		expect(body).not.toContain('isBusy');
@@ -493,13 +521,10 @@ describe('the menu acts on the account it showed', () => {
 	});
 
 	test('opening History or Settings never waits on the command line', () => {
-		for (const marker of ['func fillHistory', 'func fillSettings']) {
-			const start = menu.indexOf(marker);
-			const body = menu.slice(start, menu.indexOf('\n\t}\n', start));
-			expect(body.length).toBeGreaterThan(0);
-			expect(body).not.toContain('runner.');
-			expect(body).not.toContain('latestSettings');
-		}
+		expect(panel).not.toContain('runner.');
+		expect(panel).not.toContain('Runner(');
+		expect(app).toContain('didSet { model.history = history }');
+		expect(app).toContain('didSet { model.board = board }');
 	});
 });
 
@@ -516,7 +541,7 @@ describe('the History menu', () => {
 
 describe('a sign-in that runs out of time', () => {
 	test('is not said to have changed nothing, since the login may already have been saved', () => {
-		const start = menu.indexOf('@objc private func signInSelector');
+		const start = menu.indexOf('private func signIn(provider');
 		const body = menu.slice(start, menu.indexOf('\n\t}\n', start));
 		expect(body).not.toContain('nothing changed');
 		expect(body).toContain('may have');
@@ -525,7 +550,7 @@ describe('a sign-in that runs out of time', () => {
 
 describe('changing a setting from the menu', () => {
 	test('shows the new value at once, before the command line answers', () => {
-		const start = menu.indexOf('@objc private func toggleSetting');
+		const start = menu.indexOf('private func changeSetting');
 		const body = menu.slice(start, menu.indexOf('\n\t}\n', start));
 		expect(body).toContain('withSetting(');
 		expect(body.indexOf('withSetting(')).toBeLessThan(body.indexOf('perform('));
@@ -534,12 +559,37 @@ describe('changing a setting from the menu', () => {
 
 describe('a settings change made while a refresh is running', () => {
 	test('stays on screen until its own write has finished, whatever that refresh loads', () => {
-		const toggle = menu.slice(menu.indexOf('@objc private func toggleSetting'));
+		const toggle = menu.slice(menu.indexOf('private func changeSetting'));
 		expect(toggle.slice(0, toggle.indexOf('\n\t}\n'))).toContain('pendingSettings.append(');
 		const refresh = menu.slice(menu.indexOf('@objc private func refresh()'));
 		expect(refresh.slice(0, refresh.indexOf('\n\t}\n'))).toContain('pendingSettings.reduce(');
 		const perform = menu.slice(menu.indexOf('private func perform('));
 		expect(perform.slice(0, perform.indexOf('\n\t}\n'))).toContain('pendingSettings.remove(at:');
+	});
+});
+
+describe("removing a service's last account", () => {
+	test('stops looking for the service before the account is gone, under the lock looking takes', () => {
+		const start = cli.indexOf("case 'remove': {");
+		const body = cli.slice(start, cli.indexOf("case 'list': {", start));
+		const lock = body.indexOf('holdSwitch(providerId)');
+		const optOut = body.indexOf('setDetected(providerId, false)');
+		const removed = body.indexOf('removeAccount(registry, account.id)');
+		const release = body.indexOf('held.release()');
+		expect(lock).toBeGreaterThan(-1);
+		expect(optOut).toBeGreaterThan(lock);
+		expect(removed).toBeGreaterThan(optOut);
+		expect(release).toBeGreaterThan(removed);
+	});
+});
+
+describe('a switch asked for by the person', () => {
+	test('is marked as theirs, so it may move back to an account an open session still holds', () => {
+		const seat = cli.slice(
+			cli.indexOf('async function seat('),
+			cli.indexOf('async function seatPicked('),
+		);
+		expect(seat).toContain('activate(providerId, accountId, { manual: true })');
 	});
 });
 

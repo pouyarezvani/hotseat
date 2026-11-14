@@ -4,6 +4,7 @@ import type { TickReport } from './auto.ts';
 import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
 import { logEvent } from './log.ts';
 import { guardPath, hotseatHome } from './paths.ts';
+import { isWeeklyWindow } from './policy.ts';
 import { loadSettings, type Settings } from './settings.ts';
 import { holdSwitch } from './switch-lock.ts';
 import { PROVIDER_IDS, type ProviderId, type State } from './types.ts';
@@ -14,7 +15,12 @@ const SILENT_MS = 30 * MINUTE;
 const RESERVATION_MS = 120_000;
 const SAMPLE_KEEP_MS = 3 * 60 * MINUTE;
 const HOOK_LOCK_MS = 1_000;
-const NAMES: Record<ProviderId, string> = { claude: 'Claude', codex: 'Codex' };
+const NAMES: Record<ProviderId, string> = {
+	claude: 'Claude',
+	codex: 'Codex',
+	antigravity: 'Antigravity',
+	grok: 'Grok',
+};
 
 export interface Reservation {
 	sessionId: string;
@@ -28,8 +34,18 @@ export interface Sample {
 	t: number;
 	provider: ProviderId;
 	accountId: string;
+	/**
+	 * Which weekly limit this is. Absent for the one labelled `week`, the limit
+	 * samples always tracked, so samples kept from before are the same series.
+	 */
+	window?: string;
 	percent: number;
 	resetsAt?: string;
+}
+
+/** One weekly limit of one account: what a run of samples is a series of. */
+function seriesOf(sample: Pick<Sample, 'accountId' | 'window'>): string {
+	return `${sample.accountId}|${sample.window ?? ''}`;
 }
 
 export interface GuardState {
@@ -238,47 +254,58 @@ function sameWeek(a: Sample, b: Sample): boolean {
 	return Math.abs(Date.parse(a.resetsAt) - Date.parse(b.resetsAt)) <= 60 * MINUTE;
 }
 
-/** Weekly-limit points the provider's accounts rose by between `since` and `now`. */
+/**
+ * Weekly-limit points the provider's accounts rose by between `since` and
+ * `now`. An account with several weekly limits counts the one that rose most,
+ * since each is a share of its own allowance and adding them would count one
+ * burst of work more than once.
+ */
 export function burnPoints(
 	samples: Sample[],
 	provider: ProviderId,
 	since: number,
 	now: number,
 ): number {
-	const byAccount = new Map<string, Sample[]>();
+	const bySeries = new Map<string, Sample[]>();
 	for (const sample of samples) {
 		if (sample.provider !== provider || sample.t < since || sample.t > now) continue;
-		const list = byAccount.get(sample.accountId) ?? [];
+		const list = bySeries.get(seriesOf(sample)) ?? [];
 		list.push(sample);
-		byAccount.set(sample.accountId, list);
+		bySeries.set(seriesOf(sample), list);
 	}
-	let points = 0;
-	for (const list of byAccount.values()) {
+	const byAccount = new Map<string, number>();
+	for (const list of bySeries.values()) {
 		list.sort((a, b) => a.t - b.t);
+		let points = 0;
 		for (let i = 1; i < list.length; i++) {
 			const before = list[i - 1];
 			const after = list[i];
 			if (before && after && sameWeek(before, after))
 				points += Math.max(0, after.percent - before.percent);
 		}
+		const account = list[0]?.accountId ?? '';
+		byAccount.set(account, Math.max(byAccount.get(account) ?? 0, points));
 	}
-	return Math.round(points * 10) / 10;
+	const total = [...byAccount.values()].reduce((sum, points) => sum + points, 0);
+	return Math.round(total * 10) / 10;
 }
 
 function samplesFrom(state: State): Sample[] {
 	const samples: Sample[] = [];
 	for (const provider of PROVIDER_IDS) {
 		for (const account of state.providers[provider]?.accounts ?? []) {
-			const week = account.usage?.windows.find((window) => window.label === 'week');
 			const t = Date.parse(account.usage?.fetchedAt ?? '');
-			if (!week || !Number.isFinite(t)) continue;
-			samples.push({
-				t,
-				provider,
-				accountId: account.id,
-				percent: week.percent,
-				...(week.resetsAt ? { resetsAt: week.resetsAt } : {}),
-			});
+			if (!Number.isFinite(t)) continue;
+			for (const week of account.usage?.windows.filter(isWeeklyWindow) ?? []) {
+				samples.push({
+					t,
+					provider,
+					accountId: account.id,
+					...(week.label === 'week' ? {} : { window: week.key }),
+					percent: week.percent,
+					...(week.resetsAt ? { resetsAt: week.resetsAt } : {}),
+				});
+			}
 		}
 	}
 	return samples;
@@ -303,7 +330,7 @@ export async function applyBrake(
 	const tripping = await updateGuard((guard) => {
 		for (const sample of fresh) {
 			const last = guard.samples
-				.filter((s) => s.provider === sample.provider && s.accountId === sample.accountId)
+				.filter((s) => s.provider === sample.provider && seriesOf(s) === seriesOf(sample))
 				.reduce((latest, s) => Math.max(latest, s.t), Number.NEGATIVE_INFINITY);
 			if (sample.t > last) guard.samples.push(sample);
 		}

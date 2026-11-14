@@ -424,7 +424,7 @@ describe('the real Codex provider, read by the collector', () => {
 				},
 				{ preconnect: () => undefined },
 			) as unknown as typeof fetch;
-			const providers = { claude: fakeProviders().claude, codex: new CodexProvider() };
+			const providers = { ...fakeProviders(), codex: new CodexProvider() };
 			const now = Date.now();
 			const state = await collectState({ providers, now, force: true, awake: async () => true });
 			const byEmail = new Map(

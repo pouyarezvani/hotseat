@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 var failures = 0
 
@@ -12,39 +13,55 @@ func check(_ name: String, _ passed: Bool, _ detail: String = "") {
 	}
 }
 
-func sampleAccount(disabled: Bool = false, windows: Int = 2) -> Account {
-	Account(
-		id: "test",
-		email: "someone@example.com",
-		slot: 1,
-		alias: nil,
-		plan: "max",
-		disabled: disabled,
-		usage: UsageSnapshot(
-			fetchedAt: "2026-09-16T12:00:00Z",
-			windows: (0..<windows).map {
-				UsageWindow(key: "w\($0)", label: "w\($0)", percent: Double($0) * 30, resetsAt: nil)
-			},
-			error: nil))
-}
-
 // MARK: - Rendering
 //
-// A view draws its own content first and its subviews after, so a highlight
-// added as a subview silently paints over the row. That looks correct in code
-// and is only visible on screen, which is exactly what this catches.
+// The dropdown is drawn by the app itself, so a mistake in it shows as an empty
+// or clipped window and nowhere else. It is drawn here off screen, at the size
+// its content asks for, and saved as a picture when a folder is named.
 
-func renderRow(highlighted: Bool) -> NSBitmapImageRep? {
-	let row = AccountRowView(account: sampleAccount(), isActive: true, width: 340)
-	if highlighted { row.mouseEntered(with: NSEvent()) }
-	row.layoutSubtreeIfNeeded()
-	guard let rep = row.bitmapImageRepForCachingDisplay(in: row.bounds) else { return nil }
-	row.cacheDisplay(in: row.bounds, to: rep)
+func boardFor(_ json: String) -> Board {
+	try! JSONDecoder().decode(Board.self, from: json.data(using: .utf8)!)
+}
+
+let panelBoard = boardFor("""
+{"version":1,"updatedAt":"2026-09-16T12:00:00Z","services":{"codex":{"level":"major","summary":"Major outage: Elevated errors","url":"https://status.openai.com","checkedAt":"x","scoped":false},"grok":{"level":"minor","summary":"A small thing elsewhere","url":"u","checkedAt":"x","scoped":false},"claude":{"level":"ok","summary":"Claude Code is operational","url":"https://status.claude.com","checkedAt":"x"}},"providers":{
+"claude":{"activeAccountId":"a","accounts":[
+{"id":"a","email":"someone@example.com","slot":1,"plan":"max","disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"five_hour","label":"5h","percent":13,"resetsAt":"2099-01-01T00:00:00Z","fullAt":"2098-12-31T22:00:00Z","trend":[0,2,5,5,9,13]},{"key":"weekly","label":"week","percent":97,"trend":[40,55,70,82,90,97]},{"key":"weekly_scoped:fable","label":"Fable","percent":70}]}},
+{"id":"b","email":"other@example.com","slot":2,"disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"weekly","label":"week","percent":4}]}},
+{"id":"c","email":"off@example.com","slot":3,"disabled":true,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[],"error":"could not read usage"}}]},
+"codex":{"activeAccountId":"d","accounts":[
+{"id":"d","email":"someone@example.com","slot":1,"disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"primary","label":"week","percent":7}]}}]},
+"antigravity":{"activeAccountId":"e","accounts":[
+{"id":"e","email":"someone@example.com","slot":1,"plan":"Google AI Pro","disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"gemini-5h","label":"Gemini 5h","percent":0},{"key":"gemini-weekly","label":"Gemini week","percent":0.3},{"key":"3p-5h","label":"Claude and GPT 5h","percent":0},{"key":"3p-weekly","label":"Claude and GPT week","percent":0},{"key":"argon-weekly","label":"Gemini 4 Argon week","percent":4.2}]}}]}}}
+""")
+
+func renderPanel(_ configure: (PanelModel) -> Void, dark: Bool = true) -> NSBitmapImageRep? {
+	let model = PanelModel()
+	model.board = panelBoard
+	model.maxPageHeight = 4000
+	configure(model)
+	let host = NSHostingView(rootView: PanelView(model: model, actions: PanelActions()))
+	host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+	host.frame = NSRect(x: 0, y: 0, width: PanelView.width, height: 900)
+	let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+	window.contentView = host
+	// The scrolling part learns its content's height a pass after it first
+	// lays out, so the run loop gets a turn before the size is asked for.
+	for _ in 0..<3 {
+		host.layoutSubtreeIfNeeded()
+		RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+	}
+	let size = host.fittingSize
+	host.frame = NSRect(origin: .zero, size: size)
+	window.setContentSize(size)
+	host.layoutSubtreeIfNeeded()
+	RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+	guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
+	host.cacheDisplay(in: host.bounds, to: rep)
 	return rep
 }
 
-/// A row that drew its text has many distinct colours; one hidden behind a flat
-/// highlight has very few.
+/// A view that drew its text has many distinct colours; an empty one has few.
 func distinctColors(_ rep: NSBitmapImageRep) -> Int {
 	var seen = Set<Int>()
 	for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
@@ -58,94 +75,77 @@ func distinctColors(_ rep: NSBitmapImageRep) -> Int {
 	return seen.count
 }
 
+func save(_ rep: NSBitmapImageRep, as name: String) {
+	guard let folder = ProcessInfo.processInfo.environment["HOTSEAT_RENDER_OUT"],
+		let data = rep.representation(using: .png, properties: [:])
+	else { return }
+	try? data.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
+}
+
 print("rendering")
-if let plain = renderRow(highlighted: false), let lit = renderRow(highlighted: true) {
-	let plainColors = distinctColors(plain)
-	let litColors = distinctColors(lit)
-	check("a plain row draws its content", plainColors > 8, "\(plainColors) colours")
-	check("a highlighted row still draws its content", litColors > 8, "\(litColors) colours")
-	check(
-		"the highlight does not swallow the row",
-		Double(litColors) > Double(plainColors) * 0.4,
-		"\(litColors) vs \(plainColors)")
-} else {
-	check("the row renders at all", false)
+_ = NSApplication.shared
+let pages: [(String, (PanelModel) -> Void, Bool)] = [
+	("accounts", { _ in }, true),
+	("accounts-light", { _ in }, false),
+	("options", { $0.expanded = "claude|b" }, true),
+	("trends", { $0.expanded = "claude|a" }, true),
+	("settings", { $0.page = .settings }, true),
+	("picker", { model in
+		model.page = .settings
+		model.openPicker = "autoThresholdPercent"
+	}, true),
+	("history", { model in
+		model.page = .history
+		model.history = [
+			HistoryEntry(at: "2026-09-16T12:00:00Z", provider: "claude", from: "a@example.com", to: "b@example.com", reason: "auto")
+		]
+	}, true),
+	("add", { $0.page = .add }, true),
+	("empty", { $0.board = boardFor("{\"updatedAt\":\"2026-09-16T12:00:00Z\",\"providers\":{}}") }, true),
+]
+var heights: [String: CGFloat] = [:]
+for (name, configure, dark) in pages {
+	if let rep = renderPanel(configure, dark: dark) {
+		save(rep, as: name)
+		heights[name] = rep.size.height
+		let colours = distinctColors(rep)
+		check("the \(name) page draws its content", colours > 8, "\(colours) colours, \(Int(rep.size.width))x\(Int(rep.size.height))")
+	} else {
+		check("the \(name) page renders at all", false)
+	}
 }
-
-// MARK: - Clicking
-//
-// Giving a menu item a submenu makes AppKit replace the item's action with an
-// internal one belonging to the menu. A row that reached for that action sent a
-// selector to an object that does not implement it, and the app died mid-click.
-
-print("clicking")
-
-var clicked = 0
-let live = NSMenuItem()
-let liveRow = AccountRowView(
-	account: sampleAccount(), isActive: false, width: 340, onClick: { clicked += 1 })
-live.view = liveRow
-// The submenu is what rewrote the action and caused the crash.
-live.submenu = NSMenu()
-let menu = NSMenu()
-menu.addItem(live)
-
-liveRow.mouseUp(with: NSEvent())
-check("clicking a row runs the row's own handler", clicked == 1, "ran \(clicked) time(s)")
 check(
-	"the menu item's action is left alone",
-	live.action == nil || live.action == Selector(("submenuAction:")),
-	"action is \(live.action.map(NSStringFromSelector) ?? "none")")
+	"an open picker shows its choices under it, and a closed one takes no room for them",
+	(heights["picker"] ?? 0) > (heights["settings"] ?? 0), "\(heights)")
+check(
+	"the dropdown is as tall as its content, not a fixed size",
+	(heights["options"] ?? 0) > (heights["accounts"] ?? 0) && (heights["empty"] ?? 0) < (heights["accounts"] ?? 0),
+	"\(heights)")
 
-// A row with no handler must not crash on a click, and must not cancel the
-// menu it sits in either, since it has nothing to act on.
-let inert = NSMenuItem()
-let inertRow = AccountRowView(account: sampleAccount(disabled: true), isActive: false, width: 340)
-inert.view = inertRow
-inert.submenu = NSMenu()
-let inertMenu = NSMenu()
-inertMenu.addItem(inert)
-inertRow.mouseUp(with: NSEvent())
-check("a row with no handler survives a click", true)
+check(
+	"an account's options show its limits' last week when there is one to show",
+	(heights["trends"] ?? 0) > (heights["options"] ?? 0) - 60, "\(heights)")
+check("a status page's trouble is read with the board", panelBoard.services["codex"]?.isTrouble == true)
+check("a service that is fine is not called trouble", panelBoard.services["claude"]?.isTrouble == false)
+check("an outage on a page that covers a whole company is shown", panelBoard.services["codex"]?.isShown == true)
+check(
+	"a small issue on such a page is not: it is usually about another product",
+	panelBoard.services["grok"]?.isShown == false)
+check(
+	"a board from an older command line, with no status pages in it, still decodes",
+	boardFor("{\"updatedAt\":\"x\",\"providers\":{}}").services.isEmpty)
 
-// MARK: - Hovering
-//
-// A tooltip appearing over the row makes AppKit report the mouse as having
-// left it, while the cursor has not moved. Taking those reports at face value
-// made the highlight flicker as the cursor crossed the text.
-
-print("hovering")
-let hovered = AccountRowView(account: sampleAccount(), isActive: false, width: 340)
-hovered.mouseEntered(with: NSEvent())
-check("entering the row highlights it", hovered.isHighlighted)
-hovered.isMouseInside = { true }
-hovered.mouseExited(with: NSEvent())
-check("a report of leaving while the cursor is still inside is ignored", hovered.isHighlighted)
-hovered.isMouseInside = { false }
-hovered.mouseExited(with: NSEvent())
-check("really leaving the row clears the highlight", !hovered.isHighlighted)
-hovered.mouseMoved(with: NSEvent())
-check("moving inside the row highlights it, however the cursor got there", hovered.isHighlighted)
-hovered.toolTip = "a tip"
-check("the tooltip lives on the view the cursor is over, and nowhere else", hovered.toolTip == "a tip" && hovered.subviews.last?.toolTip == "a tip")
-
-// MARK: - Sizing
-
-print("sizing")
-for count in 1...4 {
-	let row = AccountRowView(account: sampleAccount(windows: count), isActive: false, width: 340)
-	// Title line, one line per limit, and padding. Exact, so a change to the
-	// drawing that is not matched in the height formula fails here.
-	check(
-		"a row with \(count) limit(s) is exactly as tall as its content",
-		row.frame.height == 20 + CGFloat(count) * 17 + 10,
-		"\(Int(row.frame.height))pt")
-}
-let errored = Account(
-	id: "e", email: "e@example.com", slot: 1, alias: nil, plan: nil, disabled: false,
-	usage: UsageSnapshot(fetchedAt: "2026-09-16T12:00:00Z", windows: [], error: "could not read usage"))
-let erroredRow = AccountRowView(account: errored, isActive: false, width: 340)
-check("a row with only an error reserves a line for it", erroredRow.frame.height == 20 + 17 + 10)
+print("counting accounts to switch to")
+check(
+	"an account in use, one turned off and one with no reading are not somewhere to switch",
+	panelBoard.providers["claude"]?.switchableCount(countingModels: []) == 1)
+check(
+	"a model limit that counts and is nearly full takes its account out",
+	boardFor("""
+	{"updatedAt":"x","providers":{"claude":{"activeAccountId":"a","accounts":[
+	{"id":"a","email":"a@example.com","slot":1,"disabled":false},
+	{"id":"b","email":"b@example.com","slot":2,"disabled":false,"usage":{"fetchedAt":"x","windows":[{"key":"weekly","label":"week","percent":4},{"key":"weekly_scoped:fable","label":"Fable","percent":99}]}}]}}}
+	""").providers["claude"]?.switchableCount(countingModels: ["fable"]) == 0)
 
 // MARK: - Decoding
 //
@@ -178,7 +178,7 @@ check("a board decodes with no settings at all", (try? JSONDecoder().decode(Boar
 
 print("marks")
 let logos = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HOTSEAT_LOGOS"] ?? "macos/Logos")
-for provider in ["claude", "codex"] {
+for provider in ["claude", "codex", "antigravity", "grok"] {
 	if let mark = Logo.image(for: provider, in: logos) {
 		check("the \(provider) mark loads as a template the height of the text", mark.isTemplate && mark.size.height == 12, "\(mark.size)")
 	} else {
@@ -186,6 +186,12 @@ for provider in ["claude", "codex"] {
 	}
 }
 check("a service without a mark gets none rather than a crash", Logo.image(for: "other", in: logos) == nil)
+if let colored = Logo.colorImage(for: "antigravity", in: logos) {
+	check("a mark with colours of its own keeps them: it is not a template", !colored.isTemplate && colored.size.width > 0)
+} else {
+	check("the Antigravity mark loads in its own colours", false)
+}
+check("a mark with one colour has no picture of its own", Logo.colorImage(for: "codex", in: logos) == nil)
 if let mark = Logo.image(for: "claude", in: logos) {
 	let painted = Logo.tinted(mark, with: .white, appearance: NSAppearance(named: .darkAqua))
 	if let rep = painted.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)) {
@@ -276,11 +282,6 @@ check(
 	"the model limits counted read as set at once",
 	Settings().applying("autoModelLimits", "fable, opus").autoModelLimits == ["fable", "opus"])
 check("clearing the model limits reads as none at once", Settings().applying("autoModelLimits", "").autoModelLimits.isEmpty)
-
-print("reading a menu item's payload")
-check("an account id holding a bar stays whole", menuPayload("claude|id:team|work") == ["claude", "id:team|work"])
-check("a setting cleared to nothing keeps its empty value", menuPayload("autoModelLimits|") == ["autoModelLimits", ""])
-check("a payload with no bar is one part", menuPayload("claude") == ["claude"])
 
 print("failing commands")
 let slow = Runner(executable: "/bin/sleep")

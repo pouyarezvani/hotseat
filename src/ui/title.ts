@@ -1,5 +1,6 @@
 import type { Settings } from '../core/settings.ts';
 import type { ProviderId, State, UsageWindow } from '../core/types.ts';
+import { withoutLimits } from '../core/usage-history.ts';
 
 export interface TitleSpan {
 	text: string;
@@ -9,7 +10,12 @@ export interface TitleSpan {
 	provider?: ProviderId;
 }
 
-const PROVIDER_LABEL: Record<ProviderId, string> = { claude: 'Claude', codex: 'Codex' };
+const PROVIDER_LABEL: Record<ProviderId, string> = {
+	claude: 'Claude',
+	codex: 'Codex',
+	antigravity: 'Antigravity',
+	grok: 'Grok',
+};
 const DOT = ' · ';
 /** Between the service, the account and the numbers. A bullet: narrow, unlike a dash. */
 const SEP = ' • ';
@@ -21,7 +27,8 @@ export type TitleOptions = Pick<
 	| 'titlePercentage'
 	| 'titleShowModelLimits'
 	| 'titleShortenEmail'
->;
+> &
+	Partial<Pick<Settings, 'titleProviders' | 'hideLimits'>>;
 
 function accountLabel(email: string, alias: string | undefined, shorten: boolean): string {
 	if (alias) return alias;
@@ -38,9 +45,11 @@ function isModelLimit(window: UsageWindow): boolean {
  * words alone. Percentages are the only thing that changes meaning at a glance,
  * so they are the only thing that carries colour.
  */
-export function buildTitle(state: State, options: TitleOptions): TitleSpan[] {
+export function buildTitle(given: State, options: TitleOptions): TitleSpan[] {
+	const state = withoutLimits(given, options.hideLimits ?? []);
 	const spans: TitleSpan[] = [];
 	for (const providerId of Object.keys(state.providers) as ProviderId[]) {
+		if (options.titleProviders && !options.titleProviders.includes(providerId)) continue;
 		const providerState = state.providers[providerId];
 		const active = providerState.accounts.find(
 			(account) => account.id === providerState.activeAccountId,
@@ -57,7 +66,7 @@ export function buildTitle(state: State, options: TitleOptions): TitleSpan[] {
 		}
 		if (options.titlePercentage === 'none') continue;
 
-		const all = active.usage?.windows ?? [];
+		const all = (active.usage?.windows ?? []).filter((window) => !window.hidden);
 		const windows = options.titleShowModelLimits ? all : all.filter((w) => !isModelLimit(w));
 		// No numbers yet: the name alone says which account is in use.
 		if (windows.length === 0) continue;

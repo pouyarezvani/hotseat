@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
 	loop as autoLoop,
 	tick as autoTick,
@@ -6,14 +8,17 @@ import {
 } from './core/auto.ts';
 import { collectState, PROVIDERS } from './core/collect.ts';
 import {
+	detectInstalled,
 	enroll,
 	enrollFromToken,
 	loginClaudeIsolated,
 	loginCodexIsolated,
+	loginGrokIsolated,
 	publishState,
 	saveInstalled,
 	signInAgain,
 } from './core/enroll.ts';
+import { readJson, writeJsonAtomic } from './core/fs.ts';
 import { guardStatus, resumeBrake, runHook } from './core/guard.ts';
 import {
 	type HistoryEntry,
@@ -33,6 +38,7 @@ import {
 	startMenuBar,
 	stopMenuBar,
 } from './core/menubar.ts';
+import { snapshotPath } from './core/paths.ts';
 import type { SwitchMemory } from './core/policy.ts';
 import {
 	accountsFor,
@@ -43,6 +49,7 @@ import {
 	setAlias,
 	updateRegistry,
 } from './core/registry.ts';
+import { serviceStatuses } from './core/service-status.ts';
 import { captureSession, forgetSession, needsSession, prepareSession } from './core/session.ts';
 import {
 	DEFAULTS,
@@ -51,22 +58,27 @@ import {
 	loadSettings,
 	resetSetting,
 	SETTING_KEYS,
+	setListMember,
 	setSetting,
 } from './core/settings.ts';
 import { activate, nextAvailable, pickBest, rotateNext, type SwitchResult } from './core/switch.ts';
 import { holdSwitch } from './core/switch-lock.ts';
 import { exportAccounts, importAccounts, moveSlot, purge, swapSlots } from './core/transfer.ts';
 import { PROVIDER_IDS, type ProviderId } from './core/types.ts';
+import { withHistory, withoutLimits } from './core/usage-history.ts';
+import { fullyAwake } from './core/wake.ts';
 import { clearRunMark, markRunning } from './providers/process.ts';
 import { renderBoard } from './ui/board.ts';
 import { renderHelp } from './ui/help.ts';
 import { closePrompt, isInteractive, select } from './ui/prompt.ts';
 import { note, problem, say, step, success } from './ui/report.ts';
+import { installStatusLine, type Snapshot, statusLine } from './ui/statusline.ts';
 import { theme } from './ui/style.ts';
 import { buildTitle, titleText } from './ui/title.ts';
 
 function parseProvider(value: string | undefined): ProviderId {
-	if (value === 'claude' || value === 'codex') return value;
+	const known = PROVIDER_IDS.find((id) => id === value);
+	if (known) return known;
 	throw new Error(`unknown provider "${value ?? ''}" - expected one of ${PROVIDER_IDS.join(', ')}`);
 }
 
@@ -93,11 +105,29 @@ function warnUnreadable(registry: Awaited<ReturnType<typeof loadRegistry>>): voi
 	);
 }
 
+/** Turns looking for a service's signed-in account on or off, leaving the others as they are. */
+async function setDetected(providerId: ProviderId, on: boolean): Promise<void> {
+	await setListMember('autoDetectProviders', providerId, on);
+}
+
 async function status(json: boolean, force: boolean): Promise<number> {
+	// A service signed in on this Mac with no account saved is added here, so
+	// it shows up on its own. Not while the lid is closed, when a request may
+	// be cut off by the Mac sleeping again.
+	const awake = await fullyAwake();
+	if (awake) await detectInstalled().catch(() => []);
 	const settings = await loadSettings();
-	const state = await collectState({ force });
+	const state = withoutLimits(
+		await withHistory(await collectState({ force })),
+		settings.hideLimits,
+	);
+	const inUse = PROVIDER_IDS.filter((id) => (state.providers[id]?.accounts.length ?? 0) > 0);
+	// A status page is not asked while the lid is closed, and one that cannot
+	// be reached never holds the board up.
+	const services = awake ? await serviceStatuses(inUse).catch(() => ({})) : {};
+	await writeJsonAtomic(snapshotPath(), { ...state, services }).catch(() => undefined);
 	if (json) {
-		process.stdout.write(`${JSON.stringify({ ...state, settings })}\n`);
+		process.stdout.write(`${JSON.stringify({ ...state, settings, services })}\n`);
 		return 0;
 	}
 	warnUnreadable(await loadRegistry());
@@ -107,8 +137,53 @@ async function status(json: boolean, force: boolean): Promise<number> {
 			barWidth: settings.barWidth,
 			now: Date.now(),
 			modelLimits: settings.autoModelLimits,
+			services,
 		})}\n`,
 	);
+	return 0;
+}
+
+/**
+ * How this very program was started, as the words to start it again: the
+ * hotseat on PATH when there is one, the built program otherwise, and the
+ * runtime with its script when run from source.
+ */
+function launchCommand(): string[] {
+	const onPath = Bun.which('hotseat');
+	if (onPath) return [onPath];
+	const script = process.argv[1];
+	const fromSource = script !== undefined && /\.[cm]?[jt]s$/.test(script);
+	return fromSource ? [process.execPath, script] : [process.execPath];
+}
+
+/** Where Claude Code keeps its settings, honouring the same override it does. */
+function claudeSettingsPath(): string {
+	return join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'settings.json');
+}
+
+/**
+ * Prints one line for an agent's status bar, from the board as it was last
+ * worked out. Nothing is asked of any service, so it is quick enough to run
+ * every time the bar redraws.
+ */
+async function statusline(rest: readonly string[]): Promise<number> {
+	if (rest[0] === 'install') {
+		const path = claudeSettingsPath();
+		const outcome = await installStatusLine(path, launchCommand());
+		if (outcome === 'taken') {
+			problem(
+				`Claude Code already has a status line set in ${path}. Remove its "statusLine" entry first, or point it at: hotseat statusline`,
+			);
+			return 1;
+		}
+		success(`Claude Code will show hotseat's line the next time it starts (${path})`);
+		return 0;
+	}
+	const provider = rest[0] ? parseProvider(rest[0]) : 'claude';
+	const snapshot = await readJson<Snapshot>(snapshotPath()).catch(() => null);
+	// An agent's status bar draws colour though it is not a terminal.
+	const look = { ...theme(), color: !process.env.NO_COLOR };
+	process.stdout.write(`${statusLine(snapshot, provider, look, Date.now())}\n`);
 	return 0;
 }
 
@@ -127,7 +202,7 @@ async function seat(
 	let result: SwitchResult;
 	let memory: SwitchMemory;
 	try {
-		result = await activate(providerId, accountId);
+		result = await activate(providerId, accountId, { manual: true });
 		if (result.alreadyActive) {
 			note(`${provider.displayName} is already using ${result.to}`);
 			return 0;
@@ -204,6 +279,7 @@ async function capture(providerId: ProviderId, announce: boolean): Promise<numbe
 		problem(`no ${provider.displayName} account is signed in on this machine`);
 		return 1;
 	}
+	await setDetected(providerId, true);
 	await publishState({ force: true });
 	if (announce) {
 		success(`saved ${saved.email} as ${provider.displayName} account ${saved.account.slot}`);
@@ -221,7 +297,31 @@ async function addInteractive(): Promise<number> {
 	const providerId = await select<ProviderId>('Add an account for which service?', [
 		{ label: 'Claude', value: 'claude', hint: 'Claude Code' },
 		{ label: 'Codex', value: 'codex', hint: 'OpenAI Codex' },
+		{ label: 'Grok', value: 'grok', hint: 'Grok Build' },
+		{ label: 'Antigravity', value: 'antigravity', hint: 'saves the account it is signed in to' },
 	]);
+
+	if (providerId === 'antigravity') {
+		// Antigravity has no sign-in of its own to run from here: an account is
+		// signed in to from inside it, and saved from there.
+		closePrompt();
+		say('');
+		note('Antigravity signs in from inside its own app, so this saves the account it is');
+		note('signed in to now. To add another, sign in to it there, then run this again.');
+		return capture('antigravity', true);
+	}
+
+	if (providerId === 'grok') {
+		closePrompt();
+		say('');
+		note('Your browser will open. Sign in as the account you want to add.');
+		note('Nothing is signed out. The account you are using stays signed in.');
+		const credential = await loginGrokIsolated();
+		const account = await step('Saving the account', () => enroll('grok', credential));
+		say('');
+		success(`added ${account.email} as Grok account ${account.slot}`);
+		return 0;
+	}
 
 	if (providerId === 'codex') {
 		closePrompt();
@@ -285,6 +385,8 @@ export async function main(argv: readonly string[]): Promise<number> {
 				return await status(rest.includes('--json'), rest.includes('--force'));
 			case 'refresh':
 				return await status(rest.includes('--json'), true);
+			case 'statusline':
+				return await statusline(rest);
 			case 'title': {
 				const settings = await loadSettings();
 				const state = await collectState();
@@ -401,8 +503,15 @@ export async function main(argv: readonly string[]): Promise<number> {
 				const account = await resolve(providerId, rest[1]);
 				const held = await holdSwitch(providerId);
 				let wasInUse: boolean;
+				let noneLeft: boolean;
 				try {
-					wasInUse = (await loadRegistry()).active[providerId] === account.id;
+					const before = await loadRegistry();
+					wasInUse = before.active[providerId] === account.id;
+					// With none left, the service is no longer looked for, or the
+					// account would be added straight back. Turned off first, under
+					// the lock that looking for one also takes.
+					noneLeft = accountsFor(before, providerId).every((entry) => entry.id === account.id);
+					if (noneLeft) await setDetected(providerId, false);
 					await forgetSession(PROVIDERS[providerId], account);
 					await updateRegistry((registry) => removeAccount(registry, account.id));
 				} finally {
@@ -410,6 +519,11 @@ export async function main(argv: readonly string[]): Promise<number> {
 				}
 				await publishState();
 				success(`removed ${account.email} and deleted its saved login`);
+				if (noneLeft) {
+					note(
+						`hotseat no longer looks for a ${PROVIDERS[providerId].displayName} account by itself. hotseat add ${providerId} brings it back.`,
+					);
+				}
 				if (wasInUse) {
 					note(
 						`${PROVIDERS[providerId].displayName} itself is still signed in as ${account.email}. Switch to another account to change that.`,
@@ -597,17 +711,16 @@ export async function main(argv: readonly string[]): Promise<number> {
 					});
 					return await plain.exited;
 				}
-				const session = await prepareSession(provider, account);
+				// This process is recorded as running there before the switch lock
+				// is let go, and nothing starts if it cannot be.
+				const session = await prepareSession(provider, account, { reserveFor: process.pid });
 				const shared = providerState.accounts.find(
 					(entry) => entry.id === providerState.activeAccountId,
 				);
 				aside(
 					`running as ${account.email} in this terminal only - every other terminal stays on ${shared?.email ?? 'the shared login'}`,
 				);
-				// This process is recorded before the agent starts, and nothing starts
-				// if it cannot be.
 				// The agent is recorded too, once it starts.
-				await markRunning(session.dir, process.pid);
 				let child: ReturnType<typeof Bun.spawn> | undefined;
 				let code: number;
 				try {

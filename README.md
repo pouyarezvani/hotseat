@@ -47,6 +47,21 @@ It asks which service, opens your browser, and you sign in. The account joins
 the list. `hotseat add claude` or `hotseat add codex` instead saves the account
 that service is signed in to right now, with no browser.
 
+**Accounts you are signed in to are found by themselves.** On each check,
+hotseat adds the account any service is signed in to on this Mac, if that
+service has none saved. Removing a service's last account stops hotseat looking
+for it, so it does not come straight back; `hotseat add <service>` turns it on
+again, and `autoDetectProviders` lists the services looked for.
+
+Antigravity and Grok work the same way as Claude and Codex: several accounts
+each, switched by hand or automatically, with each login renewed and put back
+where the agent keeps it. They stay out of the menu bar text unless you put them
+there (`titleProviders`), and always appear in the dropdown. Two things differ,
+because of how Antigravity itself works: it signs in only from inside its own
+app, so another account is added by signing in to it there and running
+`hotseat add antigravity`; and it keeps one login for every terminal, so
+`hotseat run` cannot start it as a second account.
+
 **Nothing is ever signed out.** Adding a second account does not disturb the one
 you are using. Each sign-in runs against its own scratch directory, so the
 credential it produces is captured without touching the live one. For Codex this
@@ -115,6 +130,20 @@ touches Codex.
 
 The menu bar app shows a notification when it switches, when it could not,
 and when every account is out of room.
+
+## Forecast, history and service status
+
+Every good reading is kept for a week. From it hotseat works out, for each
+limit, when it will be full at the pace it has been filling: the last hour and a
+half for a limit that resets within six hours, the last twelve hours otherwise.
+The forecast shows only when the limit would fill before it resets. An account's
+options in the dropdown draw each limit's last week as a line.
+
+hotseat also reads each service's public status page every five minutes
+(status.claude.com for Claude Code, status.openai.com for Codex) and says so
+beside the service when the page reports trouble. OpenAI's page has no entry for
+the Codex CLI, so Codex is given the page as a whole, with the open incidents
+named.
 
 ## Keeping agents from running away
 
@@ -185,6 +214,8 @@ root covers the whole project.
 | `hotseat status` | every account and how full each limit is |
 | `hotseat list` | one line per account |
 | `hotseat title` | one-line summary, for a shell prompt |
+| `hotseat statusline [service]` | one line for an agent's status bar, read from the last board with no request made |
+| `hotseat statusline install` | show that line in Claude Code's status bar, if it has none set |
 | `hotseat logs [--days N]` | everything hotseat did: switches, brakes, refused helpers (kept 30 days) |
 | `hotseat logs --switches` | recent switches only |
 | `hotseat guard` | the helper limit, recent burn and whether the brake is on |
@@ -222,8 +253,8 @@ Add `--json` to `status`, `title` or `history` for machine-readable output.
 | `hotseat unmap [folder]` | remove that rule |
 | `hotseat run <service> [account] [-- <command>]` | run as that account in this terminal only |
 
-A service is `claude` or `codex`. An account is its number, its email, or the
-name you gave it.
+A service is `claude`, `codex`, `antigravity` or `grok`. An account is its number, its email,
+or the name you gave it.
 
 ### Settings and data
 
@@ -247,6 +278,8 @@ An export contains live logins. Keep it private and delete it when done.
 | `titlePercentage` | `all` | `all`, `worst`, or `none` |
 | `titleShowModelLimits` | `true` | include per-model weekly limits |
 | `titleShortenEmail` | `true` | show the part before the @ |
+| `titleProviders` | `claude,codex` | which services the menu bar text names; one always stays |
+| `autoDetectProviders` | every service | which services hotseat adds by itself when it finds one signed in |
 | `autoThresholdPercent` | `90` | switch once a limit reaches this |
 | `autoThresholdFiveHour` | `0` | a limit of its own for the 5-hour window, or 0 for the general one |
 | `autoThresholdWeekly` | `0` | a limit of its own for the weekly window, or 0 for the general one |
@@ -254,7 +287,7 @@ An export contains live logins. Keep it private and delete it when done.
 | `autoCooldownSeconds` | `300` | minimum gap between switches |
 | `autoUnhealthyTicks` | `3` | failed reads in a row before switching away |
 | `autoIntervalSeconds` | `120` | seconds between checks for `hotseat auto` |
-| `autoProviders` | `claude,codex` | which services to switch |
+| `autoProviders` | every service | which services to switch |
 | `barWidth` | `14` | meter width in the terminal |
 
 Values are bounded, because a bad one breaks something concrete.
@@ -269,6 +302,13 @@ credential when you switch.
   account, so a switch replaces only the account's own keys and leaves the rest
   in place.
 - **Codex** keeps its credential in a file under its home directory.
+- **Grok** keeps its login in `~/.grok/auth.json`. Renewing it gives a new token
+  for the next renewal and ends the old one, so hotseat saves a renewed login
+  before it uses it, as it does for Codex.
+- **Antigravity** keeps its login in one Keychain item. Renewing it gives a new
+  access token and leaves the token that renews it as it was. The sign-in client
+  the renewal needs is read from the installed `agy` program and remembered in
+  `~/.hotseat/antigravity.json` until that program changes.
 
 Usage comes from the same endpoints each agent uses for its own display, read
 with each account's own credential. Every account is polled, not only the one in
@@ -294,6 +334,10 @@ Everything hotseat stores lives in `~/.hotseat`, owner-readable only:
 ├── settings.json     your settings
 ├── state.json        the last board, which the menu bar watches
 ├── usage.json        cached readings
+├── usage-history.json  each limit's readings over the last week
+├── service-status.json what each service's status page last said
+├── statusline.json   the last board, for `hotseat statusline` to read
+├── antigravity.json  the sign-in client Antigravity's login is renewed with
 ├── guard.json        the helper reservations, readings and brakes
 ├── logs/             one file per day: switches, brakes, helper decisions (30 days)
 ├── auto-state.json   what the last automatic switch left behind
@@ -358,17 +402,16 @@ That last one exists because the menu talks to the CLI by name: a test reads
 every command the menu invokes, every setting it writes and every value it
 offers, and fails if any of them is something the CLI would reject.
 
-The menu bar build runs its own checks against the real views. One renders a
-highlighted account row off-screen and confirms its content survived, because a
-highlight added as a subview paints over the row and that is only visible on
-screen. Another clicks a row and confirms the row's own handler ran: reaching
-for the menu item's action instead crashes, since giving an item a submenu makes
-AppKit replace that action with an internal one.
+The dropdown is the app's own window rather than a system menu. The menu bar
+build runs its own checks against the real views: it draws every page of the
+dropdown off-screen and confirms each one drew its content and is as tall as
+that content, because an empty or clipped window is only visible on screen. Set
+`HOTSEAT_RENDER_OUT` to a folder to have those pages saved there as pictures.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
 
-The Claude and OpenAI marks in `macos/Logos` belong to Anthropic and OpenAI.
-They appear in the compact menu bar title only to say which service a number
-belongs to.
+The Claude, OpenAI, Antigravity and Grok marks in `macos/Logos` belong to
+Anthropic, OpenAI, Google and xAI. They appear in the compact menu bar title and the dropdown
+only to say which service a number belongs to.

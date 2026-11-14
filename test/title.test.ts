@@ -47,6 +47,24 @@ const state: State = {
 				},
 			],
 		},
+		antigravity: {
+			activeAccountId: 'c',
+			accounts: [
+				{
+					id: 'c',
+					provider: 'antigravity',
+					email: 'someone@example.com',
+					slot: 1,
+					disabled: false,
+					addedAt: later,
+					usage: {
+						fetchedAt: later,
+						windows: [{ key: 'gemini-weekly', label: 'Gemini week', percent: 4, resetsAt: later }],
+					},
+				},
+			],
+		},
+		grok: { accounts: [] },
 	},
 };
 
@@ -56,6 +74,7 @@ const full: TitleOptions = {
 	titlePercentage: 'all',
 	titleShowModelLimits: true,
 	titleShortenEmail: true,
+	titleProviders: ['claude', 'codex'],
 };
 
 describe('the menu bar title', () => {
@@ -87,6 +106,28 @@ describe('the menu bar title', () => {
 		expect(titleText(buildTitle(bare, full))).toBe(
 			'Claude • pouya • 32% · 8% · 13%   Codex • someone',
 		);
+	});
+
+	test('names only the services chosen for it, in their usual order', () => {
+		expect(titleText(buildTitle(state, { ...full, titleProviders: ['codex'] }))).toBe(
+			'Codex • someone • 69%',
+		);
+		expect(
+			titleText(buildTitle(state, { ...full, titleProviders: ['antigravity', 'claude'] })),
+		).toBe('Claude • pouya • 32% · 8% · 13%   Antigravity • someone • 4%');
+	});
+
+	test('a limit left off the board is left out of the title too', () => {
+		expect(titleText(buildTitle(state, { ...full, hideLimits: ['week'] }))).toBe(
+			'Claude • pouya • 32% · 13%   Codex • someone',
+		);
+		expect(titleText(buildTitle(state, { ...full, hideLimits: ['fab'] }))).toBe(
+			'Claude • pouya • 32% · 8%   Codex • someone • 69%',
+		);
+	});
+
+	test('a service left out of it by default stays out, however many accounts it has', () => {
+		expect(titleText(buildTitle(state, full))).not.toContain('Antigravity');
 	});
 
 	test('the fullest limit only, and no percentages at all', () => {

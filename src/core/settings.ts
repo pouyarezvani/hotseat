@@ -1,5 +1,13 @@
 import { acquireLock, readJson, writeJsonAtomic } from './fs.ts';
 import { hotseatHome, settingsPath } from './paths.ts';
+import { PROVIDER_IDS } from './types.ts';
+
+/** Settings that hold a list of services, so a name that is not one is refused. */
+const PROVIDER_LISTS: readonly string[] = ['titleProviders', 'autoDetectProviders'];
+
+function isProviderName(value: string): boolean {
+	return (PROVIDER_IDS as readonly string[]).includes(value);
+}
 
 export type TitlePercentage = 'worst' | 'all' | 'none';
 
@@ -15,6 +23,19 @@ export interface Settings {
 	titleShowModelLimits: boolean;
 	/** Shorten an account to the part before the @ in titles. */
 	titleShortenEmail: boolean;
+	/** Which services the menu bar title names. Never empty: one always stays. */
+	titleProviders: string[];
+	/**
+	 * Which services hotseat adds by itself when it finds one signed in on this
+	 * Mac with no account saved. Removing a service's last account takes it out.
+	 */
+	autoDetectProviders: string[];
+	/**
+	 * Limits left off the board, by the start of their name, such as a group of
+	 * models a service reports that you do not use there. They are still read
+	 * and kept in the history.
+	 */
+	hideLimits: string[];
 	/** Switch once the account in use passes this share of any counted window. */
 	autoThresholdPercent: number;
 	/** A limit of its own for the 5-hour window, or 0 to use the general one. */
@@ -51,6 +72,9 @@ export const DEFAULTS: Settings = {
 	titlePercentage: 'all',
 	titleShowModelLimits: true,
 	titleShortenEmail: true,
+	titleProviders: ['claude', 'codex'],
+	autoDetectProviders: [...PROVIDER_IDS],
+	hideLimits: [],
 	autoThresholdPercent: 90,
 	autoThresholdFiveHour: 0,
 	autoThresholdWeekly: 0,
@@ -58,7 +82,7 @@ export const DEFAULTS: Settings = {
 	autoUnhealthyTicks: 3,
 	autoIntervalSeconds: 120,
 	autoCooldownSeconds: 300,
-	autoProviders: ['claude', 'codex'],
+	autoProviders: [...PROVIDER_IDS],
 	barWidth: 14,
 	guardChatAgents: 5,
 	brakePoints: 25,
@@ -127,10 +151,15 @@ export async function loadSettings(): Promise<Settings> {
 		}
 		if (Array.isArray(DEFAULTS[key])) {
 			const value = merged[key];
+			const list = Array.isArray(value)
+				? value.filter((item): item is string => typeof item === 'string')
+				: undefined;
+			const kept = PROVIDER_LISTS.includes(key) ? list?.filter(isProviderName) : list;
 			Object.assign(merged, {
-				[key]: Array.isArray(value)
-					? value.filter((item): item is string => typeof item === 'string')
-					: DEFAULTS[key],
+				[key]:
+					kept === undefined || (key === 'titleProviders' && kept.length === 0)
+						? DEFAULTS[key]
+						: kept,
 			});
 		}
 	}
@@ -176,10 +205,20 @@ export function coerce(key: keyof Settings, raw: string): Settings[keyof Setting
 		throw new Error(`${key} expects true or false, got "${raw}"`);
 	}
 	if (Array.isArray(current)) {
-		return raw
+		const list = raw
 			.split(',')
 			.map((part) => part.trim())
 			.filter((part) => part.length > 0);
+		if (PROVIDER_LISTS.includes(key)) {
+			const unknown = list.find((name) => !isProviderName(name));
+			if (unknown) {
+				throw new Error(`${key} expects any of ${PROVIDER_IDS.join(', ')}, got "${unknown}"`);
+			}
+			if (key === 'titleProviders' && list.length === 0) {
+				throw new Error(`${key} needs at least one service - the menu bar always shows one`);
+			}
+		}
+		return list;
 	}
 	const choices = CHOICES[key];
 	if (choices && !choices.includes(raw)) {
@@ -194,6 +233,30 @@ export async function setSetting(key: keyof Settings, raw: string): Promise<Sett
 	const lock = await acquireLock(hotseatHome(), 10_000, 'settings.lock');
 	try {
 		const stored = (await readJson<Partial<Settings>>(settingsPath())) ?? {};
+		await writeJsonAtomic(settingsPath(), { ...stored, version: 1, [key]: value });
+	} finally {
+		await lock.release();
+	}
+	return loadSettings();
+}
+
+/**
+ * Adds a name to a list setting, or takes it out, against the list as it is
+ * stored at that moment and under the settings lock, so two changes made at
+ * once both survive.
+ */
+export async function setListMember(
+	key: 'autoDetectProviders' | 'titleProviders' | 'autoProviders',
+	name: string,
+	on: boolean,
+): Promise<Settings> {
+	const lock = await acquireLock(hotseatHome(), 10_000, 'settings.lock');
+	try {
+		const stored = (await readJson<Partial<Settings>>(settingsPath())) ?? {};
+		const current = (await loadSettings())[key];
+		const kept = current.filter((entry) => entry !== name);
+		const next = on ? PROVIDER_IDS.filter((entry) => kept.includes(entry) || entry === name) : kept;
+		const value = coerce(key, next.join(','));
 		await writeJsonAtomic(settingsPath(), { ...stored, version: 1, [key]: value });
 	} finally {
 		await lock.release();

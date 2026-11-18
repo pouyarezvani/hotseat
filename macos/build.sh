@@ -22,6 +22,7 @@ if [ ! -f "$here/Icon/Hotseat.icns" ] || [ "$here/Icon/MakeIcon.swift" -nt "$her
 	"$iconset/../makeicon" "$iconset"
 	iconutil -c icns "$iconset" -o "$here/Icon/Hotseat.icns"
 	cp "$iconset/icon_512x512.png" "$here/Icon/icon.png"
+	cp "$iconset/../favicon.png" "$here/Icon/favicon.png"
 fi
 cp "$here/Icon/Hotseat.icns" "$resources_dir/Hotseat.icns"
 cp "$here"/Logos/*.svg "$here"/Logos/*.png "$resources_dir/"

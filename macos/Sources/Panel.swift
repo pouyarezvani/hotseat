@@ -1109,6 +1109,12 @@ struct PanelView: View {
 	private func header(_ theme: Theme) -> some View {
 		HStack(spacing: 8) {
 			if model.page == .accounts {
+				Image(nsImage: NSApp.applicationIconImage)
+					.resizable()
+					.interpolation(.high)
+					.frame(width: 20, height: 20)
+					.padding(.horizontal, -2)
+					.accessibilityHidden(true)
 				Text("HOTSEAT")
 					.font(.system(size: 11, weight: .semibold, design: .monospaced))
 					.tracking(1.6)

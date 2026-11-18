@@ -2,14 +2,45 @@ import AppKit
 
 /// Draws the app icon and writes every size macOS asks for.
 ///
-/// The mark is a white disc cut into two halves, the right half raised a step
-/// above the left, on a graphite plate lit softly from above. The cut and the
-/// step are never less than a pixel, so the two halves still separate at 16.
+/// The mark is three slabs stacked in an isometric view on a light porcelain
+/// plate: two of white porcelain and, on top, one of frosted indigo glass, the
+/// account in use. The light plate keeps the icon standing out in dark mode.
 enum Icon {
-	static let plateTop = NSColor(srgbRed: 0.31, green: 0.32, blue: 0.35, alpha: 1)
-	static let plateBottom = NSColor(srgbRed: 0.11, green: 0.12, blue: 0.14, alpha: 1)
-	static let markTop = NSColor(srgbRed: 0.99, green: 0.99, blue: 1.00, alpha: 1)
-	static let markBottom = NSColor(srgbRed: 0.84, green: 0.85, blue: 0.87, alpha: 1)
+	static let plateTop = NSColor(srgbRed: 0.99, green: 0.99, blue: 1.00, alpha: 1)
+	static let plateBottom = NSColor(srgbRed: 0.92, green: 0.925, blue: 0.945, alpha: 1)
+
+	/// The colours of one slab: its top face, top to bottom, and its edge, top
+	/// to bottom, with the colour of the shadow it casts on what is below it.
+	struct Material {
+		let face: (NSColor, NSColor)
+		let edge: (NSColor, NSColor)
+		let shadow: NSColor
+		let glow: NSColor?
+	}
+
+	static let porcelain = Material(
+		face: (
+			NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1),
+			NSColor(srgbRed: 0.965, green: 0.967, blue: 0.978, alpha: 1)
+		),
+		edge: (
+			NSColor(srgbRed: 0.85, green: 0.86, blue: 0.89, alpha: 1),
+			NSColor(srgbRed: 0.73, green: 0.74, blue: 0.79, alpha: 1)
+		),
+		shadow: NSColor(srgbRed: 0.25, green: 0.27, blue: 0.42, alpha: 0.26),
+		glow: nil)
+
+	static let glass = Material(
+		face: (
+			NSColor(srgbRed: 0.85, green: 0.86, blue: 0.99, alpha: 1),
+			NSColor(srgbRed: 0.66, green: 0.68, blue: 0.97, alpha: 1)
+		),
+		edge: (
+			NSColor(srgbRed: 0.56, green: 0.58, blue: 0.93, alpha: 1),
+			NSColor(srgbRed: 0.72, green: 0.74, blue: 0.98, alpha: 1)
+		),
+		shadow: NSColor(srgbRed: 0.36, green: 0.36, blue: 0.92, alpha: 0.34),
+		glow: NSColor(srgbRed: 0.50, green: 0.52, blue: 0.97, alpha: 0.45))
 
 	static let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
 
@@ -17,8 +48,8 @@ enum Icon {
 	/// rather than a large one resampled down into mush.
 	///
 	/// `framed` draws the icon as macOS shows it, with the margin and shadow
-	/// every Dock icon has. Unframed, the plate fills the canvas and the disc,
-	/// cut and step are heavier, for places that draw it at 12 to 16 points and
+	/// every Dock icon has. Unframed, the plate fills the canvas and the slabs
+	/// are larger and thicker, for places that draw it at 12 to 16 points and
 	/// frame it themselves, such as a project list.
 	static func draw(size: CGFloat, in context: CGContext, framed: Bool = true) {
 		let rect = CGRect(x: 0, y: 0, width: size, height: size)
@@ -35,7 +66,7 @@ enum Icon {
 			context.saveGState()
 			context.setShadow(
 				offset: CGSize(width: 0, height: -size * 0.008), blur: size * 0.02,
-				color: NSColor(white: 0, alpha: 0.35).cgColor)
+				color: NSColor(white: 0, alpha: 0.28).cgColor)
 			context.addPath(squircle)
 			context.setFillColor(plateBottom.cgColor)
 			context.fillPath()
@@ -51,84 +82,92 @@ enum Icon {
 				backdrop, start: CGPoint(x: 0, y: plate.maxY), end: CGPoint(x: 0, y: plate.minY),
 				options: [])
 		}
-		if let sheen = gradient(NSColor(white: 1, alpha: 0.10), NSColor(white: 1, alpha: 0)) {
-			let source = CGPoint(x: plate.midX, y: plate.maxY + plate.height * 0.15)
-			context.drawRadialGradient(
-				sheen, startCenter: source, startRadius: 0, endCenter: source,
-				endRadius: plate.width * 0.75, options: [])
-		}
 
-		let weight: CGFloat = framed ? 1 : 1.7
-		let radius = plate.width * (framed ? 0.29 : 0.32)
-		// The cut's edges land on whole pixels, so at small sizes it stays a
-		// clean dark line instead of a grey smear.
-		let cut = max(1, (plate.width * 0.026 * weight).rounded())
-		let cutLeft = (plate.midX - cut / 2).rounded()
-		let step = max(plate.width * 0.032 * weight, 1)
-		let round = plate.width * 0.008
-		let halves = [
-			half(
-				center: CGPoint(x: plate.midX, y: plate.midY - step / 2), radius: radius,
-				cut: cutLeft, keepsLeft: true, round: round),
-			half(
-				center: CGPoint(x: plate.midX, y: plate.midY + step / 2), radius: radius,
-				cut: cutLeft + cut, keepsLeft: false, round: round),
+		let width = plate.width * (framed ? 0.70 : 0.80)
+		let thickness = max(plate.width * (framed ? 0.034 : 0.05), 1)
+		let spacing = plate.width * (framed ? 0.14 : 0.16)
+		let middle = plate.midY + thickness / 2
+		let layers: [(y: CGFloat, material: Material)] = [
+			(middle - spacing, porcelain), (middle, porcelain), (middle + spacing, glass),
 		]
-		for shape in halves {
-			context.saveGState()
-			context.setShadow(
-				offset: CGSize(width: 0, height: -size * 0.006), blur: size * 0.018,
-				color: NSColor(white: 0, alpha: 0.5).cgColor)
-			context.addPath(shape)
-			context.setFillColor(markBottom.cgColor)
-			context.fillPath()
-			context.restoreGState()
-
-			context.saveGState()
-			context.addPath(shape)
-			context.clip()
-			let bounds = shape.boundingBoxOfPath
-			if let face = gradient(markTop, markBottom) {
-				context.drawLinearGradient(
-					face, start: CGPoint(x: 0, y: bounds.maxY), end: CGPoint(x: 0, y: bounds.minY),
-					options: [])
-			}
-			context.restoreGState()
+		for layer in layers {
+			slab(
+				center: CGPoint(x: plate.midX, y: layer.y), width: width, thickness: thickness,
+				material: layer.material, size: size, in: context)
 		}
 
-		// A hairline along the edge, which is what keeps the plate from reading
-		// as flat against a dark Dock.
+		// A hairline along the edge, which keeps the light plate from melting
+		// into a light window behind it.
 		context.addPath(squircle)
-		context.setStrokeColor(NSColor(white: 1, alpha: 0.10).cgColor)
+		context.setStrokeColor(NSColor(white: 0, alpha: 0.07).cgColor)
 		context.setLineWidth(max(1, size * 0.004))
 		context.strokePath()
 
 		context.restoreGState()
 	}
 
-	/// The part of a circle on one side of the vertical line at `cut`, with both
-	/// corners of the cut rounded by `round`. The shape is drawn `round` smaller
-	/// and then grown by a stroke of that width, which rounds the corners and
-	/// nothing else.
-	static func half(center: CGPoint, radius: CGFloat, cut: CGFloat, keepsLeft: Bool, round: CGFloat)
-		-> CGPath
-	{
-		let inner = radius - round
-		let offset = (keepsLeft ? cut - round : cut + round) - center.x
-		let angle = acos(max(-1, min(1, offset / inner)))
-		let path = CGMutablePath()
-		if keepsLeft {
-			path.addArc(
-				center: center, radius: inner, startAngle: angle, endAngle: 2 * .pi - angle,
-				clockwise: false)
-		} else {
-			path.addArc(
-				center: center, radius: inner, startAngle: -angle, endAngle: angle, clockwise: false)
+	/// One slab: a rounded square seen from above at an isometric angle, with
+	/// `thickness` of edge showing below its top face.
+	static func slab(
+		center: CGPoint, width: CGFloat, thickness: CGFloat, material: Material, size: CGFloat,
+		in context: CGContext
+	) {
+		let side = width / 2.squareRoot()
+		var toView = CGAffineTransform(translationX: center.x, y: center.y)
+			.scaledBy(x: 1, y: 0.55)
+			.rotated(by: .pi / 4)
+			.translatedBy(x: -side / 2, y: -side / 2)
+		let face = CGPath(
+			roundedRect: CGRect(x: 0, y: 0, width: side, height: side),
+			cornerWidth: side * 0.14, cornerHeight: side * 0.14, transform: &toView)
+		let bounds = face.boundingBoxOfPath
+
+		// The face swept straight down by the thickness: the face itself, the
+		// face lowered, and the band between their left and right corners.
+		var lower = CGAffineTransform(translationX: 0, y: -thickness)
+		let band = CGPath(
+			rect: CGRect(x: bounds.minX, y: center.y - thickness, width: bounds.width, height: thickness),
+			transform: nil)
+		let solid = face.union(face.copy(using: &lower) ?? face).union(band)
+
+		context.saveGState()
+		context.setShadow(
+			offset: CGSize(width: 0, height: -size * 0.016), blur: size * 0.04,
+			color: material.shadow.cgColor)
+		context.addPath(solid)
+		context.setFillColor(material.edge.1.cgColor)
+		context.fillPath()
+		context.restoreGState()
+
+		context.saveGState()
+		context.addPath(solid)
+		context.clip()
+		if let edge = gradient(material.edge.0, material.edge.1) {
+			context.drawLinearGradient(
+				edge, start: CGPoint(x: 0, y: center.y), end: CGPoint(x: 0, y: bounds.minY - thickness),
+				options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
 		}
-		path.closeSubpath()
-		guard round > 0 else { return path }
-		return path.union(
-			path.copy(strokingWithWidth: round * 2, lineCap: .round, lineJoin: .round, miterLimit: 10))
+		context.restoreGState()
+
+		context.saveGState()
+		context.addPath(face)
+		context.clip()
+		if let top = gradient(material.face.0, material.face.1) {
+			context.drawLinearGradient(
+				top, start: CGPoint(x: 0, y: bounds.maxY), end: CGPoint(x: 0, y: bounds.minY),
+				options: [])
+		}
+		if let glow = material.glow, let light = gradient(glow, glow.withAlphaComponent(0)) {
+			let source = CGPoint(x: center.x, y: center.y - bounds.height * 0.12)
+			context.drawRadialGradient(
+				light, startCenter: source, startRadius: 0, endCenter: source,
+				endRadius: bounds.width * 0.45, options: [])
+		}
+		context.addPath(face)
+		context.setStrokeColor(NSColor(white: 1, alpha: 0.8).cgColor)
+		context.setLineWidth(max(0.5, size * 0.004))
+		context.strokePath()
+		context.restoreGState()
 	}
 
 	static func gradient(_ from: NSColor, _ to: NSColor) -> CGGradient? {

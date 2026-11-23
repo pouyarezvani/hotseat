@@ -13,6 +13,12 @@ import type {
 import { listProcesses, markedRunning } from '../process.ts';
 
 const API = 'https://cli-chat-proxy.grok.com/v1';
+/**
+ * The billing record as Grok's own usage view asks for it. Without the format
+ * the service answers only for pay-as-you-go credits, which a plan's own
+ * weekly limit is not part of.
+ */
+const BILLING_PATH = '/billing?format=credits';
 const REQUEST_TIMEOUT_MS = 20_000;
 /** How close to its expiry a login is renewed rather than used. */
 const REFRESH_MARGIN_MS = 5 * 60_000;
@@ -26,9 +32,12 @@ interface Amount {
 
 export interface Billing {
 	config?: {
+		/** The plan's own limit, when it has one: how long it runs and when it ends. */
+		currentPeriod?: { type?: string; start?: string; end?: string };
 		creditUsagePercent?: number;
 		monthlyLimit?: Amount;
 		used?: Amount;
+		billingPeriodStart?: string;
 		billingPeriodEnd?: string;
 	};
 }
@@ -102,17 +111,19 @@ export function mapBilling(payload: Billing, fetchedAt: string): UsageSnapshot {
 	if (share === undefined) {
 		return { fetchedAt, windows: [], note: 'Grok reports no usage limit for this account' };
 	}
+	const weekly = config.currentPeriod?.type === 'USAGE_PERIOD_TYPE_WEEKLY';
+	const resetsAt = config.currentPeriod?.end ?? config.billingPeriodEnd;
+	const startsAt = config.currentPeriod?.start ?? config.billingPeriodStart;
 	return {
 		fetchedAt,
 		windows: [
 			{
-				key: 'month',
-				label: 'month',
-				span: 'month',
+				key: weekly ? 'week' : 'month',
+				label: weekly ? 'week' : 'month',
+				span: weekly ? 'week' : 'month',
 				percent: Math.round(Math.min(100, Math.max(0, share)) * 10) / 10,
-				...(typeof config.billingPeriodEnd === 'string'
-					? { resetsAt: config.billingPeriodEnd }
-					: {}),
+				...(typeof resetsAt === 'string' ? { resetsAt } : {}),
+				...(typeof resetsAt === 'string' && typeof startsAt === 'string' ? { startsAt } : {}),
 			},
 		],
 	};
@@ -182,7 +193,7 @@ export class GrokProvider implements Provider {
 
 	async fetchUsage(credential: Credential): Promise<UsageSnapshot> {
 		const fetchedAt = new Date().toISOString();
-		return mapBilling(await ask<Billing>(credential, '/billing'), fetchedAt);
+		return mapBilling(await ask<Billing>(credential, BILLING_PATH), fetchedAt);
 	}
 
 	expiresAt(credential: Credential): number | undefined {

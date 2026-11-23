@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="macos/Icon/icon.png" alt="The Hotseat icon: three stacked layers, the top one lit" width="128">
+</p>
+
 # hotseat
 
 Keep several Claude Code and Codex accounts on one machine and move between them
@@ -23,19 +27,53 @@ Claude  ────────────────────────
 
 ## Install
 
-Requires [Bun](https://bun.sh) and macOS.
+Requires macOS 14 or later on Apple silicon. Either build it yourself or
+download the latest build.
+
+### Build it yourself
+
+Requires [Bun](https://bun.sh).
 
 ```sh
 git clone https://github.com/pouyarezvani/hotseat.git
 cd hotseat
 bun install
 bun run build                 # builds the hotseat binary into dist/
-ln -sf "$PWD/dist/hotseat" ~/.local/bin/hotseat
+mkdir -p ~/.local/bin && ln -sf "$PWD/dist/hotseat" ~/.local/bin/hotseat
 
-bash macos/build.sh           # builds the menu bar app
+bash macos/build.sh           # builds the menu bar app into macos/build/
 hotseat menubar               # opens it
 hotseat menubar install       # and starts it whenever you log in
 ```
+
+An app built this way runs the `hotseat` built beside it in `dist/`, so
+`bun run build` is enough to update what the menu bar runs. To update, pull and
+run both builds again.
+
+### Download
+
+1. Download [Hotseat.dmg](https://github.com/pouyarezvani/hotseat/releases/latest/download/Hotseat.dmg).
+   Every push to `main` builds a new one, so this link always gives the latest.
+2. Open it and drag **Hotseat** onto **Applications**.
+3. Open Hotseat from Applications. The app is not notarized by Apple yet, so the
+   first time macOS says it cannot check it: open **System Settings > Privacy &
+   Security**, scroll to Hotseat, and click **Open Anyway**. Each new download
+   asks once more.
+
+The downloaded app carries its own `hotseat` command and links it into
+`~/.local/bin` the first time it opens, so a terminal, Claude Code's status line
+and its hooks run the same version as the menu bar. A Mac as it comes does not
+look in `~/.local/bin` for commands; if `hotseat` is not found in a terminal,
+add it to your shell:
+
+```sh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+ It puts one there only where
+there is none, or where a link points to nothing or to another copy of the app;
+a link to a build of your own, and any file, are left as they are. To
+update, download the DMG again and replace the app. `bash scripts/package-dmg.sh`
+builds the same DMG locally into `dist/`.
 
 ## Adding accounts
 

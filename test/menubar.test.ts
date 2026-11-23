@@ -242,3 +242,37 @@ describe('finding the running menu bar app', () => {
 		}
 	});
 });
+
+describe('finding the menu bar app from the CLI', () => {
+	test('a CLI carried inside an app opens that app, whatever it is called and wherever it is', async () => {
+		const { appCandidates } = await import('../src/core/menubar.ts');
+		const carried = appCandidates(
+			'/Applications/Hotseat Beta.app/Contents/Helpers/hotseat',
+			'/Users/me',
+			undefined,
+		);
+		expect(carried[0]).toBe('/Applications/Hotseat Beta.app');
+		const inHome = appCandidates(
+			'/Users/me/Applications/Hotseat.app/Contents/Helpers/hotseat',
+			'/Users/me',
+			undefined,
+		);
+		expect(inHome[0]).toBe('/Users/me/Applications/Hotseat.app');
+		const named = appCandidates(
+			'/Applications/Hotseat.app/Contents/Helpers/hotseat',
+			'/Users/me',
+			'/Other/Hotseat.app',
+		);
+		expect(named.slice(0, 2)).toEqual(['/Other/Hotseat.app', '/Applications/Hotseat.app']);
+	});
+
+	test('a CLI built in a checkout looks in the usual places, then beside its build', async () => {
+		const { appCandidates } = await import('../src/core/menubar.ts');
+		expect(appCandidates('/src/hotseat/dist/hotseat', '/Users/me', undefined)).toEqual([
+			'/Users/me/Applications/Hotseat.app',
+			'/Applications/Hotseat.app',
+			'/src/hotseat/macos/build/Hotseat.app',
+			'/src/hotseat/dist/Hotseat.app',
+		]);
+	});
+});

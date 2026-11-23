@@ -1,0 +1,243 @@
+name: Release
+
+# Every push to main builds the menu bar app, with its CLI inside, into a DMG
+# and publishes it as the latest release, so the download link always gives
+# the newest build:
+# https://github.com/pouyarezvani/hotseat/releases/latest/download/Hotseat.dmg
+# A run publishes only while its commit is still the head of main, and the
+# newest published build is left marked as latest.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    env:
+      VERSION: 0.1.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun test
+
+      - name: Build the DMG
+        env:
+          HOTSEAT_VERSION: ${{ env.VERSION }}
+          HOTSEAT_BUILD: ${{ github.run_number }}
+        run: bash scripts/package-dmg.sh
+
+      # Built into a fresh draft, published only while its commit is still
+      # main's head, and never marked latest here; the promote job marks the
+      # newest. A release already published is checked, never changed.
+      - name: Publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mainHead() { gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha; }
+          # "absent", or whether this version's release is a draft and its commit.
+          releaseState() {
+            local out
+            if out="$(gh release view "v$VERSION" --json isDraft,targetCommitish --jq '"\(.isDraft) \(.targetCommitish)"' 2>&1)"; then
+              printf '%s\n' "$out"
+            elif grep -Fqi 'release not found' <<<"$out"; then
+              echo absent
+            else
+              printf '%s\n' "$out" >&2
+              return 1
+            fi
+          }
+          # "absent", or the commit this version's tag leads to through any tag objects.
+          tagCommit() {
+            local out type sha
+            if ! out="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" --jq '"\(.object.type) \(.object.sha)"' 2>&1)"; then
+              if grep -Fq 'HTTP 404' <<<"$out"; then
+                echo absent
+                return 0
+              fi
+              printf '%s\n' "$out" >&2
+              return 1
+            fi
+            type="${out%% *}"
+            sha="${out#* }"
+            while [ "$type" = tag ]; do
+              out="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '"\(.object.type) \(.object.sha)"')" || return 1
+              type="${out%% *}"
+              sha="${out#* }"
+            done
+            printf '%s\n' "$sha"
+          }
+          # "absent", or the upload state and size of this version's Hotseat.dmg.
+          assetState() {
+            gh release view "v$VERSION" --json assets \
+              --jq '[.assets[] | select(.name == "Hotseat.dmg") | "\(.state) \(.size)"] | first // "absent"'
+          }
+          # This version's release is this commit's, published, its tag points
+          # here and its DMG is uploaded whole: of the given size, or, for one
+          # published by an earlier run of this commit, of any size above zero.
+          verifyPublished() {
+            local state tag asset expected="${1:-}"
+            state="$(releaseState)" || return 1
+            tag="$(tagCommit)" || return 1
+            asset="$(assetState)" || return 1
+            local whole=false
+            if [ -n "$expected" ]; then
+              [ "$asset" = "uploaded $expected" ] && whole=true
+            elif [[ "$asset" =~ ^uploaded\ [1-9][0-9]*$ ]]; then
+              whole=true
+            fi
+            if [ "$state" != "false $GITHUB_SHA" ] || [ "$tag" != "$GITHUB_SHA" ] || [ "$whole" != true ]; then
+              echo "v$VERSION is \"$state\", its tag at \"$tag\", its DMG \"$asset\"; expected this commit's published release with a whole DMG." >&2
+              return 1
+            fi
+          }
+          # Once main has moved on: this commit's draft is removed, this
+          # commit's published release must be whole, and nothing else is ours.
+          standDown() {
+            local state
+            state="$(releaseState)" || return 1
+            case "$state" in
+              absent) ;;
+              "true $GITHUB_SHA") gh release delete "v$VERSION" --yes ;;
+              "false $GITHUB_SHA") verifyPublished ;;
+              *)
+                echo "v$VERSION is \"$state\", not this commit's." >&2
+                return 1
+                ;;
+            esac
+          }
+          size="$(wc -c < dist/Hotseat.dmg | tr -d ' ')"
+          notes="Built from ${GITHUB_SHA::7} on main. Download Hotseat.dmg, open it, and drag Hotseat to Applications."
+          head="$(mainHead)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "main has moved on to $head; its own run publishes the latest build."
+            standDown
+            exit 0
+          fi
+          state="$(releaseState)"
+          case "$state" in
+            "false $GITHUB_SHA")
+              verifyPublished
+              echo "v$VERSION is already published."
+              exit 0
+              ;;
+            "true $GITHUB_SHA") gh release delete "v$VERSION" --yes ;;
+            absent) ;;
+            *)
+              echo "v$VERSION already exists for another commit ($state); not publishing over it." >&2
+              exit 1
+              ;;
+          esac
+          tag="$(tagCommit)"
+          if [ "$tag" != absent ] && [ "$tag" != "$GITHUB_SHA" ]; then
+            echo "the tag v$VERSION leads to $tag, not $GITHUB_SHA; not publishing over it." >&2
+            exit 1
+          fi
+          gh release create "v$VERSION" dist/Hotseat.dmg \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "Hotseat $VERSION" \
+            --notes "$notes" \
+            --latest=false
+          state="$(releaseState)"
+          asset="$(assetState)"
+          if [ "$state" != "true $GITHUB_SHA" ] || [ "$asset" != "uploaded $size" ]; then
+            echo "the draft of v$VERSION is \"$state\" with its DMG \"$asset\"; expected this commit's draft with a whole DMG of $size bytes." >&2
+            exit 1
+          fi
+          head="$(mainHead)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "main moved on to $head while this build uploaded; its own run publishes the latest build."
+            standDown
+            exit 0
+          fi
+          gh release edit "v$VERSION" --draft=false --latest=false --notes "$notes"
+          verifyPublished "$size"
+
+  # Marks the highest-numbered published build latest and prunes old builds,
+  # one run at a time across every run, from what is published when it runs.
+  promote:
+    needs: release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-promote
+      cancel-in-progress: false
+    steps:
+      # Which build is latest and which are pruned are both decided from one
+      # listing; a fresh listing then checks the pruning.
+      - name: Mark the newest build latest and keep the ten newest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          releases() {
+            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+              --jq '.[] | [.tag_name, (.draft | tostring), (.prerelease | tostring)] | @tsv'
+          }
+          builds() {
+            awk -F'\t' '$2 == "false" && $3 == "false" && $1 ~ /^v0\.1\.[0-9]+$/ { print $1 }' <<<"$1" |
+              sort -t. -k3,3nr
+          }
+          buildTags() {
+            local refs
+            refs="$(gh api --paginate "repos/$GH_REPO/git/matching-refs/tags/v0.1." --jq '.[].ref | ltrimstr("refs/tags/")')" || return 1
+            grep -E '^v0\.1\.[0-9]+$' <<<"$refs" || true
+          }
+          inventory="$(releases)"
+          ranked="$(builds "$inventory")"
+          newest="$(sed -n '1p' <<<"$ranked")"
+          if [ -n "$newest" ]; then
+            gh release edit "$newest" --latest
+          fi
+          old="$(tail -n +11 <<<"$ranked")"
+          kept="$(sed -n '1,10p' <<<"$ranked")"
+          owned="$(cut -f1 <<<"$inventory")"
+          tags="$(buildTags)"
+          while read -r tag; do
+            [ -n "$tag" ] || continue
+            gh release delete "$tag" --yes --cleanup-tag || true
+          done <<<"$old"
+          # A build tag older than every build kept, with no release of any
+          # kind of its own, is one an earlier pruning left behind.
+          floor="$(tail -n 1 <<<"$kept" | sed 's/^v0\.1\.//')"
+          stray=""
+          if [ -n "$floor" ]; then
+            while read -r tag; do
+              [ -n "$tag" ] || continue
+              if [ "${tag#v0.1.}" -lt "$floor" ] && ! grep -Fqx -- "$tag" <<<"$owned"; then
+                stray+="$tag"$'\n'
+              fi
+            done <<<"$tags"
+          fi
+          while read -r tag; do
+            [ -n "$tag" ] || continue
+            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$tag" || true
+          done <<<"$stray"
+          remaining="$(releases | cut -f1)"
+          tags="$(buildTags)"
+          gone="$(printf '%s\n%s\n' "$old" "$stray" | sed '/^$/d' | sort -u)"
+          left="$(comm -12 <(printf '%s\n' "$gone" | sed '/^$/d') <(printf '%s\n%s\n' "$remaining" "$tags" | sed '/^$/d' | sort -u))"
+          if [ -n "$left" ]; then
+            echo "could not delete, as a release or a tag: $left" >&2
+            exit 1
+          fi

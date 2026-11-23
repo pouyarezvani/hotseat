@@ -326,8 +326,173 @@ try? FileManager.default.removeItem(atPath: familyFile)
 let home = URL(fileURLWithPath: "/Users/someone")
 let installed = Runner.candidates(bundle: URL(fileURLWithPath: "/opt/tools/Hotseat.app"), home: home)
 check(
-	"an app installed beside its CLI runs that CLI first",
-	installed.first == "/opt/tools/hotseat", installed.first ?? "none")
+	"a released app runs the CLI it carries first",
+	installed.first == "/opt/tools/Hotseat.app/Contents/Helpers/hotseat", installed.first ?? "none")
+check(
+	"an app installed beside its CLI runs that CLI next",
+	installed.dropFirst().first == "/opt/tools/hotseat", installed.dropFirst().first ?? "none")
+
+print("command line link")
+let linkHome = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hotseat-link-\(getpid())")
+let linkFiles = FileManager.default
+try? linkFiles.removeItem(at: linkHome)
+let installedApp = linkHome.appendingPathComponent("Applications/Hotseat.app")
+let carriedCLI = CommandLineLink.carried(in: installedApp)
+try! linkFiles.createDirectory(at: carriedCLI.deletingLastPathComponent(), withIntermediateDirectories: true)
+linkFiles.createFile(atPath: carriedCLI.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+let cliLink = linkHome.appendingPathComponent(".local/bin/hotseat")
+check(
+	"an installed app links the CLI it carries",
+	CommandLineLink.ensure(bundle: installedApp, home: linkHome) == cliLink.path
+		&& (try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) == carriedCLI.path)
+check("and leaves a link that already points there", CommandLineLink.ensure(bundle: installedApp, home: linkHome) == nil)
+try! linkFiles.removeItem(at: cliLink)
+try! linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: "/src/hotseat/dist/hotseat")
+check(
+	"a link to nothing is pointed at the installed one",
+	CommandLineLink.ensure(bundle: installedApp, home: linkHome) == cliLink.path
+		&& (try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) == carriedCLI.path)
+try! linkFiles.removeItem(at: cliLink)
+let ownBuild = linkHome.appendingPathComponent("src/hotseat/dist/hotseat")
+try! linkFiles.createDirectory(at: ownBuild.deletingLastPathComponent(), withIntermediateDirectories: true)
+linkFiles.createFile(atPath: ownBuild.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+try! linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: ownBuild.path)
+check(
+	"a link to a build of your own that exists is left as it is",
+	CommandLineLink.ensure(bundle: installedApp, home: linkHome) == nil
+		&& (try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) == ownBuild.path)
+let realDeep = linkHome.appendingPathComponent("real/deep")
+try! linkFiles.createDirectory(at: realDeep, withIntermediateDirectories: true)
+try! linkFiles.createSymbolicLink(atPath: linkHome.appendingPathComponent("via").path, withDestinationPath: realDeep.path)
+linkFiles.createFile(
+	atPath: linkHome.appendingPathComponent("real/mine").path, contents: Data("#!/bin/sh\n".utf8),
+	attributes: [.posixPermissions: 0o755])
+try! linkFiles.removeItem(at: cliLink)
+try! linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: "../../via/../mine")
+check(
+	"a relative link through a linked folder is followed as the system follows it",
+	CommandLineLink.ensure(bundle: installedApp, home: linkHome) == nil
+		&& (try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) == "../../via/../mine")
+func fakeApp(_ name: String, id: String) -> URL {
+	let app = linkHome.appendingPathComponent("Elsewhere/\(name).app")
+	let helper = CommandLineLink.carried(in: app)
+	try! linkFiles.createDirectory(at: helper.deletingLastPathComponent(), withIntermediateDirectories: true)
+	linkFiles.createFile(atPath: helper.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+	let plist: [String: Any] = ["CFBundleIdentifier": id, "CFBundleExecutable": "x", "CFBundlePackageType": "APPL"]
+	try! PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+		.write(to: app.appendingPathComponent("Contents/Info.plist"))
+	return helper
+}
+let unrelated = fakeApp("Other", id: "com.example.other")
+try! linkFiles.removeItem(at: cliLink)
+try! linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: unrelated.path)
+check(
+	"a link to a helper inside some other app is left as it is",
+	CommandLineLink.ensure(bundle: installedApp, home: linkHome) == nil
+		&& (try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) == unrelated.path)
+let hidden = linkHome.appendingPathComponent("Locked/inner/hotseat")
+try! linkFiles.createDirectory(at: hidden.deletingLastPathComponent(), withIntermediateDirectories: true)
+linkFiles.createFile(atPath: hidden.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+try! linkFiles.setAttributes([.posixPermissions: 0o000], ofItemAtPath: hidden.deletingLastPathComponent().path)
+try! linkFiles.removeItem(at: cliLink)
+try! linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: hidden.path)
+check(
+	"a link to something that cannot be looked at is not taken for a link to nothing",
+	CommandLineLink.ensure(bundle: installedApp, home: linkHome) == nil
+		&& (try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) == hidden.path)
+try! linkFiles.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hidden.deletingLastPathComponent().path)
+let olderCopy = fakeApp("Old Hotseat", id: "dev.hotseat.menubar")
+try! linkFiles.removeItem(at: cliLink)
+try! linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: olderCopy.path)
+check(
+	"a link to another copy of the app's CLI is pointed at this one",
+	CommandLineLink.ensure(bundle: installedApp, home: linkHome) == cliLink.path
+		&& (try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) == carriedCLI.path)
+try! linkFiles.removeItem(at: cliLink)
+linkFiles.createFile(atPath: cliLink.path, contents: Data("mine".utf8))
+check(
+	"a CLI that is a file of its own is never replaced",
+	CommandLineLink.ensure(bundle: installedApp, home: linkHome) == nil
+		&& (try? String(contentsOf: cliLink, encoding: .utf8)) == "mine")
+try! linkFiles.removeItem(at: cliLink)
+check(
+	"a link put in place where there was none is the installed one, with nothing left beside it",
+	CommandLineLink.ensure(bundle: installedApp, home: linkHome) == cliLink.path
+		&& (try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) == carriedCLI.path
+		&& (try? linkFiles.contentsOfDirectory(atPath: cliLink.deletingLastPathComponent().path))?.count == 1)
+try! linkFiles.removeItem(at: cliLink)
+try! linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: "/src/hotseat/dist/hotseat")
+var swaps = 0
+let raced = CommandLineLink.ensure(bundle: installedApp, home: linkHome) { from, to, flags in
+	swaps += 1
+	if swaps == 1 {
+		try? linkFiles.removeItem(at: cliLink)
+		linkFiles.createFile(atPath: cliLink.path, contents: Data("mine".utf8))
+		return renamex_np(from, to, flags)
+	}
+	return -1
+}
+let leftBeside = (try? linkFiles.contentsOfDirectory(atPath: cliLink.deletingLastPathComponent().path)) ?? []
+check(
+	"a file put in place of the link during the swap is kept, even when it cannot be swapped back",
+	raced == nil
+		&& leftBeside.contains { name in
+			(try? String(contentsOf: cliLink.deletingLastPathComponent().appendingPathComponent(name), encoding: .utf8))
+				== "mine"
+		},
+	leftBeside.joined(separator: ", "))
+for name in leftBeside {
+	try? linkFiles.removeItem(at: cliLink.deletingLastPathComponent().appendingPathComponent(name))
+}
+try? linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: "/src/hotseat/dist/hotseat")
+var turns = 0
+let twice = CommandLineLink.ensure(bundle: installedApp, home: linkHome) { from, to, flags in
+	turns += 1
+	if turns <= 2 {
+		try? linkFiles.removeItem(at: cliLink)
+		linkFiles.createFile(atPath: cliLink.path, contents: Data("mine \(turns)".utf8))
+	}
+	return renamex_np(from, to, flags)
+}
+let afterTwice = (try? linkFiles.contentsOfDirectory(atPath: cliLink.deletingLastPathComponent().path)) ?? []
+let contents = afterTwice.compactMap { name in
+	try? String(contentsOf: cliLink.deletingLastPathComponent().appendingPathComponent(name), encoding: .utf8)
+}
+check(
+	"files put in place of the link before each swap are both kept, the newest where the link was",
+	twice == nil && contents.contains("mine 1") && contents.contains("mine 2")
+		&& (try? String(contentsOf: cliLink, encoding: .utf8)) == "mine 2",
+	contents.joined(separator: ", "))
+for name in afterTwice {
+	try? linkFiles.removeItem(at: cliLink.deletingLastPathComponent().appendingPathComponent(name))
+}
+try? linkFiles.removeItem(at: cliLink)
+try? linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: "/nowhere/hotseat")
+let retargeted = CommandLineLink.ensure(bundle: installedApp, home: linkHome) { from, to, flags in
+	if flags == UInt32(RENAME_SWAP), (try? linkFiles.destinationOfSymbolicLink(atPath: to)) == "/nowhere/hotseat" {
+		try? linkFiles.removeItem(at: cliLink)
+		try? linkFiles.createSymbolicLink(atPath: cliLink.path, withDestinationPath: ownBuild.path)
+	}
+	return renamex_np(from, to, flags)
+}
+check(
+	"a link turned to a build of your own during the swap is put back",
+	retargeted == nil && (try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) == ownBuild.path,
+	(try? linkFiles.destinationOfSymbolicLink(atPath: cliLink.path)) ?? "none")
+for name in (try? linkFiles.contentsOfDirectory(atPath: cliLink.deletingLastPathComponent().path)) ?? [] {
+	try? linkFiles.removeItem(at: cliLink.deletingLastPathComponent().appendingPathComponent(name))
+}
+let strayApp = linkHome.appendingPathComponent("Downloads/Hotseat.app")
+try! linkFiles.createDirectory(
+	at: CommandLineLink.carried(in: strayApp).deletingLastPathComponent(), withIntermediateDirectories: true)
+linkFiles.createFile(
+	atPath: CommandLineLink.carried(in: strayApp).path, contents: Data("#!/bin/sh\n".utf8),
+	attributes: [.posixPermissions: 0o755])
+try? linkFiles.removeItem(at: cliLink)
+check(
+	"an app run from outside Applications links nothing",
+	CommandLineLink.ensure(bundle: strayApp, home: linkHome) == nil && !linkFiles.fileExists(atPath: cliLink.path))
+try? linkFiles.removeItem(at: linkHome)
 let fromCheckout = Runner.candidates(
 	bundle: URL(fileURLWithPath: "/src/hotseat/macos/build/Hotseat.app"), home: home)
 check(

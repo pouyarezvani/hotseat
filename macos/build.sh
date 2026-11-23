@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Builds the menu bar app into macos/build/Hotseat.app.
+# Builds the menu bar app into macos/build/Hotseat.app, or into
+# $HOTSEAT_BUILD_DIR/Hotseat.app when that is set.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
-final_app="$here/build/Hotseat.app"
+build_dir="${HOTSEAT_BUILD_DIR:-$here/build}"
+final_app="$build_dir/Hotseat.app"
 # Build beside the current app and swap at the end, so a failed build leaves
 # the previous app in place rather than nothing at all.
-app="$here/build/Hotseat.app.building"
+app="$build_dir/Hotseat.app.building"
 macos_dir="$app/Contents/MacOS"
 resources_dir="$app/Contents/Resources"
 
@@ -27,7 +29,11 @@ fi
 cp "$here/Icon/Hotseat.icns" "$resources_dir/Hotseat.icns"
 cp "$here"/Logos/*.svg "$here"/Logos/*.png "$resources_dir/"
 
-cat > "$app/Contents/Info.plist" <<'PLIST'
+# The version from HOTSEAT_VERSION and HOTSEAT_BUILD, else 0.1.0, build 1.
+version="${HOTSEAT_VERSION:-0.1.0}"
+build="${HOTSEAT_BUILD:-1}"
+
+cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -38,8 +44,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 	<key>CFBundleExecutable</key><string>Hotseat</string>
 	<key>CFBundleIconFile</key><string>Hotseat</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>0.1.0</string>
-	<key>CFBundleVersion</key><string>1</string>
+	<key>CFBundleShortVersionString</key><string>$version</string>
+	<key>CFBundleVersion</key><string>$build</string>
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
 	<key>LSUIElement</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
@@ -101,12 +107,21 @@ if [ -z "$identity" ]; then
 	echo "      starting at login stops working after each rebuild. Add your Apple ID in" >&2
 	echo "      Xcode > Settings > Accounts, then Manage Certificates > + > Apple Development." >&2
 fi
+# Embeds the CLI named by HOTSEAT_CLI in Contents/Helpers, where the app looks first.
+if [ -n "${HOTSEAT_CLI:-}" ]; then
+	mkdir -p "$app/Contents/Helpers"
+	cp "$HOTSEAT_CLI" "$app/Contents/Helpers/hotseat"
+	chmod 755 "$app/Contents/Helpers/hotseat"
+	codesign --force --sign "$identity" "$app/Contents/Helpers/hotseat"
+fi
 codesign --force --sign "$identity" "$app"
 rm -rf "$final_app"
 mv "$app" "$final_app"
 
-# A login item that was on is registered again for the new build.
-if [ "$("$final_app/Contents/MacOS/Hotseat" --login-item status 2>/dev/null)" = "enabled" ]; then
+# A login item that was on is registered again for the new build, for the
+# app in macos/build only and never on CI.
+if [ -z "${CI:-}" ] && [ "$build_dir" = "$here/build" ] &&
+	[ "$("$final_app/Contents/MacOS/Hotseat" --login-item status 2>/dev/null)" = "enabled" ]; then
 	"$final_app/Contents/MacOS/Hotseat" --login-item on >/dev/null
 fi
 

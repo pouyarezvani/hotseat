@@ -199,6 +199,21 @@ describe('the board with its history', () => {
 		});
 	});
 
+	test('a limit that has reset since it was read gets no forecast until the new window is read', async () => {
+		await withHome(async () => {
+			await withHistory(board(60, at(NOW - HOUR)), NOW - HOUR);
+			const before = await withHistory(board(70, at(NOW - HOUR / 2)), NOW - HOUR / 2);
+			expect(before.providers.claude.accounts[0]?.usage?.windows[0]?.fullAt).toBeDefined();
+			const cleared = board(70, at(NOW - HOUR / 2));
+			const account = cleared.providers.claude.accounts[0];
+			if (account?.usage) {
+				account.usage.windows = [{ key: 'five_hour', label: '5h', percent: 0, cleared: true }];
+			}
+			const now = await withHistory(cleared, NOW);
+			expect(now.providers.claude.accounts[0]?.usage?.windows[0]?.fullAt).toBeUndefined();
+		});
+	});
+
 	test('a reading that failed adds nothing: its numbers are the last good ones', async () => {
 		await withHome(async (home) => {
 			await withHistory(board(60, at(NOW - HOUR)), NOW - HOUR);

@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { collectState, PROVIDERS } from './collect.ts';
+import { collectState, loadCache, PROVIDERS } from './collect.ts';
 import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
 import { applyBrake, loadGuard } from './guard.ts';
 import { recordSwitch } from './history.ts';
@@ -20,6 +20,7 @@ import {
 	windowsOverThreshold,
 } from './policy.ts';
 import { accountsFor, loadRegistry } from './registry.ts';
+import { loadSent, sentKey } from './reset-journal.ts';
 import { loadSettings, type Settings } from './settings.ts';
 import { activate } from './switch.ts';
 import { holdSwitch } from './switch-lock.ts';
@@ -269,6 +270,8 @@ export async function tick(
 		awake?: () => Promise<boolean>;
 		/** Runs just before the switch lock is taken; tests use it to act in between. */
 		beforeSwitchLock?: () => Promise<void>;
+		/** Runs under the switch lock, after every check and just before switching; tests use it too. */
+		beforeSwitch?: () => Promise<void>;
 	} = {},
 ): Promise<TickReport[]> {
 	const settings = await loadSettings();
@@ -290,6 +293,7 @@ export async function tick(
 			}));
 	}
 	// Read before the accounts are, and compared again before this pass acts.
+	const passStart = options.now ?? Date.now();
 	const auto = await loadAutoState();
 	const providers = options.providers ?? PROVIDERS;
 	const inUseBefore = new Map<ProviderId, string | null>();
@@ -372,6 +376,23 @@ export async function tick(
 				});
 				continue;
 			}
+			const uses = active
+				? ((await loadSent().catch(() => null))?.[sentKey(providerId, active)] ?? [])
+				: [];
+			const resetAt = active ? (await loadCache()).entries[active.id]?.resetAtMs : undefined;
+			if (
+				uses.some((use) => use.at >= passStart) ||
+				(resetAt !== undefined && resetAt >= passStart)
+			) {
+				reports.push({
+					provider: providerId,
+					outcome: 'holding',
+					detail:
+						'a reset was used on the account in use while this pass was deciding - deciding again next pass',
+				});
+				continue;
+			}
+			await options.beforeSwitch?.();
 			const trigger = decision.trigger ?? 'proactive';
 			const skipped: string[] = [];
 			let landed: Awaited<ReturnType<typeof activate>> | undefined;

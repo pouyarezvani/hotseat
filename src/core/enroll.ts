@@ -214,7 +214,12 @@ export async function signInAgain(input: {
  * everything, because its numbers should appear at once.
  */
 export async function publishState(
-	options: { force?: boolean; providers?: Record<ProviderId, Provider>; now?: number } = {},
+	options: {
+		force?: boolean;
+		providers?: Record<ProviderId, Provider>;
+		now?: number;
+		clock?: () => number;
+	} = {},
 ): Promise<void> {
 	await writeJsonAtomic(statePath(), await collectState(options), 0o600);
 }

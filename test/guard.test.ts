@@ -570,6 +570,46 @@ describe('the brake in the automatic pass', () => {
 		});
 	});
 
+	test('a switch decided before a reset was used on the account in use does not land', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const reports = await tick({
+				providers,
+				now: T,
+				awake: async () => true,
+				beforeSwitchLock: async () => {
+					const { saveSent, sentKey } = await import('../src/core/reset-journal.ts');
+					await saveSent(sentKey('claude', { email: 'a@example.com' }), [
+						{ resetId: 'weekly', requestId: 'r-1', at: T, used: true },
+					]);
+				},
+			});
+			expect(reports.some((report) => report.outcome === 'switched')).toBe(false);
+			expect(reports.some((report) => report.detail.includes('a reset was used'))).toBe(true);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+			expect((await loadRegistry()).active.claude).not.toBe(b.id);
+		});
+	});
+
+	test('a switch decided before a reset does not land, even once the record of it has been cleared', async () => {
+		await withHome(async () => {
+			const { providers, b } = await world();
+			const { recordAfterReset } = await import('../src/core/collect.ts');
+			const registry = await loadRegistry();
+			const a = registry.accounts.find((account) => account.email === 'a@example.com');
+			const reports = await tick({
+				providers,
+				now: T,
+				awake: async () => true,
+				beforeSwitchLock: async () => {
+					if (a) await recordAfterReset(a.id, undefined, T);
+				},
+			});
+			expect(reports.some((report) => report.outcome === 'switched')).toBe(false);
+			expect((await loadRegistry()).active.claude).not.toBe(b.id);
+		});
+	});
+
 	test('a brake that cannot save its state never stops switching', async () => {
 		await withHome(async (home) => {
 			const { providers } = await world();

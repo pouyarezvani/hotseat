@@ -21,6 +21,8 @@ struct Theme {
 	let card: Color
 	let cardActive: Color
 	let cardHover: Color
+	/// Under the cursor, a control inside a card, which is itself lit while hovered.
+	let rowHover: Color
 	let line: Color
 	let text: Color
 	let soft: Color
@@ -34,14 +36,16 @@ struct Theme {
 
 	static let dark = Theme(
 		surface: Color(hex: 0x151515), card: Color(hex: 0x1C1C1B), cardActive: Color(hex: 0x232322),
-		cardHover: Color(hex: 0x262625), line: Color(hex: 0x262625), text: Color(hex: 0xE4E4E0),
+		cardHover: Color(hex: 0x262625), rowHover: Color(hex: 0x33332F), line: Color(hex: 0x262625),
+		text: Color(hex: 0xE4E4E0),
 		soft: Color(hex: 0xA3A39D), faint: Color(hex: 0x8E8E88), track: Color(hex: 0x2E2E2C),
 		accent: Color(hex: 0x7D98FF), chip: Color(hex: 0x222221), chipOn: Color(hex: 0x3B3B38),
 		chipOnText: Color(hex: 0xF2F2EE), isDark: true)
 
 	static let light = Theme(
 		surface: Color(hex: 0xF4F4F1), card: Color(hex: 0xFAFAF8), cardActive: Color(hex: 0xFFFFFF),
-		cardHover: Color(hex: 0xEEEEEA), line: Color(hex: 0xE2E2DD), text: Color(hex: 0x1C1C1B),
+		cardHover: Color(hex: 0xEEEEEA), rowHover: Color(hex: 0xE2E2DC), line: Color(hex: 0xE2E2DD),
+		text: Color(hex: 0x1C1C1B),
 		soft: Color(hex: 0x4A4A47), faint: Color(hex: 0x6A6A65), track: Color(hex: 0xE4E4DF),
 		accent: Color(hex: 0x2F5BFF), chip: Color(hex: 0xECECE8), chipOn: Color(hex: 0xD6D6D0),
 		chipOnText: Color(hex: 0x111111), isDark: false)
@@ -101,6 +105,7 @@ struct PanelActions {
 	var signIn: (String, Account) -> Void = { _, _ in }
 	var setEnabled: (String, Account, Bool) -> Void = { _, _, _ in }
 	var remove: (String, Account) -> Void = { _, _ in }
+	var useReset: (String, Account, LimitReset) -> Void = { _, _, _ in }
 	var setSetting: (String, String) -> Void = { _, _ in }
 	var switchNow: () -> Void = {}
 	var refresh: () -> Void = {}
@@ -288,7 +293,7 @@ struct ActionButton: View {
 		switch kind {
 		case .primary: return hovering ? theme.chipOn : theme.chipOn.opacity(0.75)
 		case .ghost: return hovering ? theme.cardHover : theme.chip
-		case .quiet: return hovering ? theme.cardHover : .clear
+		case .quiet: return hovering ? theme.rowHover : .clear
 		}
 	}
 }
@@ -456,6 +461,9 @@ struct SectionLabel: View {
 /// One limit: its name, a bar, how full it is and when it resets.
 private struct MeterBar: View {
 	let percent: Double
+	/// How much of the window has gone by, from 0 to 1, drawn as a tick: where
+	/// the fill would be if the limit were used evenly until it resets.
+	var pace: Double? = nil
 	@Environment(\.theme) private var theme
 
 	var body: some View {
@@ -467,7 +475,14 @@ private struct MeterBar: View {
 					Capsule().fill(theme.severity(percent))
 						.frame(width: max(geometry.size.height, geometry.size.width * fraction))
 				}
+				if let pace {
+					RoundedRectangle(cornerRadius: 1)
+						.fill(theme.text.opacity(0.7))
+						.frame(width: 2, height: 11)
+						.offset(x: min(max(geometry.size.width * pace - 1, 0), geometry.size.width - 2))
+				}
 			}
+			.frame(height: geometry.size.height)
 		}
 		.frame(height: 5)
 	}
@@ -484,6 +499,7 @@ struct AccountCard: View {
 	let actions: PanelActions
 	@Environment(\.theme) private var theme
 	@State private var hovering = false
+	@State private var hoveringMore = false
 
 	private var canSwitch: Bool { !isActive && !account.disabled }
 	private var token: String { "\(providerId)|\(account.id)" }
@@ -511,6 +527,7 @@ struct AccountCard: View {
 				.accessibilityAddTraits(canSwitch ? .isButton : [])
 				.accessibilityAction { if canSwitch { actions.switchTo(providerId, account) } }
 				.help(tip)
+			resets
 			if isOpen { options }
 		}
 		.background(
@@ -533,6 +550,11 @@ struct AccountCard: View {
 					.lineLimit(1)
 					.truncationMode(.middle)
 				Spacer(minLength: 6)
+				if resetCount > 0 {
+					Text("\(resetCount) RESET\(resetCount == 1 ? "" : "S")")
+						.badge(theme.soft, on: theme.chip)
+						.help("This account holds \(resetCount) free limit reset\(resetCount == 1 ? "" : "s"). Each is listed below its limits, with what it clears and when it runs out.")
+				}
 				if isActive {
 					Text("IN USE").badge(theme.accent, on: theme.accent.opacity(0.16))
 				} else if account.disabled {
@@ -543,12 +565,16 @@ struct AccountCard: View {
 				} label: {
 					Image(systemName: "ellipsis")
 						.font(.system(size: 12, weight: .semibold))
-						.foregroundStyle(isOpen ? theme.text : theme.faint)
+						.foregroundStyle(isOpen || hoveringMore ? theme.text : theme.faint)
 						.frame(width: 24, height: 22)
-						.background(isOpen ? theme.chip : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+						.background(
+							hoveringMore ? theme.rowHover : (isOpen ? theme.chip : .clear),
+							in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+						)
 						.contentShape(Rectangle())
 				}
 				.buttonStyle(.plain)
+				.onHover { hoveringMore = $0 }
 				.accessibilityLabel("Options for \(account.displayName)")
 				.help("Show or hide what you can do with this account, along with its plan and when its numbers were last read.")
 			}
@@ -556,6 +582,54 @@ struct AccountCard: View {
 		}
 		.padding(.horizontal, 14)
 		.padding(.vertical, 12)
+	}
+
+	/// The free limit resets this account holds: what each clears and when it
+	/// runs out. Each one that can be used now is a button that uses it, after
+	/// asking.
+	@ViewBuilder private var resets: some View {
+		let list = liveResets
+		if !list.isEmpty {
+			VStack(alignment: .leading, spacing: 1) {
+				ForEach(list.indices, id: \.self) { index in
+					ResetRow(reset: list[index], tip: resetTip(list[index])) {
+						actions.useReset(providerId, account, list[index])
+					}
+				}
+			}
+			.padding(.horizontal, 8)
+			.padding(.top, -4)
+			.padding(.bottom, 8)
+		}
+	}
+
+	/// The account's resets that have not run out since the board was read.
+	private var liveResets: [LimitReset] {
+		(account.usage?.limitResets ?? []).filter { !$0.expired() }
+	}
+
+	/// How many resets the account holds, counting every use of each.
+	private var resetCount: Int {
+		liveResets.reduce(0) { $0 + max($1.left ?? 1, 1) }
+	}
+
+	private func resetTip(_ reset: LimitReset) -> String {
+		let cleared = reset.clears.joined(separator: " and ")
+		var parts: [String] = []
+		if !reset.clears.isEmpty { parts.append("Empties \(cleared).") }
+		if let givesBack = reset.givesBack {
+			let what = reset.clears.isEmpty ? "it" : cleared
+			parts.append("Also gives back what \(what) used of \(givesBack), without resetting \(givesBack) itself.")
+		}
+		if let left = reset.left { parts.append("You have \(left) of these.") }
+		if let stamp = Countdown.longStamp(reset.expiresAt) { parts.append("Expires \(stamp).") }
+		if let detail = reset.detail { parts.append("In \(providerTitle)'s words: \(detail).") }
+		if let blocked = reset.blocked {
+			parts.append("It can't be used right now: \(blocked).")
+		} else {
+			parts.append("Click to use it now. hotseat asks before it does, because a reset can't be given back.")
+		}
+		return parts.joined(separator: " ")
 	}
 
 	@ViewBuilder private var readings: some View {
@@ -566,7 +640,8 @@ struct AccountCard: View {
 					GridRow {
 						Text(window.label).font(.system(size: 11)).foregroundStyle(theme.soft)
 							.lineLimit(1).fixedSize()
-						MeterBar(percent: window.percent)
+						MeterBar(percent: window.percent, pace: Pace.gone(window))
+							.help(Pace.describe(window))
 						Text("\(Int(window.percent.rounded()))%")
 							.font(.system(size: 11, weight: .medium, design: .monospaced))
 							.foregroundStyle(theme.severity(window.percent))
@@ -579,12 +654,6 @@ struct AccountCard: View {
 				}
 			}
 			.padding(.leading, 16)
-			if let pace {
-				Text(pace).font(.system(size: 11)).foregroundStyle(theme.severity(70))
-					.fixedSize(horizontal: false, vertical: true)
-					.padding(.leading, 16)
-					.help("Worked out from how fast this limit has filled lately: the last hour and a half for one that resets within six hours, the last twelve hours otherwise. It only shows when the limit would fill before it resets.")
-			}
 		}
 		if let error = account.usage?.error {
 			Text(windows.isEmpty ? error : "last read failed: \(error)")
@@ -594,14 +663,6 @@ struct AccountCard: View {
 		} else if windows.isEmpty {
 			Text(account.usage?.note ?? "no reading yet").font(.system(size: 11)).foregroundStyle(theme.faint).padding(.leading, 16)
 		}
-	}
-
-	/// The limit that will fill first at the present pace, said in a line.
-	private var pace: String? {
-		let filling = (account.usage?.shown ?? [])
-			.compactMap { window in Countdown.describe(window.fullAt).map { (window.label, $0, window.fullAt ?? "") } }
-			.min { $0.2 < $1.2 }
-		return filling.map { "At this pace, \($0.0) is full in \($0.1), before it resets." }
 	}
 
 	private var options: some View {
@@ -681,6 +742,61 @@ struct AccountCard: View {
 			parts.append("Last good reading \(Countdown.shortStamp(fetched))")
 		}
 		return parts.isEmpty ? nil : parts.joined(separator: "  \u{00B7}  ")
+	}
+}
+
+/// One free limit reset on an account card: what it is, what it clears, and
+/// when it runs out. One that can be used now answers a hover and a click.
+struct ResetRow: View {
+	let reset: LimitReset
+	let tip: String
+	let use: () -> Void
+	@Environment(\.theme) private var theme
+	@State private var hovering = false
+
+	private var usable: Bool { reset.canUse }
+
+	var body: some View {
+		Button(action: use) {
+			HStack(spacing: 6) {
+				Image(systemName: "arrow.counterclockwise")
+					.font(.system(size: 9, weight: .semibold))
+					.foregroundStyle(usable ? theme.soft : theme.faint)
+					.accessibilityHidden(true)
+				Text(reset.left.map { "\(reset.title) \u{00D7}\($0)" } ?? reset.title)
+					.font(.system(size: 11, weight: .medium))
+					.foregroundStyle(usable ? theme.text : theme.faint)
+					.lineLimit(1).fixedSize()
+				if let clears = reset.clearsText {
+					Text(clears).font(.system(size: 11)).foregroundStyle(theme.faint)
+						.lineLimit(1).truncationMode(.tail)
+				}
+				Spacer(minLength: 6)
+				if hovering && usable {
+					Text("Use\u{2026}")
+						.font(.system(size: 11, weight: .semibold))
+						.foregroundStyle(theme.accent)
+						.fixedSize()
+				} else if let expiry = Countdown.expiry(reset.expiresAt) {
+					Text(expiry)
+						.font(.system(size: 11, design: .monospaced))
+						.foregroundStyle(Countdown.expiresSoon(reset.expiresAt) ? theme.severity(70) : theme.faint)
+						.lineLimit(1).fixedSize()
+				}
+			}
+			.padding(.leading, 22)
+			.padding(.trailing, 6)
+			.frame(minHeight: 24)
+			.background(hovering && usable ? theme.rowHover : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+			.contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+		}
+		.buttonStyle(.plain)
+		.disabled(!usable)
+		.onHover { hovering = $0 }
+		.help(tip)
+		.accessibilityLabel(
+			"\(reset.title)\(reset.left.map { ", \($0) of them" } ?? "")\(reset.clearsText.map { ", clears \($0)" } ?? "")\(Countdown.expiry(reset.expiresAt).map { ", \($0)" } ?? "")")
+		.accessibilityHint(usable ? "Uses this reset, after asking" : (reset.blocked ?? ""))
 	}
 }
 

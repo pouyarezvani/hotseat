@@ -1702,9 +1702,9 @@ describe('two passes at once', () => {
 			await collectState({ providers: other, now: T + MIN });
 			await slow;
 			const stored = (await Bun.file(usageCachePath()).json()) as {
-				entries: Record<string, { snapshot: UsageSnapshot }>;
+				entries: Record<string, { local?: { windows: UsageSnapshot['windows'] } }>;
 			};
-			const percent = stored.entries[a.id]?.snapshot.windows.find(
+			const percent = stored.entries[a.id]?.local?.windows.find(
 				(window) => window.key === 'five_hour',
 			)?.percent;
 			expect(percent).toBe(95);

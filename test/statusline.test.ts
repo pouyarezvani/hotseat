@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { chmod, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { settingsPath, snapshotPath, statePath } from '../src/core/paths.ts';
 import {
 	installStatusLine,
 	type Snapshot,
@@ -170,6 +171,169 @@ describe('numbers that are old or could not be refreshed', () => {
 });
 
 describe('putting the line in Claude Code', () => {
+	test('a settings file that cannot be read still leaves the line drawn from the board', async () => {
+		await withHome(async (home) => {
+			await Bun.write(snapshotPath(), JSON.stringify(snapshot()));
+			await Bun.write(settingsPath(), '{ not json');
+			const child = Bun.spawn(
+				[process.execPath, join(import.meta.dir, '../bin/hotseat.ts'), 'statusline'],
+				{
+					env: { ...process.env, HOTSEAT_HOME: home, HOME: home, NO_COLOR: '1' },
+					stdout: 'pipe',
+					stderr: 'pipe',
+				},
+			);
+			const out = await new Response(child.stdout).text();
+			expect(await child.exited).toBe(0);
+			expect(out).toContain('week 4%');
+		});
+	});
+
+	test('the account in use is the one the menu published last, when that is newer', async () => {
+		await withHome(async (home) => {
+			await Bun.write(snapshotPath(), JSON.stringify(snapshot()));
+			const published = snapshot((s) => {
+				s.updatedAt = at(NOW + HOUR);
+				s.providers.claude.activeAccountId = 'b';
+				s.providers.claude.accounts.push({
+					id: 'b',
+					provider: 'claude',
+					email: 'other@example.com',
+					slot: 2,
+					disabled: false,
+					addedAt: at(NOW),
+					usage: {
+						fetchedAt: at(NOW + HOUR),
+						windows: [{ key: 'seven_day', label: 'week', percent: 55 }],
+					},
+				});
+			});
+			await Bun.write(statePath(), JSON.stringify(published));
+			const child = Bun.spawn(
+				[process.execPath, join(import.meta.dir, '../bin/hotseat.ts'), 'statusline'],
+				{
+					env: { ...process.env, HOTSEAT_HOME: home, HOME: home, NO_COLOR: '1' },
+					stdout: 'pipe',
+					stderr: 'pipe',
+				},
+			);
+			const out = await new Response(child.stdout).text();
+			expect(await child.exited).toBe(0);
+			expect(out).toContain('other');
+			expect(out).toContain('week 55%');
+		});
+	});
+
+	async function drawn(home: string): Promise<string> {
+		const child = Bun.spawn(
+			[process.execPath, join(import.meta.dir, '../bin/hotseat.ts'), 'statusline'],
+			{
+				env: { ...process.env, HOTSEAT_HOME: home, HOME: home, NO_COLOR: '1' },
+				stdout: 'pipe',
+				stderr: 'pipe',
+			},
+		);
+		const out = await new Response(child.stdout).text();
+		expect(await child.exited).toBe(0);
+		return out;
+	}
+
+	const publishedB = () =>
+		snapshot((s) => {
+			s.updatedAt = at(NOW + HOUR);
+			s.providers.claude.activeAccountId = 'b';
+			s.providers.claude.accounts.push({
+				id: 'b',
+				provider: 'claude',
+				email: 'other@example.com',
+				slot: 2,
+				disabled: false,
+				addedAt: at(NOW),
+				usage: {
+					fetchedAt: at(NOW + HOUR),
+					windows: [
+						{ key: 'five_hour', label: '5h', percent: 20 },
+						{ key: 'seven_day', label: 'week', percent: 55 },
+					],
+				},
+			});
+		});
+
+	test('limits asked to be left off stay off when the published board is newer', async () => {
+		await withHome(async (home) => {
+			await Bun.write(snapshotPath(), JSON.stringify(snapshot()));
+			await Bun.write(statePath(), JSON.stringify(publishedB()));
+			await Bun.write(settingsPath(), JSON.stringify({ version: 1, hideLimits: ['week'] }));
+			const out = await drawn(home);
+			expect(out).toContain('other');
+			expect(out).toContain('5h 20%');
+			expect(out).not.toContain('week');
+		});
+	});
+
+	test('without settings, the line is the saved one as it was drawn', async () => {
+		await withHome(async (home) => {
+			await Bun.write(
+				snapshotPath(),
+				JSON.stringify(
+					snapshot((s) => {
+						const windows = s.providers.claude.accounts[0]?.usage?.windows ?? [];
+						for (const window of windows) if (window.label === 'week') window.hidden = true;
+					}),
+				),
+			);
+			await Bun.write(statePath(), JSON.stringify(publishedB()));
+			await Bun.write(settingsPath(), '{ not json');
+			const out = await drawn(home);
+			expect(out).toContain('pouya');
+			expect(out).not.toContain('other');
+			expect(out).not.toContain('week');
+		});
+	});
+
+	test('a newer published board with the same reading keeps the saved forecast', async () => {
+		await withHome(async (home) => {
+			const now = Date.now();
+			const board = (updatedAt: number, fullAt?: string) =>
+				snapshot((s) => {
+					s.updatedAt = at(updatedAt);
+					const usage = s.providers.claude.accounts[0]?.usage;
+					if (!usage) return;
+					usage.fetchedAt = at(now - 60_000);
+					usage.windows = [
+						{
+							key: 'seven_day',
+							label: 'week',
+							percent: 50,
+							resetsAt: at(now + 5 * HOUR),
+							...(fullAt ? { fullAt } : {}),
+						},
+					];
+				});
+			await Bun.write(snapshotPath(), JSON.stringify(board(now - 60_000, at(now + 31 * 60_000))));
+			await Bun.write(statePath(), JSON.stringify(board(now)));
+			const out = await drawn(home);
+			expect(out).toContain('full in');
+		});
+	});
+
+	test('a limit saved as hidden is shown again once it is no longer asked to be left off', async () => {
+		await withHome(async (home) => {
+			await Bun.write(
+				snapshotPath(),
+				JSON.stringify(
+					snapshot((s) => {
+						const windows = s.providers.claude.accounts[0]?.usage?.windows ?? [];
+						for (const window of windows) if (window.label === 'week') window.hidden = true;
+					}),
+				),
+			);
+			await Bun.write(settingsPath(), JSON.stringify({ version: 1, hideLimits: [] }));
+			const out = await drawn(home);
+			expect(out).toContain('week');
+		});
+	});
+
 	test('a settings file keeps the permissions it had, and its other settings', async () => {
 		await withHome(async (home) => {
 			const path = join(home, 'settings.json');

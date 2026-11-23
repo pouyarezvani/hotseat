@@ -14,6 +14,22 @@ export class ServiceError extends Error {
 	}
 }
 
+/** The reset endpoint itself turned a use away, so the reset was not used. */
+export class ResetRefused extends ServiceError {
+	constructor(message: string, status?: number, retryAfterMs?: number) {
+		super(message, status, retryAfterMs);
+		this.name = 'ResetRefused';
+	}
+}
+
+/** A use that failed before anything was sent to the reset endpoint. */
+export class ResetNotSent extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'ResetNotSent';
+	}
+}
+
 /** A Retry-After header is seconds or an HTTP date; either becomes a wait from now. */
 export function retryAfterMs(header: string | null | undefined, now: number): number | undefined {
 	if (header === null || header === undefined) return undefined;

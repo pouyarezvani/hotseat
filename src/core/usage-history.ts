@@ -168,7 +168,7 @@ export async function withHistory(state: State, now = Date.now()): Promise<State
 	}
 	const annotate = (accountId: string, window: UsageWindow): UsageWindow => {
 		const points = history.series[accountId]?.[window.key] ?? [];
-		const eta = fullAt(points, window.resetsAt, now);
+		const eta = window.cleared ? undefined : fullAt(points, window.resetsAt, now);
 		const values = trend(points, now);
 		return {
 			...window,

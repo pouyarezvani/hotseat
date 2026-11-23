@@ -322,6 +322,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 				self?.perform([enabled ? "enable" : "disable", provider, "id:\(account.id)"])
 			},
 			remove: { [weak self] provider, account in self?.remove(provider: provider, account: account) },
+			useReset: { [weak self] provider, account, reset in
+				self?.useReset(provider: provider, account: account, reset: reset)
+			},
 			setSetting: { [weak self] key, value in self?.changeSetting(key, value) },
 			switchNow: { [weak self] in self?.switchToBest() },
 			refresh: { [weak self] in self?.perform(["refresh", "--json"]) },
@@ -410,6 +413,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 		NSApp.activate()
 		guard alert.runModal() == .alertFirstButtonReturn else { return }
 		perform(["remove", provider, "id:\(account.id)"])
+	}
+
+	/// Asks first, naming the account and what will start over, and uses the
+	/// reset only on a yes.
+	private func useReset(provider: String, account: Account, reset: LimitReset) {
+		dropdown.close()
+		guard reset.canUse else { return }
+		let alert = NSAlert()
+		alert.messageText = "Use the \(reset.title) on \(account.displayName)?"
+		var lines: [String] = []
+		if let clears = reset.clearsText { lines.append("This empties \(clears) now.") }
+		if let expiry = Countdown.longStamp(reset.expiresAt) { lines.append("Unused, it would expire \(expiry).") }
+		lines.append("A reset can't be given back once it is used.")
+		alert.informativeText = lines.joined(separator: " ")
+		let use = alert.addButton(withTitle: "Use Reset")
+		let cancel = alert.addButton(withTitle: "Cancel")
+		use.keyEquivalent = ""
+		cancel.keyEquivalent = "\r"
+		NSApp.activate()
+		guard alert.runModal() == .alertFirstButtonReturn, reset.canUse else { return }
+		perform(["use-reset", provider, "id:\(account.id)"] + reset.allIds)
 	}
 
 	/// Shown at once, so the dropdown reads the new value and a second click

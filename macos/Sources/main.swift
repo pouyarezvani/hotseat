@@ -39,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 	private var lastNotice: [String: Notice] = [:]
 
 	func applicationDidFinishLaunching(_ notification: Notification) {
+		CommandLineLink.ensure(bundle: Bundle.main.bundleURL, home: FileManager.default.homeDirectoryForCurrentUser)
 		statusItem.button?.target = self
 		statusItem.button?.action = #selector(toggleDropdown)
 		statusItem.button?.sendAction(on: [.leftMouseDown, .rightMouseDown])

@@ -21,13 +21,15 @@ final class Runner {
 		prefix = []
 	}
 
-	/// Where the CLI may be, in order: beside the app, as an install lays them
-	/// out; in the checkout the app was built in (<checkout>/macos/build/Hotseat.app
-	/// beside <checkout>/dist/hotseat); then the usual install folders.
+	/// Where the CLI may be, in order: inside the app, as a release carries it;
+	/// beside the app; in the checkout the app was built in
+	/// (<checkout>/macos/build/Hotseat.app beside <checkout>/dist/hotseat); then
+	/// the usual install folders.
 	static func candidates(bundle: URL, home: URL) -> [String] {
 		let folder = bundle.deletingLastPathComponent()
 		let checkout = folder.deletingLastPathComponent().deletingLastPathComponent()
 		return [
+			CommandLineLink.carried(in: bundle).path,
 			folder.appendingPathComponent("hotseat").path,
 			checkout.appendingPathComponent("dist/hotseat").path,
 			home.appendingPathComponent(".local/bin/hotseat").path,
@@ -204,5 +206,103 @@ private final class Output: @unchecked Sendable {
 		lock.lock()
 		defer { lock.unlock() }
 		return (stdout, stderr)
+	}
+}
+
+/// The CLI a released app carries, linked where a terminal, Claude Code's status
+/// line and its hooks find it, so they all run the same version as the menu.
+enum CommandLineLink {
+	static func carried(in bundle: URL) -> URL {
+		bundle.appendingPathComponent("Contents/Helpers/hotseat")
+	}
+
+	/// Whether a link's target is one this app may replace: a CLI another copy of
+	/// the app carries, or nothing at all. A link to anything else, such as a
+	/// build of your own, is yours and stays.
+	private static func isReplaceable(_ target: String, from link: URL, _ fileManager: FileManager) -> Bool {
+		// Left for the system to follow: a `..` after a linked folder leads out of
+		// where that folder points, not back up the path as written.
+		let path = target.hasPrefix("/") ? target : link.deletingLastPathComponent().path + "/" + target
+		let resolved = URL(fileURLWithPath: path)
+		if path.hasSuffix(".app/Contents/Helpers/hotseat") {
+			let bundle = resolved.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+			if Bundle(url: bundle)?.bundleIdentifier == "dev.hotseat.menubar" { return true }
+		}
+		// Gone only when the system says there is nothing there: a target that
+		// cannot be looked at, such as one in a folder that cannot be read, stays.
+		var info = stat()
+		return lstat(path, &info) != 0 && errno == ENOENT
+	}
+
+	/// Whether what is at `url` is a link to the carried CLI, the one this app made.
+	private static func isOwnLink(_ url: URL, to carried: URL, _ fileManager: FileManager) -> Bool {
+		let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+		guard attributes?[.type] as? FileAttributeType == .typeSymbolicLink else { return false }
+		return (try? fileManager.destinationOfSymbolicLink(atPath: url.path)) == carried.path
+	}
+
+	/// Points ~/.local/bin/hotseat at the CLI this app carries. Only from an app
+	/// installed in an Applications folder, and only where there is nothing, a
+	/// link to nothing, or a link to another copy of the app's CLI. Says where it linked, or
+	/// nil when it left things as they were. `rename` is renamex_np.
+	@discardableResult
+	static func ensure(
+		bundle: URL, home: URL, fileManager: FileManager = .default,
+		rename: (String, String, UInt32) -> Int32 = { renamex_np($0, $1, $2) }
+	) -> String? {
+		let carried = carried(in: bundle)
+		guard fileManager.isExecutableFile(atPath: carried.path) else { return nil }
+		let folder = bundle.deletingLastPathComponent().standardizedFileURL.path
+		let applications = ["/Applications", home.appendingPathComponent("Applications").standardizedFileURL.path]
+		guard applications.contains(folder) else { return nil }
+		removexattr(carried.path, "com.apple.quarantine", 0)
+		let link = home.appendingPathComponent(".local/bin/hotseat")
+		let existing = try? fileManager.attributesOfItem(atPath: link.path)
+		if let existing {
+			guard existing[.type] as? FileAttributeType == .typeSymbolicLink,
+				let target = try? fileManager.destinationOfSymbolicLink(atPath: link.path),
+				target != carried.path,
+				isReplaceable(target, from: link, fileManager)
+			else { return nil }
+		}
+		try? fileManager.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+		let staged = link.deletingLastPathComponent().appendingPathComponent(".hotseat-\(UUID().uuidString)")
+		guard (try? fileManager.createSymbolicLink(atPath: staged.path, withDestinationPath: carried.path)) != nil else {
+			return nil
+		}
+		if existing == nil {
+			// Put in place only if nothing has appeared there meanwhile.
+			guard rename(staged.path, link.path, UInt32(RENAME_EXCL)) == 0 else {
+				try? fileManager.removeItem(at: staged)
+				return nil
+			}
+			return link.path
+		}
+		// Swapped with what is there in one step. What came out is then where
+		// the new link was made: a link this app may replace is removed, and
+		// anything else, put there meanwhile, is swapped back. If it cannot be
+		// swapped back it is left where it is, never removed.
+		guard rename(staged.path, link.path, UInt32(RENAME_SWAP)) == 0 else {
+			try? fileManager.removeItem(at: staged)
+			return nil
+		}
+		let displaced = try? fileManager.attributesOfItem(atPath: staged.path)
+		if displaced?[.type] as? FileAttributeType == .typeSymbolicLink,
+			let target = try? fileManager.destinationOfSymbolicLink(atPath: staged.path),
+			isReplaceable(target, from: link, fileManager)
+		{
+			try? fileManager.removeItem(at: staged)
+			return link.path
+		}
+		if rename(staged.path, link.path, UInt32(RENAME_SWAP)) == 0 {
+			if isOwnLink(staged, to: carried, fileManager) {
+				try? fileManager.removeItem(at: staged)
+				return nil
+			}
+			// Something newer took the path meanwhile: it keeps it.
+			_ = rename(staged.path, link.path, UInt32(RENAME_SWAP))
+		}
+		NSLog("hotseat: something found at %@ could not be put back and is kept at %@", link.path, staged.path)
+		return nil
 	}
 }

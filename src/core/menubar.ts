@@ -1,6 +1,6 @@
 import { realpath, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 /**
  * Finds the menu bar app. It sits beside the installed binary in a normal
@@ -10,18 +10,36 @@ export async function findApp(): Promise<string | null> {
 	// The running binary is often reached through a symlink on PATH, so the
 	// checkout it belongs to is found from its real location, not the link.
 	const real = await realpath(process.execPath).catch(() => process.execPath);
-	const near = dirname(real);
-	const candidates = [
-		...(process.env.HOTSEAT_APP ? [process.env.HOTSEAT_APP] : []),
-		join(homedir(), 'Applications', 'Hotseat.app'),
-		'/Applications/Hotseat.app',
-		resolve(near, '..', 'macos', 'build', 'Hotseat.app'),
-		resolve(near, 'Hotseat.app'),
-	];
+	const candidates = appCandidates(real, homedir(), process.env.HOTSEAT_APP);
 	for (const candidate of candidates) {
 		if (await Bun.file(join(candidate, 'Contents', 'MacOS', 'Hotseat')).exists()) return candidate;
 	}
 	return null;
+}
+
+/**
+ * Where the menu bar app may be, in order: where HOTSEAT_APP says; the app
+ * this CLI is carried inside, whatever it is called and wherever it was put;
+ * the usual install folders; then beside a checkout's build.
+ */
+export function appCandidates(
+	realExecPath: string,
+	home: string,
+	override: string | undefined,
+): string[] {
+	const near = dirname(realExecPath);
+	const carriedBy =
+		basename(near) === 'Helpers' && basename(dirname(near)) === 'Contents'
+			? [dirname(dirname(near))]
+			: [];
+	return [
+		...(override ? [override] : []),
+		...carriedBy,
+		join(home, 'Applications', 'Hotseat.app'),
+		'/Applications/Hotseat.app',
+		resolve(near, '..', 'macos', 'build', 'Hotseat.app'),
+		resolve(near, 'Hotseat.app'),
+	];
 }
 
 const BUNDLE_ID = 'dev.hotseat.menubar';

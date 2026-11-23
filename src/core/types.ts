@@ -65,6 +65,8 @@ export interface UsageWindow {
 	hidden?: boolean;
 	/** When this limit will be full at the pace it has been filling, if that is before it resets. */
 	fullAt?: string;
+	/** When the window that resets at `resetsAt` began, when the service says. */
+	startsAt?: string;
 	/** The last week of this limit, as evenly spaced values, oldest first. */
 	trend?: number[];
 }

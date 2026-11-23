@@ -85,6 +85,33 @@ describe('reading what the plan has used', () => {
 		expect(usage.note).toBeUndefined();
 	});
 
+	test("a plan's weekly limit is read as a week that ends when the service says", () => {
+		const usage = mapBilling(
+			{
+				config: {
+					currentPeriod: {
+						type: 'USAGE_PERIOD_TYPE_WEEKLY',
+						start: '2026-11-21T06:39:34.224+00:00',
+						end: '2026-11-28T06:39:34.224+00:00',
+					},
+					creditUsagePercent: 2,
+					billingPeriodEnd: '2026-11-28T06:39:34.224+00:00',
+				},
+			},
+			'now',
+		);
+		expect(usage.windows).toEqual([
+			{
+				key: 'week',
+				label: 'week',
+				span: 'week',
+				percent: 2,
+				resetsAt: '2026-11-28T06:39:34.224+00:00',
+				startsAt: '2026-11-21T06:39:34.224+00:00',
+			},
+		]);
+	});
+
 	test('a share the service works out itself is used as it is', () => {
 		const usage = mapBilling(
 			{ config: { creditUsagePercent: 61.26, monthlyLimit: { val: 0 } } },
@@ -145,7 +172,9 @@ describe('asking the service', () => {
 	test('reads the billing record with the login as it is', async () => {
 		const calls = fakeFetch(() => json(NOTHING_REPORTED));
 		await new GrokProvider().fetchUsage(login('2099-01-01T00:00:00Z'));
-		expect(calls.map((call) => call.url)).toEqual(['https://cli-chat-proxy.grok.com/v1/billing']);
+		expect(calls.map((call) => call.url)).toEqual([
+			'https://cli-chat-proxy.grok.com/v1/billing?format=credits',
+		]);
 		expect(calls[0]?.headers.authorization).toBe('Bearer access-1');
 	});
 

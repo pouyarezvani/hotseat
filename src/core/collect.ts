@@ -7,6 +7,14 @@ import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
 import { hotseatHome, usageCachePath } from './paths.ts';
 import { accountsFor, loadRegistry } from './registry.ts';
 import { RenewalFailed, renewInstalled, renewSaved } from './renew.ts';
+import {
+	loadSent,
+	releaseCutOff,
+	SETTLE_MS,
+	type SentUse,
+	type SentUses,
+	sentKey,
+} from './reset-journal.ts';
 import { adoptIfNewer, sessionLogin, sessionRunning } from './session.ts';
 import { loadSettings } from './settings.ts';
 import type {
@@ -14,6 +22,7 @@ import type {
 	AccountState,
 	Credential,
 	Identity,
+	LimitReset,
 	Provider,
 	ProviderId,
 	ProviderState,
@@ -81,6 +90,168 @@ interface CacheEntry {
 	previousPercent?: number;
 	/** A saved login the service refused to refresh, not tried again until it changes. */
 	deadLogin?: string;
+	/** When a reset was last used on the account: numbers read before then say nothing about now. */
+	resetAtMs?: number;
+	/**
+	 * The agent's own latest reading of the account, which covers only some of
+	 * its limits: laid over the snapshot when shown, while it is the newer.
+	 */
+	local?: { fetchedAtMs: number; windows: UsageWindow[] };
+	/**
+	 * When a read of the account, its list of resets included, was asked for
+	 * ahead of its turn: the next pass reads it if no attempt came after.
+	 */
+	readSoonAt?: number;
+}
+
+/** The entry's numbers were read before a reset was used on the account. */
+function beforeReset(entry: CacheEntry, mark = entry.resetAtMs ?? 0): boolean {
+	return entry.fetchedAtMs < mark;
+}
+
+/**
+ * When a reset was last used on an account, by the record of uses: a use the
+ * service answered, one whose answer was lost, or one still marked as being
+ * sent, any of which may have happened. The record is written before each use
+ * is sent, so it holds even when nothing after the send got to run.
+ */
+function usedAt(uses: readonly SentUse[] | undefined, inFlight = true): number {
+	return Math.max(
+		0,
+		...(uses ?? []).filter((use) => inFlight || !use.inFlight).map((use) => use.at),
+	);
+}
+
+/**
+ * An entry as shown, before the windows' own resets: its numbers, or none
+ * while they are from before a reset, with the agent's own newer reading of
+ * some limits laid over them.
+ */
+function shownOf(entry: CacheEntry, mark = entry.resetAtMs ?? 0): UsageSnapshot {
+	const before = beforeReset(entry, mark) && entry.snapshot.windows.length > 0;
+	const local = entry.local;
+	if (!local || local.fetchedAtMs <= entry.fetchedAtMs || local.fetchedAtMs < mark) {
+		return before ? awaitingRead(entry.snapshot) : entry.snapshot;
+	}
+	const keys = new Set(local.windows.map((window) => window.key));
+	return {
+		...entry.snapshot,
+		fetchedAt: new Date(local.fetchedAtMs).toISOString(),
+		windows: [
+			...local.windows,
+			...(before ? [] : entry.snapshot.windows.filter((window) => !keys.has(window.key))),
+		],
+	};
+}
+
+/** An entry as shown now. */
+function presented(entry: CacheEntry, now: number, mark = entry.resetAtMs ?? 0): UsageSnapshot {
+	const snapshot = shownOf(entry, mark);
+	return { ...snapshot, windows: snapshot.windows.map((window) => resetBy(window, now)) };
+}
+
+const AWAITING_READ = 'reading it again after a reset';
+
+/** A reading from before a reset, as shown until the account is read again: no numbers, and why. */
+function awaitingRead(snapshot: UsageSnapshot): UsageSnapshot {
+	return { ...snapshot, windows: [], error: AWAITING_READ, errorKind: 'other' };
+}
+
+/**
+ * Two entries for one account, as one: the newer numbers, and what came of
+ * the later attempt, each taken on its own. Numbers that may predate a reset
+ * (`oursEligible` false) never replace the stored ones.
+ */
+function merged(
+	stored: CacheEntry,
+	ours: CacheEntry,
+	oursEligible: boolean,
+	listEligible = oursEligible,
+): CacheEntry {
+	const oursNumbers =
+		oursEligible &&
+		(ours.fetchedAtMs > stored.fetchedAtMs ||
+			(ours.fetchedAtMs === stored.fetchedAtMs && ours.attemptedAtMs >= stored.attemptedAtMs));
+	const oursAttempt =
+		ours.attemptedAtMs > stored.attemptedAtMs ||
+		(ours.attemptedAtMs === stored.attemptedAtMs && oursNumbers);
+	const oursList =
+		listEligible &&
+		(listAt(ours) > listAt(stored) || (listAt(ours) === listAt(stored) && oursNumbers));
+	const numbers = oursNumbers ? ours : stored;
+	const attempt = oursAttempt ? ours : stored;
+	const {
+		limitResets: _list,
+		limitResetsReadAt: _listAt,
+		limitResetsIncomplete: _incomplete,
+		limitResetsStale: _stale,
+		...figures
+	} = withoutOutcome(numbers.snapshot);
+	const { deadLogin: _dead, resetAtMs: _mark, local: _local, readSoonAt: _soon, ...base } = numbers;
+	const resetAtMs = Math.max(stored.resetAtMs ?? 0, ours.resetAtMs ?? 0);
+	const readSoonAt = Math.max(stored.readSoonAt ?? 0, ours.readSoonAt ?? 0);
+	const local =
+		(ours.local?.fetchedAtMs ?? -1) > (stored.local?.fetchedAtMs ?? -1) ? ours.local : stored.local;
+	return {
+		...base,
+		snapshot: {
+			...figures,
+			...listOf((oursList ? ours : stored).snapshot),
+			...outcomeOf(attempt.snapshot),
+		},
+		attemptedAtMs: attempt.attemptedAtMs,
+		...(attempt.deadLogin !== undefined ? { deadLogin: attempt.deadLogin } : {}),
+		...(resetAtMs > 0 ? { resetAtMs } : {}),
+		...(readSoonAt > 0 ? { readSoonAt } : {}),
+		...(local ? { local } : {}),
+	};
+}
+
+/** When the entry's list of resets was read: -1 when it holds none, 0 when it is not known. */
+function listAt(entry: CacheEntry): number {
+	if (entry.snapshot.limitResets === undefined) return -1;
+	const read = entry.snapshot.limitResetsReadAt;
+	const at = read ? Date.parse(read) : Number.NaN;
+	return Number.isFinite(at) ? at : 0;
+}
+
+/** A reading's list of resets and what is known of it. */
+function listOf(snapshot: UsageSnapshot): Partial<UsageSnapshot> {
+	const { limitResets, limitResetsReadAt, limitResetsIncomplete, limitResetsStale } = snapshot;
+	return {
+		...(limitResets !== undefined ? { limitResets } : {}),
+		...(limitResetsReadAt !== undefined ? { limitResetsReadAt } : {}),
+		...(limitResetsIncomplete ? { limitResetsIncomplete } : {}),
+		...(limitResetsStale ? { limitResetsStale } : {}),
+	};
+}
+
+/** A reading whose list of resets is not to be reused, though it is kept, with its time, to fall back on. */
+function listToRenew(snapshot: UsageSnapshot): UsageSnapshot {
+	return snapshot.limitResets === undefined ? snapshot : { ...snapshot, limitResetsStale: true };
+}
+
+/** What came of the latest attempt to read, apart from the numbers. */
+function outcomeOf(snapshot: UsageSnapshot): Partial<UsageSnapshot> {
+	const { error, errorKind, failedReads, retryAt } = snapshot;
+	return {
+		...(error !== undefined ? { error } : {}),
+		...(errorKind !== undefined ? { errorKind } : {}),
+		...(failedReads !== undefined ? { failedReads } : {}),
+		...(retryAt !== undefined ? { retryAt } : {}),
+	};
+}
+
+function withoutOutcome(snapshot: UsageSnapshot): UsageSnapshot {
+	const { error: _e, errorKind: _k, failedReads: _f, retryAt: _r, ...rest } = snapshot;
+	return rest;
+}
+
+const UNCONFIRMED = 'could not confirm which login is in use - trying again shortly';
+
+/** An account's numbers, said to be from a login that could not be confirmed. */
+function unconfirmedOf(snapshot: UsageSnapshot): UsageSnapshot {
+	return { ...withoutOutcome(snapshot), error: UNCONFIRMED, errorKind: 'other' };
 }
 
 /** How long to wait after being told to slow down, when the service does not say. */
@@ -109,6 +280,207 @@ export async function loadCache(): Promise<UsageCache> {
 	const stored = await readJsonLoose<Partial<UsageCache>>(usageCachePath());
 	if (stored?.version !== 2) return { version: 2, entries: {}, identities: {} };
 	return { version: 2, entries: stored.entries ?? {}, identities: stored.identities ?? {} };
+}
+
+/**
+ * Records that a reset may have been used on an account, as of `resetAt`: when
+ * the service answered, or when the attempt ended without one. A good reading
+ * begun at `readAt`, after that, is kept as the account's numbers unless a
+ * newer one from after the reset is already stored; without one, the numbers
+ * from before are set aside until the account is read again. Either way
+ * nothing read before the reset, here or by another pass, replaces what
+ * follows it.
+ */
+export async function recordAfterReset(
+	accountId: string,
+	reading: UsageSnapshot | undefined,
+	resetAt: number,
+	readAt = resetAt,
+): Promise<void> {
+	const lock = await acquireLock(hotseatHome(), 10_000, 'usage.lock');
+	try {
+		const cache = await loadCache();
+		const entry = cache.entries[accountId];
+		const kept = Math.max(resetAt, entry?.resetAtMs ?? 0);
+		if (reading && reading.error === undefined && reading.windows.length > 0) {
+			const after = entry && !beforeReset(entry, kept) ? entry.snapshot : undefined;
+			const ours: CacheEntry = {
+				snapshot: {
+					...carryResets(reading, after, readAt),
+					...resetListOf(reading, entry?.snapshot),
+				},
+				fetchedAtMs: readAt,
+				attemptedAtMs: readAt,
+				resetAtMs: kept,
+				...(entry?.previousPercent !== undefined ? { previousPercent: entry.previousPercent } : {}),
+			};
+			cache.entries[accountId] = entry ? merged(entry, ours, true) : ours;
+		} else if (entry) {
+			// A stored reading counts as after the reset only when strictly later.
+			const resetAtMs = entry.fetchedAtMs > resetAt ? kept : Math.max(kept, entry.fetchedAtMs + 1);
+			// A read that failed is the latest attempt, with its wait, unless one came after.
+			const failed = reading?.error !== undefined && readAt >= entry.attemptedAtMs;
+			cache.entries[accountId] = {
+				...entry,
+				...(failed && reading
+					? {
+							snapshot: {
+								...withoutOutcome(entry.snapshot),
+								...outcomeOf(reading),
+								...counted(reading, entry.snapshot),
+							},
+							attemptedAtMs: readAt,
+						}
+					: {}),
+				resetAtMs,
+				readSoonAt: Math.max(entry.readSoonAt ?? 0, resetAt),
+			};
+		} else {
+			// Nothing read yet: what is known is the reset, and how the read after it went.
+			const failed = reading?.error !== undefined;
+			cache.entries[accountId] = {
+				snapshot: {
+					fetchedAt: new Date(readAt).toISOString(),
+					windows: [],
+					...(failed && reading ? { ...outcomeOf(reading), ...counted(reading, undefined) } : {}),
+				},
+				fetchedAtMs: 0,
+				attemptedAtMs: failed ? readAt : 0,
+				resetAtMs: resetAt,
+				readSoonAt: resetAt,
+			};
+		}
+		await writeJsonAtomic(usageCachePath(), cache, 0o600);
+	} finally {
+		await lock.release();
+	}
+}
+
+/**
+ * A fresh reading, begun at `readAt`, with any reset time it left out taken
+ * from the stored reading, when that one is from after the account's last
+ * reset (`mark`) and the time was still ahead when the reading began.
+ */
+export async function withStoredDeadlines(
+	accountId: string,
+	fresh: UsageSnapshot,
+	mark: number,
+	readAt: number,
+): Promise<UsageSnapshot> {
+	const entry = (await loadCache()).entries[accountId];
+	if (!entry || beforeReset(entry, Math.max(mark, entry.resetAtMs ?? 0))) return fresh;
+	return carryResets(fresh, entry.snapshot, readAt);
+}
+
+/** An auth failure counted on top of those before it, as the collector counts them. */
+function counted(
+	failure: UsageSnapshot,
+	before: UsageSnapshot | undefined,
+): Partial<UsageSnapshot> {
+	return failure.errorKind === 'auth' ? { failedReads: (before?.failedReads ?? 0) + 1 } : {};
+}
+
+/**
+ * A read that failed, as a reading that says why, and when to try again if
+ * the service said: begun at `at`, answered at `answeredAt`, from which any
+ * wait is counted.
+ */
+export function failedReading(error: unknown, at: number, answeredAt = at): UsageSnapshot {
+	const retryAfterMs =
+		error instanceof ServiceError && error.retryAfterMs !== undefined
+			? error.retryAfterMs
+			: undefined;
+	const kind = classify(error);
+	return {
+		fetchedAt: new Date(at).toISOString(),
+		windows: [],
+		error: plainError(error),
+		errorKind: kind,
+		...(kind === 'throttled'
+			? { retryAt: new Date(answeredAt + (retryAfterMs ?? THROTTLE_BACKOFF_MS)).toISOString() }
+			: {}),
+	};
+}
+
+/**
+ * An account's usage as last shown, or newer: what the cache holds when it
+ * was read after what is shown, or when a reset was used after it was read.
+ */
+export async function freshUsage(
+	account: Pick<AccountState, 'id' | 'email'>,
+	provider: ProviderId,
+	shown: UsageSnapshot | undefined,
+	now: number,
+): Promise<UsageSnapshot | undefined> {
+	const entry = (await loadCache()).entries[account.id];
+	const uses = await loadSent().catch(() => null);
+	const mark = Math.max(entry?.resetAtMs ?? 0, usedAt(uses?.[sentKey(provider, account)]));
+	const shownAt = shown ? Date.parse(shown.fetchedAt) : Number.NaN;
+	const at = Number.isFinite(shownAt) ? shownAt : 0;
+	if (!shown) return entry ? presented(entry, now, mark) : undefined;
+	const asOfNow = (usage: UsageSnapshot): UsageSnapshot => ({
+		...usage,
+		windows: usage.windows.map((window) => resetBy(window, now)),
+	});
+	let usage: UsageSnapshot;
+	if (!entry) {
+		usage = asOfNow(mark > at ? awaitingRead(shown) : shown);
+	} else {
+		const view = presented(entry, now, mark);
+		const viewAt = Date.parse(view.fetchedAt);
+		const shownNewer =
+			shown.error !== AWAITING_READ && mark <= at && Number.isFinite(viewAt) && viewAt < at;
+		usage = shownNewer ? asOfNow(shown) : withForecastsFrom(view, shown);
+	}
+	// That the login in use could not be confirmed is the board's to say.
+	return shown.error === UNCONFIRMED ? unconfirmedOf(usage) : usage;
+}
+
+/**
+ * A reading with the forecast and trend worked out for each limit of the
+ * same reading earlier: same time, and the limit at the same level and reset.
+ */
+export function withForecastsFrom(
+	usage: UsageSnapshot,
+	from: UsageSnapshot | undefined,
+): UsageSnapshot {
+	if (!from || from.fetchedAt !== usage.fetchedAt) return usage;
+	return {
+		...usage,
+		windows: usage.windows.map((window) => {
+			if (window.cleared) return window;
+			const same = from.windows.find(
+				(old) =>
+					old.key === window.key &&
+					old.percent === window.percent &&
+					old.resetsAt === window.resetsAt,
+			);
+			return same
+				? {
+						...window,
+						...(same.fullAt !== undefined ? { fullAt: same.fullAt } : {}),
+						...(same.trend !== undefined ? { trend: same.trend } : {}),
+					}
+				: window;
+		}),
+	};
+}
+
+/**
+ * Has an account read again on the next pass, its list of resets included,
+ * while keeping what was last read until then.
+ */
+export async function readAgainSoon(accountId: string, at = Date.now()): Promise<void> {
+	const lock = await acquireLock(hotseatHome(), 10_000, 'usage.lock');
+	try {
+		const cache = await loadCache();
+		const entry = cache.entries[accountId];
+		if (!entry) return;
+		cache.entries[accountId] = { ...entry, readSoonAt: Math.max(entry.readSoonAt ?? 0, at) };
+		await writeJsonAtomic(usageCachePath(), cache, 0o600);
+	} finally {
+		await lock.release();
+	}
 }
 
 /**
@@ -206,6 +578,7 @@ async function readUsage(
 	now: number,
 	deadLogin: string | undefined,
 	awake: () => Promise<boolean>,
+	previous: UsageSnapshot | undefined,
 ): Promise<Attempt> {
 	const fetchedAt = new Date(now).toISOString();
 	const failed = (error: unknown, deadLoginNow?: string): Attempt => ({
@@ -222,14 +595,14 @@ async function readUsage(
 		// The installed credential is the freshest copy for whichever account
 		// holds it, because the agent may have rotated its token since it was saved.
 		if (live && live.email.toLowerCase() === account.email.toLowerCase()) {
-			return { usage: await provider.fetchUsage(live.credential) };
+			return { usage: await provider.fetchUsage(live.credential, previous) };
 		}
 		// An account open in another terminal is read with that terminal's own
 		// login, and never refreshed from here: the running agent owns that
 		// token now, and a refresh from a stale copy would log it out.
 		if (await sessionRunning(provider, account)) {
 			const owned = await sessionLogin(provider, account);
-			if (owned) return { usage: await provider.fetchUsage(owned) };
+			if (owned) return { usage: await provider.fetchUsage(owned, previous) };
 		}
 		const stored = await loadCredential(account);
 		if (!stored) return { usage: { fetchedAt, windows: [], error: 'no saved login' } };
@@ -248,7 +621,7 @@ async function readUsage(
 			// the Mac to wake fully, where the new token cannot be lost.
 			const expires = provider.expiresAt?.(stored);
 			if (expires !== undefined && expires <= now) return failed(new Error(WAITING_FOR_WAKE));
-			return { usage: await provider.fetchUsage(stored) };
+			return { usage: await provider.fetchUsage(stored, previous) };
 		}
 		let renewed: Credential | null;
 		try {
@@ -263,7 +636,7 @@ async function readUsage(
 			return failed(error);
 		}
 		if (!renewed) return { usage: { fetchedAt, windows: [], error: 'no saved login' } };
-		return { usage: await provider.fetchUsage(renewed) };
+		return { usage: await provider.fetchUsage(renewed, previous) };
 	} catch (error) {
 		return failed(error);
 	}
@@ -323,6 +696,167 @@ function carryResets(
 	};
 }
 
+/** What a reading says of the limits the board does not draw. */
+function othersOf(
+	snapshot: UsageSnapshot,
+): Pick<UsageSnapshot, 'otherLimitsInUse' | 'otherLimitsInUseUntil'> {
+	if (!snapshot.otherLimitsInUse) return {};
+	return {
+		otherLimitsInUse: true,
+		...(snapshot.otherLimitsInUseUntil
+			? { otherLimitsInUseUntil: snapshot.otherLimitsInUseUntil }
+			: {}),
+	};
+}
+
+/** The reset list a reading carries: its own, or the last one when it brought none. */
+function resetListOf(
+	fresh: UsageSnapshot,
+	cached: UsageSnapshot | undefined,
+): Pick<
+	UsageSnapshot,
+	'limitResets' | 'limitResetsReadAt' | 'limitResetsIncomplete' | 'limitResetsStale'
+> {
+	const from = fresh.limitResets !== undefined ? fresh : cached;
+	if (from?.limitResets === undefined) return {};
+	return {
+		limitResets: from.limitResets,
+		...(from.limitResetsReadAt ? { limitResetsReadAt: from.limitResetsReadAt } : {}),
+		...(from.limitResetsIncomplete ? { limitResetsIncomplete: true as const } : {}),
+		...(from.limitResetsStale || from !== fresh ? { limitResetsStale: true as const } : {}),
+	};
+}
+
+/**
+ * A reading's resets as they stand now: one that has run out is left off, and
+ * one whose limits are all empty, as the reading stands now, cannot be used.
+ * What the service itself said blocks a reset is kept as it is.
+ */
+export function currentResets(snapshot: UsageSnapshot, now: number): LimitReset[] {
+	const windows = snapshot.windows.map((window) => resetBy(window, now));
+	return (snapshot.limitResets ?? [])
+		.filter((reset) => {
+			const at = reset.expiresAt ? Date.parse(reset.expiresAt) : Number.NaN;
+			return !Number.isFinite(at) || at > now;
+		})
+		.map((reset) => {
+			if (reset.blocked !== undefined) return reset;
+			if (windows.length === 0 && snapshot.error !== undefined) {
+				return { ...reset, blocked: 'its usage could not be read just now' };
+			}
+			if (reset.clearsUnseen) return reset;
+			const othersUntil = snapshot.otherLimitsInUseUntil
+				? Date.parse(snapshot.otherLimitsInUseUntil)
+				: Number.NaN;
+			const othersBusy =
+				snapshot.otherLimitsInUse === true && (!Number.isFinite(othersUntil) || othersUntil > now);
+			if (reset.clearsEvery && othersBusy) return reset;
+			const cleared = reset.clearsEvery
+				? windows
+				: reset.windowKeys
+					? windows.filter((window) => reset.windowKeys?.includes(window.key))
+					: windows.filter((window) => reset.clears.includes(window.label));
+			const idle =
+				(cleared.length > 0 || reset.clearsEmptyUnseen === true) &&
+				cleared.every((window) => window.percent <= 0);
+			return idle
+				? { ...reset, blocked: `no ${reset.clears.join(' or ')} usage to reset right now` }
+				: reset;
+		});
+}
+
+/**
+ * The resets as the record of uses leaves them: while it cannot be read none
+ * can be used; for a while after a use, the reset just used cannot be used
+ * again, and while a use got no answer only that one can, to ask again.
+ */
+function afterUses(
+	resets: LimitReset[],
+	uses: readonly SentUse[] | null,
+	now: number,
+): LimitReset[] {
+	if (uses === null) {
+		return resets.map((reset) =>
+			reset.blocked === undefined
+				? { ...reset, blocked: 'the record of reset uses cannot be read' }
+				: reset,
+		);
+	}
+	// Held as the command holds them: a use still being sent, until it is
+	// found; one unanswered or just used, until it can be settled.
+	const recent = uses.filter((use) => use.inFlight || now < use.at + SETTLE_MS);
+	const lost = recent.find((use) => use.used === undefined);
+	return resets.map((reset) => {
+		if (reset.blocked !== undefined) return reset;
+		if (recent.some((use) => use.used && use.resetId === reset.id)) {
+			return { ...reset, blocked: 'it was just used' };
+		}
+		if (lost && lost.resetId !== reset.id) {
+			const at = new Date(Math.min(lost.at, now)).toLocaleTimeString([], {
+				hour: 'numeric',
+				minute: '2-digit',
+			});
+			return {
+				...reset,
+				blocked: `waiting to hear whether the ${lost.title ?? 'reset'} sent at ${at} was used`,
+			};
+		}
+		return reset;
+	});
+}
+
+/** The resets as shown: as they stand now, with those that read the same on one line counting all their uses. */
+function shownResets(
+	snapshot: UsageSnapshot,
+	now: number,
+	uses: readonly SentUse[] | null = [],
+): UsageSnapshot {
+	if (!snapshot.limitResets) return snapshot;
+	const lines: {
+		key: string;
+		reset: LimitReset;
+		uses: number;
+		details: string[];
+		ids: string[];
+	}[] = [];
+	for (const reset of afterUses(currentResets(snapshot, now), uses, now)) {
+		const key = JSON.stringify([
+			reset.title,
+			reset.clears,
+			reset.givesBack,
+			reset.expiresAt,
+			reset.blocked,
+		]);
+		const uses = reset.left ?? 1;
+		const same = lines.find((line) => line.key === key);
+		if (!same) {
+			lines.push({
+				key,
+				reset,
+				uses,
+				details: reset.detail ? [reset.detail] : [],
+				ids: [reset.id],
+			});
+			continue;
+		}
+		same.uses += uses;
+		if (!same.ids.includes(reset.id)) same.ids.push(reset.id);
+		if (reset.detail && !same.details.includes(reset.detail)) same.details.push(reset.detail);
+	}
+	return {
+		...snapshot,
+		limitResets: lines.map(({ reset, uses, details, ids }) => {
+			const { left: _left, detail: _detail, ...rest } = reset;
+			return {
+				...rest,
+				...(uses > 1 ? { left: uses } : {}),
+				...(details.length > 0 ? { detail: details.join('; ') } : {}),
+				...(ids.length > 1 ? { ids } : {}),
+			};
+		}),
+	};
+}
+
 /**
  * A window whose reset has passed starts again from nothing, whatever the last
  * reading of it said, so it is shown empty until the next reading says more.
@@ -330,8 +864,8 @@ function carryResets(
 function resetBy(window: UsageWindow, now: number): UsageWindow {
 	const reset = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
 	if (!Number.isFinite(reset) || reset > now) return window;
-	const { resetsAt: _passed, ...rest } = window;
-	return { ...rest, percent: 0 };
+	const { resetsAt: _passed, fullAt: _forecast, ...rest } = window;
+	return { ...rest, percent: 0, cleared: true };
 }
 
 /** A reading whose every window has already reset says nothing about now. */
@@ -353,6 +887,8 @@ export async function collectState(
 		force?: boolean;
 		providers?: Record<ProviderId, Provider>;
 		now?: number;
+		/** When each account's read begins; the pass's own time when it is given, else the clock. */
+		clock?: () => number;
 		awake?: () => Promise<boolean>;
 	} = {},
 ): Promise<State> {
@@ -360,6 +896,13 @@ export async function collectState(
 	const registry = await loadRegistry();
 	const cache = await loadCache();
 	const now = options.now ?? Date.now();
+	const clock = options.clock ?? (options.now !== undefined ? () => now : Date.now);
+	await releaseCutOff(now).catch(() => undefined);
+	const sentUses = await loadSent().catch(() => null);
+	const shownAccounts = new Map<string, { provider: ProviderId; state: AccountState }>();
+	const marks = new Map<string, number>();
+	const holds = new Map<string, number>();
+	const unconfirmed = new Set<string>();
 	const fetchedAt = new Date(now).toISOString();
 	const providerSet = options.providers ?? PROVIDERS;
 	const providers = {} as Record<ProviderId, ProviderState>;
@@ -449,11 +992,21 @@ export async function collectState(
 		const accounts = await Promise.all(
 			records.map(async (record): Promise<AccountState> => {
 				const cached = cache.entries[record.id];
-				const good = cached !== undefined && cached.snapshot.windows.length > 0;
+				const uses = sentUses?.[sentKey(id, record)];
+				// A use answered or lost is kept with the account; one still being
+				// sent only holds its numbers back while it is.
+				const durable = Math.max(cached?.resetAtMs ?? 0, usedAt(uses, false));
+				if (durable > 0) marks.set(record.id, durable);
+				const mark = Math.max(durable, usedAt(uses));
+				if (mark > 0) holds.set(record.id, mark);
+				const setAside = cached !== undefined && beforeReset(cached, mark);
+				const good = cached !== undefined && cached.snapshot.windows.length > 0 && !setAside;
+				const lastShown = cached ? shownOf(cached, mark) : undefined;
 				const isActive = live !== null && record.email.toLowerCase() === live.email.toLowerCase();
-				const usedPercent = good
-					? Math.max(...cached.snapshot.windows.map((window) => window.percent))
-					: undefined;
+				const usedPercent =
+					lastShown && lastShown.windows.length > 0
+						? Math.max(...lastShown.windows.map((window) => window.percent))
+						: undefined;
 				const age = cached ? now - cached.attemptedAtMs : Number.POSITIVE_INFINITY;
 				const due = options.force
 					? REREAD_FLOOR_MS
@@ -464,19 +1017,18 @@ export async function collectState(
 							thresholdPercent: settings.autoThresholdPercent,
 						});
 				if (record.id === unconfirmedId) {
-					const snapshot: UsageSnapshot = {
-						...(good ? cached.snapshot : { fetchedAt, windows: [] }),
-						error: 'could not confirm which login is in use - trying again shortly',
-						errorKind: 'other',
+					unconfirmed.add(record.id);
+					return {
+						...shown(record),
+						usage: unconfirmedOf(lastShown ?? { fetchedAt, windows: [] }),
 					};
-					delete snapshot.failedReads;
-					delete snapshot.retryAt;
-					return { ...shown(record), usage: snapshot };
 				}
-				if (cached && age < due) return { ...shown(record), usage: cached.snapshot };
+				const asked = cached !== undefined && (cached.readSoonAt ?? 0) > cached.attemptedAtMs;
+				if (cached && lastShown && age < due && !asked)
+					return { ...shown(record), usage: lastShown };
 				const retryAt = cached?.snapshot.retryAt ? Date.parse(cached.snapshot.retryAt) : Number.NaN;
-				if (cached && Number.isFinite(retryAt) && retryAt > now)
-					return { ...shown(record), usage: cached.snapshot };
+				if (cached && lastShown && Number.isFinite(retryAt) && retryAt > now)
+					return { ...shown(record), usage: lastShown };
 
 				if (isActive && liveAwaitsRenewal) {
 					// Nothing to read with: the token has expired and will be
@@ -488,8 +1040,8 @@ export async function collectState(
 					};
 					cache.entries[record.id] = {
 						snapshot,
-						fetchedAtMs: good ? cached.fetchedAtMs : now,
-						attemptedAtMs: now,
+						fetchedAtMs: cached?.fetchedAtMs ?? 0,
+						attemptedAtMs: clock(),
 						...(cached?.previousPercent !== undefined
 							? { previousPercent: cached.previousPercent }
 							: {}),
@@ -498,13 +1050,29 @@ export async function collectState(
 					return { ...shown(record), usage: snapshot };
 				}
 
-				const attempt = await readUsage(provider, record, live, now, cached?.deadLogin, awake);
+				const readAt = clock();
+				const attempt = await readUsage(
+					provider,
+					record,
+					live,
+					now,
+					cached?.deadLogin,
+					awake,
+					// Asked to read again, the list of resets is listed again, until a list read after the asking.
+					cached && (cached.readSoonAt ?? 0) > listAt(cached)
+						? listToRenew(cached.snapshot)
+						: cached?.snapshot,
+				);
 				touched.add(record.id);
 				const usage = attempt.usage;
 				if (usage.windows.length === 0 && usage.note !== undefined && !attempt.failure) {
 					// The service answered and has no limit to report: a good read
 					// with nothing to draw, not a failed one.
-					cache.entries[record.id] = { snapshot: usage, fetchedAtMs: now, attemptedAtMs: now };
+					cache.entries[record.id] = {
+						snapshot: usage,
+						fetchedAtMs: readAt,
+						attemptedAtMs: readAt,
+					};
 					return { ...shown(record), usage };
 				}
 				if (usage.windows.length > 0 && !attempt.failure) {
@@ -516,14 +1084,32 @@ export async function collectState(
 					) {
 						// All zeros with no clock is what the service sends when it
 						// has nothing to say. It does not replace numbers that said something.
-						cache.entries[record.id] = { ...cached, attemptedAtMs: now };
-						return { ...shown(record), usage: cached.snapshot };
+						const {
+							otherLimitsInUse: _before,
+							otherLimitsInUseUntil: _beforeUntil,
+							limitResets: _list,
+							limitResetsReadAt: _listReadAt,
+							limitResetsIncomplete: _listIncomplete,
+							limitResetsStale: _listStale,
+							...base
+						} = cached.snapshot;
+						const kept: UsageSnapshot = {
+							...withoutOutcome(base),
+							...resetListOf(usage, cached.snapshot),
+							...othersOf(usage),
+						};
+						const { deadLogin: _dead, ...answered } = cached;
+						cache.entries[record.id] = { ...answered, snapshot: kept, attemptedAtMs: readAt };
+						return { ...shown(record), usage: kept };
 					}
-					const snapshot = carryResets(usage, good ? cached.snapshot : undefined, now);
+					const snapshot = {
+						...usage,
+						...resetListOf(usage, cached?.snapshot),
+					};
 					cache.entries[record.id] = {
 						snapshot,
-						fetchedAtMs: now,
-						attemptedAtMs: now,
+						fetchedAtMs: readAt,
+						attemptedAtMs: readAt,
 						...(usedPercent !== undefined ? { previousPercent: usedPercent } : {}),
 					};
 					return { ...shown(record), usage: snapshot };
@@ -537,10 +1123,13 @@ export async function collectState(
 				const keep = good && !expired(cached.snapshot, now);
 				const wait =
 					kind === 'throttled'
-						? new Date(now + (attempt.failure?.retryAfterMs ?? THROTTLE_BACKOFF_MS)).toISOString()
+						? new Date(
+								clock() + (attempt.failure?.retryAfterMs ?? THROTTLE_BACKOFF_MS),
+							).toISOString()
 						: undefined;
 				const snapshot: UsageSnapshot = {
 					...(keep ? cached.snapshot : usage),
+					...resetListOf(usage, cached?.snapshot),
 					error: usage.error ?? 'could not read usage',
 					errorKind: kind,
 					...(failedReads !== undefined ? { failedReads } : {}),
@@ -550,8 +1139,8 @@ export async function collectState(
 				if (!wait) delete snapshot.retryAt;
 				cache.entries[record.id] = {
 					snapshot,
-					fetchedAtMs: keep ? cached.fetchedAtMs : now,
-					attemptedAtMs: now,
+					fetchedAtMs: cached?.fetchedAtMs ?? 0,
+					attemptedAtMs: readAt,
 					...(cached?.previousPercent !== undefined
 						? { previousPercent: cached.previousPercent }
 						: {}),
@@ -573,27 +1162,19 @@ export async function collectState(
 			active &&
 			local &&
 			entry &&
-			local.fetchedAtMs > entry.fetchedAtMs &&
+			local.fetchedAtMs > Math.max(entry.fetchedAtMs, entry.local?.fetchedAtMs ?? 0) &&
 			(local.accountId === undefined || local.accountId === live?.accountId)
 		) {
-			const localKeys = new Set(local.windows.map((window) => window.key));
-			const kept = entry.snapshot.windows.filter((window) => !localKeys.has(window.key));
-			const snapshot: UsageSnapshot = {
-				fetchedAt: new Date(local.fetchedAtMs).toISOString(),
-				windows: [...local.windows, ...kept],
-			};
-			const before =
-				entry.snapshot.windows.length > 0
-					? Math.max(...entry.snapshot.windows.map((window) => window.percent))
-					: undefined;
+			const before = shownOf(entry, holds.get(active.id) ?? 0).windows;
 			cache.entries[active.id] = {
-				snapshot,
-				fetchedAtMs: local.fetchedAtMs,
-				attemptedAtMs: entry.attemptedAtMs,
-				...(before !== undefined ? { previousPercent: before } : {}),
+				...entry,
+				local: { fetchedAtMs: local.fetchedAtMs, windows: local.windows },
+				...(before.length > 0
+					? { previousPercent: Math.max(...before.map((window) => window.percent)) }
+					: {}),
 			};
 			touched.add(active.id);
-			active.usage = snapshot;
+			active.usage = shownOf(cache.entries[active.id] as CacheEntry, holds.get(active.id) ?? 0);
 		}
 		for (const account of accounts) {
 			if (account.usage)
@@ -603,6 +1184,7 @@ export async function collectState(
 				};
 		}
 		providers[id] = { accounts, ...(active ? { activeAccountId: active.id } : {}) };
+		for (const account of accounts) shownAccounts.set(account.id, { provider: id, state: account });
 	}
 
 	// Written under a lock, over whatever another pass wrote meanwhile: two
@@ -610,19 +1192,70 @@ export async function collectState(
 	// unless another pass has already written a later attempt, or the same
 	// attempt with a later reading, such as the agent's own. Entries for accounts that no longer exist are dropped, so the
 	// file cannot grow without bound as accounts come and go.
+	let rowsFrom: SentUses | null = null;
 	const lock = await acquireLock(hotseatHome(), 10_000, 'usage.lock');
 	try {
 		const latest = await loadCache();
+		// The record of uses as it stands now, not as it stood when this pass
+		// began: a use made meanwhile holds back what this pass read before it.
+		const usesNow = await loadSent().catch(() => null);
+		const usesOf = (id: string): readonly SentUse[] => {
+			const account = shownAccounts.get(id);
+			return usesNow === null || !account
+				? []
+				: (usesNow[sentKey(account.provider, account.state)] ?? []);
+		};
+		const durableOf = (id: string) => Math.max(marks.get(id) ?? 0, usedAt(usesOf(id), false));
+		const holdOf = (id: string, entry: CacheEntry | undefined) =>
+			Math.max(
+				entry?.resetAtMs ?? 0,
+				durableOf(id),
+				usesNow === null ? (holds.get(id) ?? 0) : usedAt(usesOf(id)),
+			);
 		for (const id of touched) {
 			const entry = cache.entries[id];
 			if (!entry) continue;
 			const there = latest.entries[id];
-			const newer =
-				!there ||
-				entry.attemptedAtMs > there.attemptedAtMs ||
-				(entry.attemptedAtMs === there.attemptedAtMs && entry.fetchedAtMs >= there.fetchedAtMs);
-			if (newer) latest.entries[id] = entry;
+			const hold = holdOf(id, there);
+			const eligible = entry.fetchedAtMs >= hold;
+			const after = there !== undefined && !beforeReset(there, hold);
+			// All zeros with no clock is what the service sends when it has
+			// nothing to say: it does not replace numbers that said something.
+			const saysNothing =
+				after &&
+				eligible &&
+				entry.fetchedAtMs > there.fetchedAtMs &&
+				entry.snapshot.windows.length > 0 &&
+				!hasEvidence(entry.snapshot) &&
+				hasEvidence(there.snapshot) &&
+				!expired(there.snapshot, entry.fetchedAtMs);
+			// A limit read without its reset time keeps the one a reading from
+			// after the same reset gave, while that time was still ahead when read.
+			const timed =
+				after && eligible && !saysNothing
+					? { ...entry, snapshot: carryResets(entry.snapshot, there.snapshot, entry.fetchedAtMs) }
+					: entry;
+			latest.entries[id] = there
+				? merged(there, timed, eligible && !saysNothing, listAt(entry) >= hold)
+				: timed;
 		}
+		// A use answered or lost is copied into the account's entry.
+		for (const id of shownAccounts.keys()) {
+			const stored = latest.entries[id];
+			const mark = durableOf(id);
+			if (stored && mark > (stored.resetAtMs ?? 0))
+				latest.entries[id] = { ...stored, resetAtMs: mark };
+		}
+		// What this pass returns is what is now stored, which holds its own
+		// readings and any newer ones, shown as nothing while a use since
+		// holds it back. A login that could not be confirmed is said as such.
+		for (const [id, account] of shownAccounts) {
+			const stored = latest.entries[id];
+			if (!stored) continue;
+			const usage = presented(stored, now, holdOf(id, stored));
+			account.state.usage = unconfirmed.has(id) ? unconfirmedOf(usage) : usage;
+		}
+		rowsFrom = usesNow;
 		latest.identities = { ...latest.identities, ...cache.identities };
 		const known = new Set(registry.accounts.map((account) => account.id));
 		for (const id of Object.keys(latest.entries)) {
@@ -631,6 +1264,17 @@ export async function collectState(
 		await writeJsonAtomic(usageCachePath(), latest, 0o600);
 	} finally {
 		await lock.release();
+	}
+	// The rows of resets are drawn last, from the record of uses as read
+	// under the lock.
+	for (const { provider, state } of shownAccounts.values()) {
+		if (state.usage) {
+			state.usage = shownResets(
+				state.usage,
+				now,
+				rowsFrom === null ? null : (rowsFrom[sentKey(provider, state)] ?? []),
+			);
+		}
 	}
 	return { version: 1, updatedAt: fetchedAt, providers };
 }

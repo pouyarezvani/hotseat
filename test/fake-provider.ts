@@ -6,6 +6,7 @@ import type {
 	LocalReading,
 	Provider,
 	ProviderId,
+	ResetUse,
 	RunningProcess,
 	SessionSupport,
 	UsageSnapshot,
@@ -147,8 +148,20 @@ export class FakeProvider implements Provider {
 		return identity;
 	}
 
-	async fetchUsage(credential: Credential): Promise<UsageSnapshot> {
+	/** Uses a reset, when a test gives the fake service resets to use. */
+	useReset?: (
+		credential: Credential,
+		resetId: string,
+		requestId: string,
+		stillWanted?: () => boolean,
+	) => Promise<ResetUse>;
+
+	/** The last reading each read was handed, in order. */
+	readonly previousGiven: (UsageSnapshot | undefined)[] = [];
+
+	async fetchUsage(credential: Credential, previous?: UsageSnapshot): Promise<UsageSnapshot> {
 		this.calls.fetchUsage += 1;
+		this.previousGiven.push(previous);
 		this.readsOf.set(tokenOf(credential), (this.readsOf.get(tokenOf(credential)) ?? 0) + 1);
 		const failure = this.failures.get(tokenOf(credential));
 		if (failure) throw failure;

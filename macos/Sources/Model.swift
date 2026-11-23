@@ -12,6 +12,10 @@ struct UsageWindow: Decodable {
 	var fullAt: String? = nil
 	/// The last week of this limit as evenly spaced values, oldest first.
 	var trend: [Double]? = nil
+	/// How long this limit runs before it resets, when the service says: "5h", "week" or "month".
+	var span: String? = nil
+	/// When the window that resets at `resetsAt` began, when the service says.
+	var startsAt: String? = nil
 }
 
 /// What a service's own status page says about it.
@@ -29,6 +33,62 @@ struct ServiceStatus: Decodable {
 	var isShown: Bool { isTrouble && (scoped == true || level == "major" || level == "critical") }
 }
 
+/// A free reset of some of an account's limits, granted by the service, used
+/// only when a person clicks it and says yes. Every field is optional and a
+/// malformed one is dropped, so a reset never blanks the menu.
+struct LimitReset: Decodable {
+	var id: String = ""
+	var title: String = "Limit reset"
+	/// The limits it empties, by the names the board gives them.
+	var clears: [String] = []
+	/// A limit it leaves running, but gives back what the cleared ones used of it.
+	var givesBack: String? = nil
+	var expiresAt: String? = nil
+	/// How many uses it has left, when it has more than one.
+	var left: Int? = nil
+	/// Why it cannot be used right now, when it cannot.
+	var blocked: String? = nil
+	/// How the service describes it.
+	var detail: String? = nil
+	/// Every reset on this line, when several that read the same are shown as one.
+	var ids: [String] = []
+
+	private enum Keys: String, CodingKey { case id, title, clears, givesBack, expiresAt, left, blocked, detail, ids }
+
+	init(from decoder: Decoder) throws {
+		let c = try decoder.container(keyedBy: Keys.self)
+		id = (try? c.decodeIfPresent(String.self, forKey: .id)) ?? ""
+		title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? title
+		clears = (try? c.decodeIfPresent([String].self, forKey: .clears)) ?? []
+		givesBack = try? c.decodeIfPresent(String.self, forKey: .givesBack)
+		expiresAt = try? c.decodeIfPresent(String.self, forKey: .expiresAt)
+		left = try? c.decodeIfPresent(Int.self, forKey: .left)
+		blocked = try? c.decodeIfPresent(String.self, forKey: .blocked)
+		detail = try? c.decodeIfPresent(String.self, forKey: .detail)
+		ids = (try? c.decodeIfPresent([String].self, forKey: .ids)) ?? []
+	}
+
+	/// The resets this line stands for, by id, for a click to use whichever of them can be used.
+	var allIds: [String] { (ids.isEmpty ? [id] : ids).filter { !$0.isEmpty } }
+
+	/// Whether it has run out by `now`.
+	func expired(at now: Date = Date()) -> Bool {
+		guard let iso = expiresAt, let end = Countdown.date(iso) else { return false }
+		return end <= now
+	}
+
+	/// Whether a click may use it: nothing blocks it, it has not run out, and it
+	/// names which reset it is.
+	var canUse: Bool { blocked == nil && !expired() && !allIds.isEmpty }
+
+	/// What it empties, said the way a person reads it: "week + Fable".
+	var clearsText: String? {
+		var parts = clears
+		if let givesBack { parts.append("its share of \(givesBack)") }
+		return parts.isEmpty ? nil : parts.joined(separator: " + ")
+	}
+}
+
 struct UsageSnapshot: Decodable {
 	let fetchedAt: String
 	let windows: [UsageWindow]
@@ -37,6 +97,8 @@ struct UsageSnapshot: Decodable {
 	var note: String? = nil
 	/// "auth" when the service refused the login, which no switch can use.
 	var errorKind: String? = nil
+	/// The free limit resets the account holds, as last listed.
+	var limitResets: [LimitReset]? = nil
 
 	/// The limits that are drawn: every one but those asked to be left off.
 	var shown: [UsageWindow] { windows.filter { $0.hidden != true } }
@@ -354,6 +416,64 @@ enum Severity {
 	}
 }
 
+/// Where a limit stands against the clock: how much of its window has gone by,
+/// which is how full it would be if used evenly until it resets.
+enum Pace {
+	/// How long a window runs: from when it began, when the service says, else
+	/// from what the service calls it, when that is clear.
+	static func length(of window: UsageWindow) -> TimeInterval? {
+		if let start = window.startsAt.flatMap(Countdown.date), let end = window.resetsAt.flatMap(Countdown.date),
+			end > start
+		{
+			return end.timeIntervalSince(start)
+		}
+		let label = window.label.lowercased()
+		switch window.span {
+		case "5h": return 5 * 3600
+		case "week": return 7 * 86_400
+		case "month": return 30 * 86_400
+		default: break
+		}
+		if window.key == "five_hour" || label == "5h" || label.hasSuffix(" 5h") { return 5 * 3600 }
+		if window.key == "seven_day" || window.key.hasPrefix("weekly_scoped:") || label == "week"
+			|| label.hasSuffix(" week")
+		{
+			return 7 * 86_400
+		}
+		if label == "day" || label == "daily" || label.hasSuffix(" day") || label.hasSuffix(" daily") { return 86_400 }
+		if label == "month" { return 30 * 86_400 }
+		return nil
+	}
+
+	/// The share of the window gone by, from 0 to 1, or nil when it cannot be told.
+	static func gone(_ window: UsageWindow, now: Date = Date()) -> Double? {
+		guard let length = length(of: window), let iso = window.resetsAt, let reset = Countdown.date(iso) else {
+			return nil
+		}
+		let left = reset.timeIntervalSince(now)
+		guard left > 0, left <= length else { return nil }
+		return 1 - left / length
+	}
+
+	/// The bar's tooltip: how much is used against how much time has gone, in words.
+	static func describe(_ window: UsageWindow, now: Date = Date()) -> String {
+		let used = Int(window.percent.rounded())
+		guard let gone = gone(window, now: now) else {
+			let forecast = Countdown.describe(window.fullAt, now: now).map {
+				" At the rate of the last few hours it would run out in about \($0), before it resets."
+			}
+			return "\(used)% of this limit is used." + (forecast ?? "")
+		}
+		let elapsed = Int((gone * 100).rounded())
+		var text = "\(used)% used, with \(elapsed)% of the \(window.label) gone by. The tick marks where you would be using it evenly until it resets."
+		text += window.percent <= gone * 100 ? " You are under that pace." : " You are ahead of that pace."
+		if let left = Countdown.describe(window.fullAt, now: now) {
+			text += " At the rate of the last few hours it would run out in about \(left), before it resets."
+		}
+		return text
+	}
+}
+
 enum Countdown {
 	/// Renders the gap to a reset the way a person says it out loud.
 	static func describe(_ iso: String?, now: Date = Date()) -> String? {
@@ -367,6 +487,32 @@ enum Countdown {
 		let hours = minutes / 60
 		if hours < 24 { return "\(hours)h \(minutes % 60)m" }
 		return "\(hours / 24)d \(hours % 24)h"
+	}
+
+	/// When a reset runs out: its date and the days left, or the hours left on its last day.
+	static func expiry(_ iso: String?, now: Date = Date(), calendar: Calendar = .current) -> String? {
+		guard let iso, let date = parse(iso), date > now else { return nil }
+		let days =
+			calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
+		if days <= 0 { return "expires today (\(describe(iso, now: now) ?? "soon"))" }
+		let formatter = DateFormatter()
+		formatter.timeZone = calendar.timeZone
+		formatter.dateFormat = "MMM d"
+		return "expires \(formatter.string(from: date)) (\(days) day\(days == 1 ? "" : "s"))"
+	}
+
+	/// Whether a reset runs out within three days, which is worth a colour.
+	static func expiresSoon(_ iso: String?, now: Date = Date()) -> Bool {
+		guard let iso, let date = parse(iso) else { return false }
+		return date > now && date.timeIntervalSince(now) < 3 * 86_400
+	}
+
+	/// The full moment a reset runs out, for a tooltip.
+	static func longStamp(_ iso: String?) -> String? {
+		guard let iso, let date = parse(iso) else { return nil }
+		let formatter = DateFormatter()
+		formatter.dateFormat = "MMM d, yyyy 'at' h:mm a zzz"
+		return formatter.string(from: date)
 	}
 
 	static func shortStamp(_ iso: String?) -> String {
@@ -383,6 +529,8 @@ enum Countdown {
 		plain.formatOptions = [.withInternetDateTime]
 		return [withFraction, plain]
 	}()
+
+	static func date(_ iso: String) -> Date? { parse(iso) }
 
 	private static func parse(_ iso: String) -> Date? {
 		for formatter in formatters where formatter.date(from: iso) != nil {

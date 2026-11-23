@@ -6,7 +6,7 @@ import {
 	forgivenNames,
 	rememberManualSwitch,
 } from './core/auto.ts';
-import { collectState, PROVIDERS } from './core/collect.ts';
+import { collectState, freshUsage, PROVIDERS, withForecastsFrom } from './core/collect.ts';
 import {
 	detectInstalled,
 	enroll,
@@ -27,6 +27,7 @@ import {
 	recordSwitch,
 	type SwitchReason,
 } from './core/history.ts';
+import { useLimitReset } from './core/limit-resets.ts';
 import { readEvents } from './core/log.ts';
 import { listMappings, mappingFor, removeMapping, setMapping } from './core/mappings.ts';
 import {
@@ -38,7 +39,7 @@ import {
 	startMenuBar,
 	stopMenuBar,
 } from './core/menubar.ts';
-import { snapshotPath } from './core/paths.ts';
+import { snapshotPath, statePath } from './core/paths.ts';
 import type { SwitchMemory } from './core/policy.ts';
 import {
 	accountsFor,
@@ -64,7 +65,7 @@ import {
 import { activate, nextAvailable, pickBest, rotateNext, type SwitchResult } from './core/switch.ts';
 import { holdSwitch } from './core/switch-lock.ts';
 import { exportAccounts, importAccounts, moveSlot, purge, swapSlots } from './core/transfer.ts';
-import { PROVIDER_IDS, type ProviderId } from './core/types.ts';
+import { PROVIDER_IDS, type ProviderId, type State } from './core/types.ts';
 import { withHistory, withoutLimits } from './core/usage-history.ts';
 import { fullyAwake } from './core/wake.ts';
 import { clearRunMark, markRunning } from './providers/process.ts';
@@ -162,6 +163,93 @@ function claudeSettingsPath(): string {
 }
 
 /**
+ * The saved board brought up to date for the status line: which account is in
+ * use from the board the menu published last, when that is newer; that
+ * account's numbers from the cache and the record of uses; and the limits
+ * asked to be left off left off.
+ */
+async function brought(
+	saved: Snapshot | null,
+	provider: ProviderId,
+	hide: readonly string[],
+): Promise<Snapshot | null> {
+	const published = await readJson<State>(statePath()).catch(() => null);
+	const newer =
+		published?.providers !== undefined &&
+		Date.parse(published.updatedAt) >
+			(saved ? Date.parse(saved.updatedAt) : Number.NEGATIVE_INFINITY);
+	const board: Snapshot | null =
+		newer && published
+			? {
+					...withSavedForecasts(published, saved),
+					...(saved?.services ? { services: saved.services } : {}),
+				}
+			: saved;
+	if (!board) return null;
+	const shownState = board.providers[provider];
+	const inUse = shownState?.accounts.find((account) => account.id === shownState.activeAccountId);
+	if (inUse) {
+		const usage = await freshUsage(inUse, provider, inUse.usage, Date.now()).catch(
+			() => inUse.usage,
+		);
+		if (usage) inUse.usage = usage;
+	}
+	return {
+		...withoutLimits(withAllShown(board), hide),
+		...(board.services ? { services: board.services } : {}),
+	};
+}
+
+/** Every window shown, before the limits asked to be left off are worked out again. */
+function withAllShown(board: Snapshot): Snapshot {
+	const providers = Object.fromEntries(
+		Object.entries(board.providers).map(([id, state]) => [
+			id,
+			{
+				...state,
+				accounts: state.accounts.map((account) =>
+					account.usage
+						? {
+								...account,
+								usage: {
+									...account.usage,
+									windows: account.usage.windows.map(({ hidden: _hidden, ...window }) => window),
+								},
+							}
+						: account,
+				),
+			},
+		]),
+	) as State['providers'];
+	return { ...board, providers };
+}
+
+/**
+ * The published board, with the forecast and trend the saved one worked out
+ * for each limit whose reading is the same one.
+ */
+function withSavedForecasts(published: State, saved: Snapshot | null): State {
+	if (!saved) return published;
+	const providers = Object.fromEntries(
+		Object.entries(published.providers).map(([id, state]) => [
+			id,
+			{
+				...state,
+				accounts: state.accounts.map((account) => {
+					const before = saved.providers[id as ProviderId]?.accounts.find(
+						(other) => other.id === account.id,
+					)?.usage;
+					return account.usage
+						? { ...account, usage: withForecastsFrom(account.usage, before) }
+						: account;
+				}),
+			},
+		]),
+	) as State['providers'];
+	return { ...published, providers };
+}
+
+/**
  * Prints one line for an agent's status bar, from the board as it was last
  * worked out. Nothing is asked of any service, so it is quick enough to run
  * every time the bar redraws.
@@ -180,7 +268,10 @@ async function statusline(rest: readonly string[]): Promise<number> {
 		return 0;
 	}
 	const provider = rest[0] ? parseProvider(rest[0]) : 'claude';
-	const snapshot = await readJson<Snapshot>(snapshotPath()).catch(() => null);
+	const saved = await readJson<Snapshot>(snapshotPath()).catch(() => null);
+	const settings = await loadSettings().catch(() => null);
+	// Without readable settings the saved line is drawn as it is.
+	const snapshot = settings ? await brought(saved, provider, settings.hideLimits) : saved;
 	// An agent's status bar draws colour though it is not a terminal.
 	const look = { ...theme(), color: !process.env.NO_COLOR };
 	process.stdout.write(`${statusLine(snapshot, provider, look, Date.now())}\n`);
@@ -529,6 +620,29 @@ export async function main(argv: readonly string[]): Promise<number> {
 						`${PROVIDERS[providerId].displayName} itself is still signed in as ${account.email}. Switch to another account to change that.`,
 					);
 				}
+				return 0;
+			}
+			case 'use-reset': {
+				const providerId = parseProvider(rest[0]);
+				const account = await resolve(providerId, rest[1]);
+				const { reset, outcome, retried } = await useLimitReset(
+					providerId,
+					account,
+					rest.length > 2 ? rest.slice(2) : undefined,
+				);
+				if (!outcome.used) {
+					const why = outcome.refused ?? 'the service declined';
+					throw new Error(
+						retried
+							? `asking again for the ${reset.title} was declined (${why}), but the first time may still have used it - hotseat refresh shows whether it did`
+							: `the ${reset.title} was not used: ${why}`,
+					);
+				}
+				const cleared =
+					reset.clears.length > 0
+						? `: ${reset.clears.join(' and ')} ${reset.clears.length === 1 ? 'starts' : 'start'} over`
+						: '';
+				success(`used the ${reset.title} on ${account.email}${cleared}`);
 				return 0;
 			}
 			case 'list': {

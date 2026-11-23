@@ -103,7 +103,7 @@ export async function acquireLock(dir: string, timeoutMs = 10_000, name = 'lock'
 		while (libc.symbols.flock(file.fd, LOCK_EX | LOCK_NB) !== 0) {
 			const errno = lastErrno();
 			if (errno !== EWOULDBLOCK) throw new Error(`could not lock ${path} (error ${errno})`);
-			if (Date.now() > deadline) throw new Error(`timed out waiting for lock at ${path}`);
+			if (Date.now() >= deadline) throw new Error(`timed out waiting for lock at ${path}`);
 			await Bun.sleep(25);
 		}
 	} catch (error) {

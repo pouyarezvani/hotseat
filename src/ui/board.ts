@@ -1,6 +1,6 @@
 import { type ServiceStatus, worthShowing } from '../core/service-status.ts';
 import { headroom, MIN_USABLE_HEADROOM } from '../core/switch.ts';
-import type { AccountState, ProviderId, State, UsageWindow } from '../core/types.ts';
+import type { AccountState, LimitReset, ProviderId, State, UsageWindow } from '../core/types.ts';
 import {
 	bold,
 	dim,
@@ -108,15 +108,35 @@ function renderAccount(account: AccountState, isActive: boolean, options: BoardO
 
 	const windows = (account.usage?.windows ?? []).filter((window) => !window.hidden);
 	const error = account.usage?.error;
+	const resets = (account.usage?.limitResets ?? []).filter((reset) => {
+		const at = reset.expiresAt ? Date.parse(reset.expiresAt) : Number.NaN;
+		return !Number.isFinite(at) || at > options.now;
+	});
 	if (windows.length === 0) {
+		const hiddenOnly = (account.usage?.windows.length ?? 0) > 0;
 		const said = error
 			? paint(t, 'danger', error)
-			: dim(t, account.usage?.note ?? 'no reading yet');
-		return [head, `   ${paint(t, 'faint', glyphs.corner)} ${said}`, ''];
+			: dim(t, hiddenOnly ? 'every limit hidden' : (account.usage?.note ?? 'no reading yet'));
+		return [
+			head,
+			`   ${paint(t, 'faint', resets.length > 0 ? glyphs.branch : glyphs.corner)} ${said}`,
+			...resets.map((reset, index) => renderReset(reset, index === resets.length - 1, options)),
+			'',
+		];
 	}
 	const labelWidth = Math.max(...windows.map((window) => visibleLength(window.label)));
 	const rows = windows.map((window, index) =>
-		renderWindow(window, labelWidth, index === windows.length - 1 && !error, options),
+		renderWindow(
+			window,
+			labelWidth,
+			index === windows.length - 1 && resets.length === 0 && !error,
+			options,
+		),
+	);
+	rows.push(
+		...resets.map((reset, index) =>
+			renderReset(reset, index === resets.length - 1 && !error, options),
+		),
 	);
 	// The numbers are the last good reading, so the failure sits under them
 	// rather than replacing them.
@@ -145,6 +165,46 @@ function renderWindow(
 		: '';
 	const tail = `${reset ? `  ${paint(t, 'faint', reset)}` : ''}${pace}`;
 	return `   ${connector} ${label}  ${meter(t, window.percent, options.barWidth)} ${value}${tail}`;
+}
+
+/** Within this long of running out, a reset's expiry is drawn as a warning. */
+const EXPIRY_SOON_MS = 3 * 24 * 60 * 60_000;
+
+/** How many midnights lie between two moments, in local time. */
+function calendarDaysBetween(from: number, to: number): number {
+	const midnight = (time: number): number => {
+		const date = new Date(time);
+		return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+	};
+	return Math.round((midnight(to) - midnight(from)) / 86_400_000);
+}
+
+/** One free limit reset: what it is called, what it clears, and when it runs out. */
+function renderReset(reset: LimitReset, isLast: boolean, options: BoardOptions): string {
+	const t = options.theme;
+	const glyphs = symbols(t);
+	const connector = paint(t, 'faint', isLast ? glyphs.corner : glyphs.branch);
+	const name = paint(
+		t,
+		reset.blocked ? 'faint' : 'muted',
+		reset.left ? `${reset.title} x${reset.left}` : reset.title,
+	);
+	const clears = [...reset.clears, ...(reset.givesBack ? [`its share of ${reset.givesBack}`] : [])];
+	const what = clears.length > 0 ? `  ${paint(t, 'faint', clears.join(' + '))}` : '';
+	const at = reset.expiresAt ? Date.parse(reset.expiresAt) : Number.NaN;
+	let when = '';
+	if (Number.isFinite(at)) {
+		const soon = at - options.now < EXPIRY_SOON_MS;
+		const date = new Date(at);
+		const days = calendarDaysBetween(options.now, at);
+		const said =
+			days <= 0
+				? `expires today (${untilReset(reset.expiresAt, options.now)})`
+				: `expires ${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} (${days} day${days === 1 ? '' : 's'})`;
+		when = `  ${paint(t, soon ? 'warn' : 'faint', said)}`;
+	}
+	const blocked = reset.blocked ? `  ${paint(t, 'faint', `(${reset.blocked})`)}` : '';
+	return `   ${connector} ${name}${what}${when}${blocked}`;
 }
 
 function worstOf(account: AccountState): number {

@@ -59,6 +59,10 @@ const GROUPS: Group[] = [
 				what: 'skip it when switching, or stop skipping',
 			},
 			{ usage: 'rename <service> <account> <name>', what: 'give it a short name' },
+			{
+				usage: 'use-reset <service> <account> [reset-id...]',
+				what: 'spend one of its free limit resets, the first usable one unless named',
+			},
 			{ usage: 'move | swap', what: 'change the order' },
 		],
 	},

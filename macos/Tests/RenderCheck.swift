@@ -26,11 +26,11 @@ func boardFor(_ json: String) -> Board {
 let panelBoard = boardFor("""
 {"version":1,"updatedAt":"2026-09-16T12:00:00Z","services":{"codex":{"level":"major","summary":"Major outage: Elevated errors","url":"https://status.openai.com","checkedAt":"x","scoped":false},"grok":{"level":"minor","summary":"A small thing elsewhere","url":"u","checkedAt":"x","scoped":false},"claude":{"level":"ok","summary":"Claude Code is operational","url":"https://status.claude.com","checkedAt":"x"}},"providers":{
 "claude":{"activeAccountId":"a","accounts":[
-{"id":"a","email":"someone@example.com","slot":1,"plan":"max","disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"five_hour","label":"5h","percent":13,"resetsAt":"2099-01-01T00:00:00Z","fullAt":"2098-12-31T22:00:00Z","trend":[0,2,5,5,9,13]},{"key":"weekly","label":"week","percent":97,"trend":[40,55,70,82,90,97]},{"key":"weekly_scoped:fable","label":"Fable","percent":70}]}},
+{"id":"a","email":"someone@example.com","slot":1,"plan":"max","disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"five_hour","label":"5h","percent":13,"resetsAt":"2099-01-01T00:00:00Z","fullAt":"2098-12-31T22:00:00Z","trend":[0,2,5,5,9,13]},{"key":"weekly","label":"week","percent":97,"trend":[40,55,70,82,90,97]},{"key":"weekly_scoped:fable","label":"Fable","percent":70}],"limitResets":[{"id":"w","title":"Weekly reset","clears":["week","Fable"],"expiresAt":"2099-12-10T22:00:00.000Z","detail":"One full limit reset"},{"id":"f","title":"Fable reset","clears":["Fable"],"givesBack":"week","expiresAt":"2099-03-09T07:59:00.000Z"},{"id":"x","title":"Odd reset","clears":"not a list","left":"two","blocked":"cooling down after the last one"}]}},
 {"id":"b","email":"other@example.com","slot":2,"disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"weekly","label":"week","percent":4}]}},
 {"id":"c","email":"off@example.com","slot":3,"disabled":true,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[],"error":"could not read usage"}}]},
 "codex":{"activeAccountId":"d","accounts":[
-{"id":"d","email":"someone@example.com","slot":1,"disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"primary","label":"week","percent":7}]}}]},
+{"id":"d","email":"someone@example.com","slot":1,"disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"primary","label":"week","percent":7}],"limitResets":[{"id":"c1","title":"Full reset","clears":["week"],"expiresAt":"2099-12-01T22:47:59.873Z"}]}}]},
 "antigravity":{"activeAccountId":"e","accounts":[
 {"id":"e","email":"someone@example.com","slot":1,"plan":"Google AI Pro","disabled":false,"usage":{"fetchedAt":"2026-09-16T12:00:00Z","windows":[{"key":"gemini-5h","label":"Gemini 5h","percent":0},{"key":"gemini-weekly","label":"Gemini week","percent":0.3},{"key":"3p-5h","label":"Claude and GPT 5h","percent":0},{"key":"3p-weekly","label":"Claude and GPT week","percent":0},{"key":"argon-weekly","label":"Gemini 4 Argon week","percent":4.2}]}}]}}}
 """)
@@ -125,6 +125,84 @@ check(
 check(
 	"an account's options show its limits' last week when there is one to show",
 	(heights["trends"] ?? 0) > (heights["options"] ?? 0) - 60, "\(heights)")
+let shownResets = panelBoard.providers["claude"]?.accounts.first?.usage?.limitResets ?? []
+check("an account's resets are read with the board", shownResets.count == 3, "\(shownResets.count)")
+check("a reset says what it clears", shownResets.first?.clearsText == "week + Fable", shownResets.first?.clearsText ?? "nil")
+check("a reset that gives back part of a limit says so", shownResets.dropFirst().first?.clearsText == "Fable + its share of week")
+check(
+	"a line of several alike resets offers every one of them to a click",
+	(try? JSONDecoder().decode(LimitReset.self, from: Data(#"{"id":"a","ids":["a","b"],"title":"Fable reset"}"#.utf8)))?
+		.allIds == ["a", "b"])
+check(
+	"a reset with no id cannot be clicked",
+	(try? JSONDecoder().decode(LimitReset.self, from: Data(#"{"title":"Weekly reset"}"#.utf8)))?.canUse == false)
+let lapsed = try? JSONDecoder().decode(
+	LimitReset.self, from: Data(#"{"id":"a","title":"Weekly reset","expiresAt":"2020-01-01T00:00:00Z"}"#.utf8))
+check("a reset that has run out since the board was read cannot be used", lapsed?.canUse == false && lapsed?.expired() == true)
+let current = try? JSONDecoder().decode(
+	LimitReset.self, from: Data(#"{"id":"a","title":"Weekly reset","expiresAt":"2099-01-01T00:00:00Z"}"#.utf8))
+check("one that has not can", current?.canUse == true && current?.expired() == false)
+check(
+	"a reset with a malformed field keeps the rest of it",
+	shownResets.last?.title == "Odd reset" && shownResets.last?.clears == [] && shownResets.last?.left == nil
+		&& shownResets.last?.blocked != nil)
+check(
+	"a control in a hovered card still shows its own hover",
+	Theme.dark.rowHover != Theme.dark.cardHover && Theme.light.rowHover != Theme.light.cardHover)
+let paceNow = Date(timeIntervalSince1970: 1_795_000_000)
+let weekWindow = UsageWindow(
+	key: "seven_day", label: "week", percent: 70,
+	resetsAt: ISO8601DateFormatter().string(from: paceNow.addingTimeInterval(5 * 86_400)))
+let paceGone = Pace.gone(weekWindow, now: paceNow) ?? -1
+check("the pace tick sits at the share of the week gone by", abs(paceGone - 2.0 / 7.0) < 0.001, "\(paceGone)")
+check(
+	"a limit used faster than the clock says it is ahead of pace",
+	Pace.describe(weekWindow, now: paceNow).contains("ahead of that pace"))
+check(
+	"a five-hour window is told by its name",
+	Pace.length(of: UsageWindow(key: "gemini-5h", label: "Gemini 5h", percent: 0, resetsAt: nil)) == 5 * 3600)
+check(
+	"a window's own start sets its length",
+	Pace.length(
+		of: UsageWindow(
+			key: "x", label: "limit", percent: 0, resetsAt: "2026-11-28T06:00:00Z", startsAt: "2026-11-27T06:00:00Z"))
+		== 86_400)
+check(
+	"a daily window is told by its name",
+	Pace.length(of: UsageWindow(key: "d", label: "Gemini day", percent: 0, resetsAt: nil)) == 86_400)
+let spiking = UsageWindow(
+	key: "seven_day", label: "week", percent: 20,
+	resetsAt: ISO8601DateFormatter().string(from: paceNow.addingTimeInterval(3 * 86_400)),
+	fullAt: ISO8601DateFormatter().string(from: paceNow.addingTimeInterval(8 * 3600)))
+check(
+	"a forecast shows even while under pace",
+	Pace.describe(spiking, now: paceNow).contains("under that pace")
+		&& Pace.describe(spiking, now: paceNow).contains("run out in about 8h"),
+	Pace.describe(spiking, now: paceNow))
+check(
+	"a limit of unknown length draws no tick",
+	Pace.gone(UsageWindow(key: "x", label: "limit", percent: 5, resetsAt: weekWindow.resetsAt), now: paceNow) == nil)
+let expiryNow = Date(timeIntervalSince1970: 1_795_000_000)
+var utc = Calendar(identifier: .gregorian)
+utc.timeZone = TimeZone(identifier: "UTC")!
+let later = { (hours: Double) in ISO8601DateFormatter().string(from: expiryNow.addingTimeInterval(hours * 3600)) }
+check(
+	"a reset days away names its date and the days left",
+	Countdown.expiry("2026-12-10T22:00:00Z", now: expiryNow, calendar: utc) == "expires Dec 10 (22 days)",
+	Countdown.expiry("2026-12-10T22:00:00Z", now: expiryNow, calendar: utc) ?? "nil")
+check(
+	"a reset months away is told apart by its days left, not its year",
+	Countdown.expiry("2027-03-09T07:59:00Z", now: expiryNow, calendar: utc) == "expires Mar 9 (111 days)",
+	Countdown.expiry("2027-03-09T07:59:00Z", now: expiryNow, calendar: utc) ?? "nil")
+check(
+	"a reset running out tomorrow says one day",
+	Countdown.expiry(later(26), now: expiryNow, calendar: utc) == "expires Nov 19 (1 day)",
+	Countdown.expiry(later(26), now: expiryNow, calendar: utc) ?? "nil")
+check(
+	"a reset running out today counts down its hours",
+	Countdown.expiry(later(2), now: expiryNow, calendar: utc) == "expires today (2h 0m)",
+	Countdown.expiry(later(2), now: expiryNow, calendar: utc) ?? "nil")
+check("a reset already run out says nothing", Countdown.expiry("2020-01-01T00:00:00Z", now: expiryNow) == nil)
 check("a status page's trouble is read with the board", panelBoard.services["codex"]?.isTrouble == true)
 check("a service that is fine is not called trouble", panelBoard.services["claude"]?.isTrouble == false)
 check("an outage on a page that covers a whole company is shown", panelBoard.services["codex"]?.isShown == true)

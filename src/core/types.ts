@@ -63,10 +63,55 @@ export interface UsageWindow {
 	span?: '5h' | 'week' | 'month';
 	/** Left off the board because it was asked to be; still read, counted and recorded. */
 	hidden?: boolean;
+	/** It has reset since it was read, and nothing has been read of the new window yet. */
+	cleared?: true;
 	/** When this limit will be full at the pace it has been filling, if that is before it resets. */
 	fullAt?: string;
+	/** When the window that resets at `resetsAt` began, when the service says. */
+	startsAt?: string;
 	/** The last week of this limit, as evenly spaced values, oldest first. */
 	trend?: number[];
+}
+
+/**
+ * A free reset of some of an account's limits, granted by the service. hotseat
+ * lists them, and uses one only when a person asks it to.
+ */
+export interface LimitReset {
+	/** The service's own id for it. */
+	id: string;
+	/** What it is called, after what it clears: "Weekly reset", "Fable reset". */
+	title: string;
+	/** The limits it empties, by the names the board gives them. */
+	clears: string[];
+	/** The keys of the limits it may empty, for telling whether it has anything to clear. */
+	windowKeys?: string[];
+	/** It empties every limit the account reports, whichever those are. */
+	clearsEvery?: true;
+	/** It also empties a limit the board does not draw, which may be in use. */
+	clearsUnseen?: true;
+	/** It also empties a limit the board does not draw, which the service reports as empty. */
+	clearsEmptyUnseen?: true;
+	/** Every reset on this line, when several that read the same are shown as one. */
+	ids?: string[];
+	/** A limit it leaves running, but gives back what the cleared ones used of it. */
+	givesBack?: string;
+	/** When it can no longer be used. */
+	expiresAt?: string;
+	/** How many uses it has left, when more than one; the board counts alike resets together. */
+	left?: number;
+	/** Why it cannot be used right now, when it cannot. */
+	blocked?: string;
+	/** How the service describes it. */
+	detail?: string;
+}
+
+/** What came of asking the service to use a reset. */
+export interface ResetUse {
+	/** The service reset the limits. */
+	used: boolean;
+	/** Why it did not, in words, when it did not. */
+	refused?: string;
 }
 
 export interface UsageSnapshot {
@@ -74,6 +119,28 @@ export interface UsageSnapshot {
 	fetchedAt: string;
 	windows: UsageWindow[];
 	spendPercent?: number;
+	/**
+	 * The free limit resets the account holds, as the service last listed them:
+	 * absent when it said nothing about them, empty when it said there are none.
+	 */
+	limitResets?: LimitReset[];
+	/** When that list was read, which can be earlier than the numbers. */
+	limitResetsReadAt?: string;
+	/** The service listed resets hotseat could not tell apart, so the list is not the whole of them. */
+	limitResetsIncomplete?: true;
+	/**
+	 * A limit the service keeps but the board does not draw is in use, so a
+	 * reset that clears every limit has something to clear whatever the drawn
+	 * ones say.
+	 */
+	otherLimitsInUse?: true;
+	/** When the last of those undrawn limits in use resets, when the service says. */
+	otherLimitsInUseUntil?: string;
+	/**
+	 * The list is the last one read, and the service has since said it holds a
+	 * different number, so it is shown but not taken as current.
+	 */
+	limitResetsStale?: true;
 	/**
 	 * What a good read says when it brings no limits: the service answered, and
 	 * has none to report for this account.
@@ -93,6 +160,8 @@ export type Credential = Record<string, unknown>;
 
 export interface Identity {
 	email: string;
+	/** The service itself said whose this login is, rather than it being read from the login. */
+	confirmed?: boolean;
 	plan?: string;
 	accountId?: string;
 	organizationId?: string;
@@ -147,7 +216,8 @@ export interface Provider {
 	readAgentCredential(): Promise<Credential | null>;
 	writeAgentCredential(credential: Credential): Promise<void>;
 	identify(credential: Credential): Promise<Identity>;
-	fetchUsage(credential: Credential): Promise<UsageSnapshot>;
+	/** Reads the account's usage. The last reading lets a provider reuse what changes rarely. */
+	fetchUsage(credential: Credential, previous?: UsageSnapshot): Promise<UsageSnapshot>;
 	refreshIfNeeded(credential: Credential): Promise<Credential>;
 	runningProcesses(): Promise<RunningProcess[]>;
 	/** Whether two copies of a login hold the same refresh token, so renewing one spends the other. */
@@ -158,6 +228,18 @@ export interface Provider {
 	recordIdentity?(identity: Identity): Promise<void>;
 	/** The agent's own latest reading of the account it is signed in as, if it keeps one. */
 	localReading?(): Promise<LocalReading | null>;
+	/**
+	 * Spends one of the account's free limit resets. Only ever on a person's
+	 * say-so. The request id names this one attempt: sent again, it asks for the
+	 * same use rather than another. `stillWanted` is asked last, just before the
+	 * request goes out; when it says no, nothing is sent and ResetNotSent is thrown.
+	 */
+	useReset?(
+		credential: Credential,
+		resetId: string,
+		requestId: string,
+		stillWanted?: () => boolean,
+	): Promise<ResetUse>;
 }
 
 /** An account as shown: everything but its login, which never leaves the file. */

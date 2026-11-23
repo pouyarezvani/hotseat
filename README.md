@@ -1,8 +1,9 @@
 # hotseat
 
-Keep several Claude Code and Codex accounts on one machine and move between them
-without signing in and out. A menu bar app shows how much of each limit is left,
-and hotseat can switch for you before the account you are using runs out.
+Keep several Claude Code, Codex, Grok and Antigravity accounts on one machine
+and move between them without signing in and out. A menu bar app shows how much
+of each limit is left and which free limit resets each account holds, and
+hotseat can switch for you before the account you are using runs out.
 
 macOS. MIT licensed.
 
@@ -136,14 +137,49 @@ and when every account is out of room.
 Every good reading is kept for a week. From it hotseat works out, for each
 limit, when it will be full at the pace it has been filling: the last hour and a
 half for a limit that resets within six hours, the last twelve hours otherwise.
-The forecast shows only when the limit would fill before it resets. An account's
-options in the dropdown draw each limit's last week as a line.
+Each bar in the dropdown has a tick where the limit would be if it were used
+evenly until it resets: fill past the tick means it is being used faster than
+the clock. Hover over a bar for the numbers, and for the forecast whenever the
+last few hours' pace would fill the limit before it resets. An account's options in the dropdown draw each limit's last week as a
+line.
 
 hotseat also reads each service's public status page every five minutes
 (status.claude.com for Claude Code, status.openai.com for Codex) and says so
 beside the service when the page reports trouble. OpenAI's page has no entry for
 the Codex CLI, so Codex is given the page as a whole, with the open incidents
 named.
+
+## Free limit resets
+
+Claude and Codex sometimes grant an account free resets of its limits. hotseat
+lists the ones each account holds under its limits, in the dropdown and on the
+board: how many it has, what each one clears, in the same names as the limits
+above it, and when it expires, with the days left: "expires Dec 1 (9 days)". On
+its last day it shows the hours left instead. Hover over one in the dropdown for the full expiry time, how the
+service describes it, and why it cannot be used right now, when it cannot.
+
+- **Claude** lists resets in the same usage answer hotseat already reads, so they
+  cost no extra request. The service lists them only to a client that names
+  itself as a recent Claude Code, so hotseat names the version installed on this
+  Mac. A Fable reset also gives back what Fable used of the week, and says so.
+- **Codex** reports how many reset credits an account has with its usage, and
+  lists them with a request of its own. hotseat makes that request only when the
+  number changes, when one of them has expired, or once the list is six hours
+  old.
+- **Grok** and **Antigravity** have no resets of this kind.
+
+Click a reset in the dropdown to use it. hotseat asks first, naming the account
+and what will start over, because a used reset cannot be given back. From a
+terminal, `hotseat use-reset <service> <account> [reset-id...]` does the same,
+using the first one that can be used now, or the first of those named;
+`hotseat status --json` lists each reset with its id, and every id under `ids`
+when several resets that read the same share a line. A reset is used only if
+the account was last seen to hold it and it can be used now, and one use runs
+at a time. If a use is sent and no answer comes back, hotseat says it may have
+happened and uses nothing else on that account until it has read the account
+again; asking for the same reset before then sends the same request, which the
+service treats as the same use. hotseat never uses a reset on its own, and
+switching does not count on them. Each use is in `hotseat logs`.
 
 ## Keeping agents from running away
 
@@ -247,6 +283,7 @@ Add `--json` to `status`, `title` or `history` for machine-readable output.
 | `hotseat disable <service> <account>` | skip it when switching automatically |
 | `hotseat enable <service> <account>` | include it again |
 | `hotseat rename <service> <account> <name>` | give it a short name |
+| `hotseat use-reset <service> <account> [reset-id...]` | spend one of its free limit resets |
 | `hotseat move <service> <account> <number>` | change its number |
 | `hotseat swap <service> <a> <b>` | exchange two accounts' numbers |
 | `hotseat map <service> <account> [folder]` | use that account in a folder |

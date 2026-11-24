@@ -61,6 +61,10 @@ export class FakeProvider implements Provider {
 	/** Session folders a test says have an agent running in them. */
 	readonly runningIn = new Set<string>();
 	readonly forgotten: string[] = [];
+	/** Session folders whose machine-wide logins were handed back, in order. */
+	readonly carriedBack: string[] = [];
+	/** What handing a session's machine-wide logins back reports. */
+	carryBackResult = false;
 	readonly recorded: Identity[] = [];
 	/** What the fake agent's own config file says it last saw, if anything. */
 	local: LocalReading | null = null;
@@ -101,6 +105,10 @@ export class FakeProvider implements Provider {
 			isRunning: async (dir) => this.runningIn.has(dir),
 			forget: async (dir) => {
 				this.forgotten.push(dir);
+			},
+			carryBack: async (dir) => {
+				this.carriedBack.push(dir);
+				return this.carryBackResult;
 			},
 		};
 	}

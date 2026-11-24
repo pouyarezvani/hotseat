@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { updateRegistry, upsertAccount } from '../src/core/registry.ts';
 import {
 	captureSession,
+	carrySessionBack,
 	forgetSession,
 	freshestLogin,
 	needsSession,
@@ -87,6 +88,37 @@ describe('running one terminal as another account', () => {
 			expect(await captureSession(claude, b)).toBe(true);
 			expect(await loadCredential(b)).toEqual(cred('B-newer', 200));
 			expect(await captureSession(claude, b)).toBe(false);
+		});
+	});
+
+	test('the machine-wide logins a session renewed are handed back when the command ends', async () => {
+		await withHome(async (home) => {
+			const { claude, b } = await world(home);
+			const session = await prepareSession(claude, b);
+			claude.carryBackResult = true;
+			expect(await carrySessionBack(claude, b)).toBe(true);
+			expect(claude.carriedBack).toEqual([session.dir]);
+			claude.carryBackResult = false;
+			expect(await carrySessionBack(claude, b)).toBe(false);
+		});
+	});
+
+	test('an account never run on its own has nothing to hand back', async () => {
+		await withHome(async (home) => {
+			const { claude, b } = await world(home);
+			claude.carryBackResult = true;
+			expect(await carrySessionBack(claude, b)).toBe(false);
+			expect(claude.carriedBack).toEqual([]);
+		});
+	});
+
+	test('an agent whose session keeps nothing machine-wide hands nothing back', async () => {
+		await withHome(async (home) => {
+			const { claude, b } = await world(home);
+			await prepareSession(claude, b);
+			const { carryBack: _, ...withoutCarryBack } = claude.session;
+			claude.session = withoutCarryBack;
+			expect(await carrySessionBack(claude, b)).toBe(false);
 		});
 	});
 

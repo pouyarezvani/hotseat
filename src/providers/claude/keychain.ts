@@ -3,6 +3,8 @@ import type { Credential } from '../../core/types.ts';
 
 export const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 export const OAUTH_KEY = 'claudeAiOauth';
+/** Where Claude Code keeps the machine's MCP connector logins on the entry. */
+const CONNECTOR_KEY = 'mcpOAuth';
 const SECURITY = '/usr/bin/security';
 const NOT_FOUND_RC = 44;
 const STDIN_LINE_LIMIT = 4096 - 64;
@@ -152,6 +154,48 @@ export function isolateAccountKeys(credential: Credential): Credential {
 		isolated.organizationUuid = credential.organizationUuid;
 	}
 	return isolated;
+}
+
+/**
+ * The everyday entry with each connector login the session renewed past it,
+ * so terminals on that entry use the token the service now expects instead of
+ * the one it retired. Only connectors the everyday entry still holds are
+ * carried, so one signed out of meanwhile stays signed out. Null when nothing
+ * would change.
+ */
+export function carryRenewedConnectorLogins(
+	live: Credential | null,
+	session: Credential,
+): Credential | null {
+	const everyday = connectorLoginsOf(live);
+	const renewed = connectorLoginsOf(session);
+	if (!live || !everyday || !renewed) return null;
+	const merged = { ...everyday };
+	let changed = false;
+	for (const [server, login] of Object.entries(renewed)) {
+		if (!(server in everyday) || !hasAccessToken(login)) continue;
+		if (expiryOf(login) <= expiryOf(everyday[server])) continue;
+		merged[server] = login;
+		changed = true;
+	}
+	return changed ? { ...live, [CONNECTOR_KEY]: merged } : null;
+}
+
+function connectorLoginsOf(credential: Credential | null): Record<string, unknown> | null {
+	const value = credential?.[CONNECTOR_KEY];
+	return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function hasAccessToken(login: unknown): boolean {
+	if (typeof login !== 'object' || login === null) return false;
+	const token = (login as { accessToken?: unknown }).accessToken;
+	return typeof token === 'string' && token.length > 0;
+}
+
+function expiryOf(login: unknown): number {
+	if (typeof login !== 'object' || login === null) return 0;
+	const expiresAt = (login as { expiresAt?: unknown }).expiresAt;
+	return typeof expiresAt === 'number' ? expiresAt : 0;
 }
 
 export function oauthOf(credential: Credential): ClaudeOauth | null {

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { readJsonLoose, writeJsonAtomic } from '../../core/fs.ts';
 import type { Identity, SessionSupport } from '../../core/types.ts';
 import {
+	carryRenewedConnectorLogins,
 	deleteKeychain,
 	isolateAccountKeys,
 	mergeAccountKeys,
@@ -127,5 +128,13 @@ export const claudeSession: SessionSupport = {
 	},
 	forget(dir) {
 		return deleteKeychain(keychainServiceFor(dir));
+	},
+	async carryBack(dir) {
+		const session = await readKeychain(keychainServiceFor(dir));
+		if (!session) return false;
+		const carried = carryRenewedConnectorLogins(await readKeychain(), session);
+		if (!carried) return false;
+		await writeKeychain(carried);
+		return true;
 	},
 };

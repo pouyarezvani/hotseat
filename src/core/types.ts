@@ -199,6 +199,12 @@ export interface SessionSupport {
 	isRunning(dir: string): Promise<boolean>;
 	/** Removes whatever the folder's login left outside it, such as a keychain item. */
 	forget(dir: string): Promise<void>;
+	/**
+	 * Hands the machine-wide logins the session renewed, such as connector
+	 * logins, back to the everyday setup, so no other terminal keeps a token
+	 * the service has retired. Whether anything was handed back.
+	 */
+	carryBack?(dir: string): Promise<boolean>;
 }
 
 /** A usage reading the agent itself keeps, for the account it is signed in as. */

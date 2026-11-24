@@ -240,3 +240,22 @@ export async function captureSession(
 	const after = await freshestLogin(provider, account);
 	return after !== null && JSON.stringify(after) !== JSON.stringify(before);
 }
+
+/**
+ * After the command ends, hands the machine-wide logins the session renewed
+ * back to the everyday setup. Done under the switch lock, so it never
+ * interleaves with a switch writing the same place.
+ */
+export async function carrySessionBack(
+	provider: Provider,
+	account: Pick<AccountRecord, 'email'>,
+): Promise<boolean> {
+	const dir = sessionDir(provider, account);
+	if (!provider.session.carryBack || !(await exists(dir))) return false;
+	const held = await holdSwitch(provider.id);
+	try {
+		return (await provider.session.carryBack?.(dir)) ?? false;
+	} finally {
+		await held.release();
+	}
+}

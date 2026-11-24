@@ -265,7 +265,10 @@ agent is pointed at a folder of its own under `~/.hotseat/sessions`, which
 links to your everyday setup (settings, instructions, skills, commands, agents,
 hooks, plugins, MCP servers) and keeps that account's own login and chat
 history. A token the session refreshes is saved back when it ends, and a
-switch always installs the freshest copy, so nothing goes stale. Running the
+switch always installs the freshest copy, so nothing goes stale. Claude's
+connector logins (MCP sign-ins) the session renews are handed back to every
+other terminal when it ends too, because a renewal ends the token they still
+hold. Running the
 account that is already in use just runs the command on the shared login.
 
 ### A different account per folder

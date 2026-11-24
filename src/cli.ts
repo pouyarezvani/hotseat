@@ -51,7 +51,13 @@ import {
 	updateRegistry,
 } from './core/registry.ts';
 import { serviceStatuses } from './core/service-status.ts';
-import { captureSession, forgetSession, needsSession, prepareSession } from './core/session.ts';
+import {
+	captureSession,
+	carrySessionBack,
+	forgetSession,
+	needsSession,
+	prepareSession,
+} from './core/session.ts';
 import {
 	DEFAULTS,
 	describeSetting,
@@ -852,6 +858,9 @@ export async function main(argv: readonly string[]): Promise<number> {
 				}
 				if (await captureSession(provider, account)) {
 					aside(`saved the login ${account.email} refreshed during this session`);
+				}
+				if (await carrySessionBack(provider, account)) {
+					aside('handed the connector logins this session renewed back to every other terminal');
 				}
 				return code;
 			}

@@ -173,6 +173,14 @@ export interface RunningProcess {
 	command: string;
 }
 
+/** An installed login that holds nothing to sign in with. */
+export interface SignedOut {
+	/** The agent cleared it because the service would no longer renew it. */
+	ended: boolean;
+	/** Why the service stopped renewing it, in words, when the agent said. */
+	reason?: string;
+}
+
 /**
  * How to run one command as a given account in one terminal, leaving the
  * login every other terminal uses alone. The agent is pointed at a folder of
@@ -230,6 +238,12 @@ export interface Provider {
 	sharesToken(a: Credential, b: Credential): boolean;
 	/** When the access token stops working, if the credential says. */
 	expiresAt?(credential: Credential): number | undefined;
+	/** Says how the installed login holds nothing to sign in with; undefined when it holds a login. */
+	signedOut?(credential: Credential): SignedOut | undefined;
+	/** When the sign-in a login comes from ends, after which it can no longer be renewed, if it says. */
+	signInEndsAt?(credential: Credential): number | undefined;
+	/** The service's id for the account a login belongs to, if the login says, even once cleared. */
+	accountOf?(credential: Credential): string | undefined;
 	/** Tells the agent's own records who is signed in now. */
 	recordIdentity?(identity: Identity): Promise<void>;
 	/** The agent's own latest reading of the account it is signed in as, if it keeps one. */

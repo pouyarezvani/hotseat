@@ -2732,6 +2732,22 @@ describe('use-reset', () => {
 		});
 	});
 
+	test('the status line keeps the board’s word that the login in use was signed out', async () => {
+		await withHome(async () => {
+			const { a } = await holding([weekly]);
+			const entry = (await loadCache()).entries[a.id];
+			const note = 'signed out - the login reached its time limit; sign in to it again';
+			const shown = {
+				fetchedAt: entry?.snapshot.fetchedAt ?? '',
+				windows: [{ key: 'seven_day', label: 'week', percent: 97 }],
+				error: note,
+				errorKind: 'other' as const,
+			};
+			const fresh = await freshUsage(a, 'claude', shown, T + MIN);
+			expect(fresh?.error).toBe(note);
+		});
+	});
+
 	test('a read asked for ahead of its turn reads the account and its list of resets on the next pass', async () => {
 		await withHome(async () => {
 			const { providers, a } = await holding([weekly]);

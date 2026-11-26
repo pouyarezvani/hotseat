@@ -6,7 +6,7 @@ import { classify, ServiceError } from './errors.ts';
 import { acquireLock, readJsonLoose, writeJsonAtomic } from './fs.ts';
 import { hotseatHome, usageCachePath } from './paths.ts';
 import { accountsFor, loadRegistry } from './registry.ts';
-import { RenewalFailed, renewInstalled, renewSaved } from './renew.ts';
+import { RenewalFailed, renewInstalled, renewSaved, replaceEnded } from './renew.ts';
 import {
 	loadSent,
 	releaseCutOff,
@@ -27,6 +27,7 @@ import type {
 	ProviderId,
 	ProviderState,
 	Registry,
+	SignedOut,
 	State,
 	UsageSnapshot,
 	UsageWindow,
@@ -248,10 +249,50 @@ function withoutOutcome(snapshot: UsageSnapshot): UsageSnapshot {
 }
 
 const UNCONFIRMED = 'could not confirm which login is in use - trying again shortly';
+const SIGNED_OUT = 'signed out - ';
 
 /** An account's numbers, said to be from a login that could not be confirmed. */
 function unconfirmedOf(snapshot: UsageSnapshot): UsageSnapshot {
-	return { ...withoutOutcome(snapshot), error: UNCONFIRMED, errorKind: 'other' };
+	return noted(snapshot, UNCONFIRMED);
+}
+
+/** An account's numbers, with what the board says of the login in use in place of what a read said. */
+function noted(snapshot: UsageSnapshot, note: string): UsageSnapshot {
+	return { ...withoutOutcome(snapshot), error: note, errorKind: 'other' };
+}
+
+/** Whether a message is the board's own word on the login in use, rather than what a read said. */
+function isBoardNote(error: string | undefined): error is string {
+	return error === UNCONFIRMED || (error?.startsWith(SIGNED_OUT) ?? false);
+}
+
+/** What the board says when the installed login holds nothing to sign in with. */
+function signedOutNote(provider: Provider, out: SignedOut, waitingForWake: boolean): string {
+	if (!out.ended) {
+		return `${SIGNED_OUT}nothing is signed in to ${provider.displayName}; switch to an account or sign in`;
+	}
+	if (waitingForWake)
+		return `${SIGNED_OUT}its saved login goes back in once the Mac is fully awake`;
+	return out.reason
+		? `${SIGNED_OUT}the login ${out.reason}; sign in to it again`
+		: `${SIGNED_OUT}${provider.displayName} stopped renewing the login; sign in to it again`;
+}
+
+/**
+ * The saved account a login the agent cleared belongs to: the one with the
+ * same account id, when the login still names one, else the account last put in use.
+ */
+function ownerOfCleared(
+	provider: Provider,
+	records: AccountRecord[],
+	cleared: Credential,
+	activeId: string | undefined,
+): AccountRecord | undefined {
+	const account = provider.accountOf?.(cleared);
+	if (account === undefined) return records.find((record) => record.id === activeId);
+	return records.find(
+		(record) => record.login !== undefined && provider.accountOf?.(record.login) === account,
+	);
 }
 
 /** How long to wait after being told to slow down, when the service does not say. */
@@ -432,8 +473,8 @@ export async function freshUsage(
 			shown.error !== AWAITING_READ && mark <= at && Number.isFinite(viewAt) && viewAt < at;
 		usage = shownNewer ? asOfNow(shown) : withForecastsFrom(view, shown);
 	}
-	// That the login in use could not be confirmed is the board's to say.
-	return shown.error === UNCONFIRMED ? unconfirmedOf(usage) : usage;
+	// What is said of the login in use is the board's to say.
+	return isBoardNote(shown.error) ? noted(usage, shown.error) : usage;
 }
 
 /**
@@ -903,6 +944,8 @@ export async function collectState(
 	const marks = new Map<string, number>();
 	const holds = new Map<string, number>();
 	const unconfirmed = new Set<string>();
+	/** What the board says of an account whose login was cleared or signed out of. */
+	const signedOut = new Map<string, string>();
 	const fetchedAt = new Date(now).toISOString();
 	const providerSet = options.providers ?? PROVIDERS;
 	const providers = {} as Record<ProviderId, ProviderState>;
@@ -923,6 +966,26 @@ export async function collectState(
 			installed = await provider.readAgentCredential();
 		} catch {
 			unreadable = true;
+		}
+		// A login the agent cleared, or one signed out of, holds nothing to read
+		// with or to name. One the agent cleared because the service would no
+		// longer renew it is replaced with its account's saved login.
+		const out = installed ? provider.signedOut?.(installed) : undefined;
+		if (installed && out) {
+			const owner = ownerOfCleared(provider, records, installed, registry.active[id]);
+			const canReplace = out.ended && owner !== undefined;
+			const waking = canReplace && !(await awake());
+			const back =
+				canReplace && !waking
+					? await replaceEnded(provider, owner, installed, now).catch(() => null)
+					: null;
+			if (back && !provider.signedOut?.(back)) {
+				installed = back;
+			} else {
+				installed = null;
+				const noteFor = owner ?? records.find((record) => record.id === registry.active[id]);
+				if (noteFor) signedOut.set(noteFor.id, signedOutNote(provider, out, waking));
+			}
 		}
 		let liveAwaitsRenewal: string | undefined;
 		if (installed) {
@@ -1150,6 +1213,10 @@ export async function collectState(
 			}),
 		);
 
+		for (const account of accounts) {
+			const note = signedOut.get(account.id);
+			if (note) account.usage = noted(account.usage ?? { fetchedAt, windows: [] }, note);
+		}
 		const active = live
 			? accounts.find((account) => account.email.toLowerCase() === live?.email.toLowerCase())
 			: accounts.find((account) => account.id === unconfirmedId);
@@ -1253,7 +1320,8 @@ export async function collectState(
 			const stored = latest.entries[id];
 			if (!stored) continue;
 			const usage = presented(stored, now, holdOf(id, stored));
-			account.state.usage = unconfirmed.has(id) ? unconfirmedOf(usage) : usage;
+			const note = unconfirmed.has(id) ? UNCONFIRMED : signedOut.get(id);
+			account.state.usage = note ? noted(usage, note) : usage;
 		}
 		rowsFrom = usesNow;
 		latest.identities = { ...latest.identities, ...cache.identities };

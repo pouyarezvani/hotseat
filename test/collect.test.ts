@@ -6,6 +6,7 @@ import { ACTIVE_CALM_MS, CANDIDATE_MS, collectState, plainError } from '../src/c
 import { publishState, saveInstalled, signInAgain } from '../src/core/enroll.ts';
 import { ServiceError } from '../src/core/errors.ts';
 import { acquireLock } from '../src/core/fs.ts';
+import { readEvents } from '../src/core/log.ts';
 import { hotseatHome, usageCachePath } from '../src/core/paths.ts';
 import { loadRegistry, updateRegistry, upsertAccount } from '../src/core/registry.ts';
 import { renewInstalled, renewSaved } from '../src/core/renew.ts';
@@ -1728,6 +1729,152 @@ describe('two passes at once', () => {
 				?.windows[0]?.percent;
 			expect(percent).toBe(95);
 			expect(providers.claude.readsOf.get('B')).toBe(reads);
+		});
+	});
+});
+
+describe('when the agent has cleared the login in use', () => {
+	/** A, in use, signed in a second time since: Claude Code cleared the older login when its time ran out. */
+	async function cleared(ended: Record<string, unknown> = { ended: 'time_limit' }): Promise<World> {
+		const base = await world();
+		await storeCredential(base.a, { ...cred('A'), account: 'acct-a', ends: T + 30 * 86_400_000 });
+		await storeCredential(base.b, { ...cred('B'), account: 'acct-b' });
+		base.providers.claude.installed = { token: '', account: 'acct-a', ...ended };
+		return base;
+	}
+
+	test("the account's saved login goes back in, and the board reads it as in use", async () => {
+		await withHome(async () => {
+			const { providers, a } = await cleared();
+			const state = await collectState({ providers, now: T });
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+			expect(state.providers.claude.activeAccountId).toBe(a.id);
+			const usage = state.providers.claude.accounts.find((x) => x.id === a.id)?.usage;
+			expect(usage?.error).toBeUndefined();
+			expect(usage?.windows[0]?.percent).toBe(50);
+			const events = await readEvents(1, T);
+			expect(events.some((event) => event.kind === 'login-restored')).toBe(true);
+		});
+	});
+
+	test('a saved login due for renewal is renewed before it goes in', async () => {
+		await withHome(async () => {
+			const { providers, a } = await cleared();
+			await storeCredential(a, {
+				...cred('A', 0, T - 1),
+				account: 'acct-a',
+				ends: T + 30 * 86_400_000,
+			});
+			providers.claude.rotate = '-renewed';
+			await collectState({ providers, now: T });
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A-renewed');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A-renewed');
+		});
+	});
+
+	test("one whose saved login's sign-in has ended too is shown signed out, and nothing goes in", async () => {
+		await withHome(async () => {
+			const { providers, a } = await cleared();
+			await storeCredential(a, { ...cred('A'), account: 'acct-a', ends: T - 1 });
+			const state = await collectState({ providers, now: T });
+			expect(providers.claude.calls.write).toBe(0);
+			expect(state.providers.claude.activeAccountId).toBeUndefined();
+			const usage = state.providers.claude.accounts.find((x) => x.id === a.id)?.usage;
+			expect(usage?.error).toBe(
+				'signed out - the login reached its time limit; sign in to it again',
+			);
+		});
+	});
+
+	test('a saved login the service refuses leaves it signed out', async () => {
+		await withHome(async () => {
+			const { providers, a } = await cleared({ ended: true });
+			await storeCredential(a, { ...cred('A', 0, T - 1), account: 'acct-a' });
+			providers.claude.refreshFailures.set(
+				'A',
+				new ServiceError('token refresh failed with 400 invalid_grant', 400),
+			);
+			const state = await collectState({ providers, now: T });
+			expect(providers.claude.calls.write).toBe(0);
+			const usage = state.providers.claude.accounts.find((x) => x.id === a.id)?.usage;
+			expect(usage?.error).toBe(
+				'signed out - Claude stopped renewing the login; sign in to it again',
+			);
+		});
+	});
+
+	test('a cleared login of an account hotseat does not hold is left alone', async () => {
+		await withHome(async () => {
+			const { providers, a } = await cleared({ ended: 'time_limit', account: 'acct-x' });
+			const state = await collectState({ providers, now: T });
+			expect(providers.claude.calls.write).toBe(0);
+			const usage = state.providers.claude.accounts.find((x) => x.id === a.id)?.usage;
+			expect(usage?.error).toStartWith('signed out - ');
+		});
+	});
+
+	test('a cleared login that names no account is taken as the account last put in use', async () => {
+		await withHome(async () => {
+			const { providers } = await cleared({ ended: 'time_limit', account: undefined });
+			await collectState({ providers, now: T });
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
+		});
+	});
+
+	test('the cleared login is not put back while the Mac is half awake', async () => {
+		await withHome(async () => {
+			const { providers } = await cleared();
+			await collectState({ providers, now: T, awake: async () => false });
+			expect(providers.claude.calls.write).toBe(0);
+		});
+	});
+
+	test('a login signed in meanwhile is kept, not replaced', async () => {
+		await withHome(async () => {
+			const { providers } = await cleared();
+			providers.claude.identities.set('A-new', { email: 'a@example.com' });
+			providers.claude.readings.set('A-new', () => reading(70));
+			providers.claude.afterRead = () => {
+				providers.claude.afterRead = null;
+				providers.claude.installed = cred('A-new');
+			};
+			const state = await collectState({ providers, now: T });
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A-new');
+			expect(providers.claude.calls.write).toBe(0);
+			expect(state.providers.claude.accounts[0]?.usage?.error).toBeUndefined();
+		});
+	});
+
+	test('signed out entirely: nothing goes in, and it says so', async () => {
+		await withHome(async () => {
+			const { providers, a } = await cleared();
+			providers.claude.installed = {};
+			const state = await collectState({ providers, now: T });
+			expect(providers.claude.calls.write).toBe(0);
+			expect(state.providers.claude.activeAccountId).toBeUndefined();
+			const usage = state.providers.claude.accounts.find((x) => x.id === a.id)?.usage;
+			expect(usage?.error).toBe(
+				'signed out - nothing is signed in to Claude; switch to an account or sign in',
+			);
+		});
+	});
+
+	test('switching to another account works, and the cleared login is saved over no one', async () => {
+		await withHome(async () => {
+			const { providers, a, b } = await cleared();
+			const result = await activate('claude', b.id, { providers, now: T, manual: true });
+			expect(result.alreadyActive).toBe(false);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('B');
+			expect(tokenOf((await loadCredential(a)) ?? {})).toBe('A');
+		});
+	});
+
+	test('switching to the same account puts its saved login back', async () => {
+		await withHome(async () => {
+			const { providers, a } = await cleared();
+			const result = await activate('claude', a.id, { providers, now: T, manual: true });
+			expect(result.alreadyActive).toBe(false);
+			expect(tokenOf(providers.claude.installed ?? {})).toBe('A');
 		});
 	});
 });

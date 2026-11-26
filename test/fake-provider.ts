@@ -9,6 +9,7 @@ import type {
 	ResetUse,
 	RunningProcess,
 	SessionSupport,
+	SignedOut,
 	UsageSnapshot,
 } from '../src/core/types.ts';
 
@@ -119,6 +120,25 @@ export class FakeProvider implements Provider {
 
 	expiresAt(credential: Credential): number | undefined {
 		return typeof credential.expires === 'number' ? credential.expires : undefined;
+	}
+
+	/** A login the agent cleared carries `ended`; one with no token at all was signed out of. */
+	signedOut(credential: Credential): SignedOut | undefined {
+		if ('ended' in credential) {
+			return {
+				ended: true,
+				...(credential.ended === 'time_limit' ? { reason: 'reached its time limit' } : {}),
+			};
+		}
+		return 'token' in credential ? undefined : { ended: false };
+	}
+
+	signInEndsAt(credential: Credential): number | undefined {
+		return typeof credential.ends === 'number' ? credential.ends : undefined;
+	}
+
+	accountOf(credential: Credential): string | undefined {
+		return typeof credential.account === 'string' ? credential.account : undefined;
 	}
 
 	async recordIdentity(identity: Identity): Promise<void> {

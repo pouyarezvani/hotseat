@@ -133,6 +133,57 @@ describe("Claude Code's own cached reading", () => {
 	});
 });
 
+describe('a Claude login Claude Code has cleared', () => {
+	const claude = new ClaudeProvider();
+	/** What Claude Code writes when the service refuses to renew a login: the tokens blanked, the rest kept. */
+	function cleared(loginEnded?: string): Record<string, unknown> {
+		return {
+			claudeAiOauth: {
+				accessToken: '',
+				refreshToken: '',
+				expiresAt: 0,
+				refreshTokenExpiresAt: 1_000,
+				accountUuid: 'acct-1',
+				...(loginEnded ? { loginEnded } : {}),
+			},
+		};
+	}
+
+	test('one that reached its time limit says so', () => {
+		expect(claude.signedOut(cleared('time_limit'))).toEqual({
+			ended: true,
+			reason: 'reached its time limit',
+		});
+	});
+
+	test('one refused for another reason is ended without a reason', () => {
+		expect(claude.signedOut(cleared())).toEqual({ ended: true });
+	});
+
+	test('an entry with no login at all is signed out of, not ended', () => {
+		expect(claude.signedOut({})).toEqual({ ended: false });
+	});
+
+	test('a working login is not signed out', () => {
+		const login = { claudeAiOauth: { accessToken: 'a', refreshToken: 'r', expiresAt: 1 } };
+		expect(claude.signedOut(login)).toBeUndefined();
+	});
+
+	test('it still names its account, and its sign-in end is read from a working login', () => {
+		expect(claude.accountOf(cleared('time_limit'))).toBe('acct-1');
+		expect(claude.accountOf({})).toBeUndefined();
+		const login = {
+			claudeAiOauth: {
+				accessToken: 'a',
+				refreshToken: 'r',
+				expiresAt: 1,
+				refreshTokenExpiresAt: 9,
+			},
+		};
+		expect(claude.signInEndsAt(login)).toBe(9);
+	});
+});
+
 describe('telling which copy of a Claude login is newer', () => {
 	const DAY = 86_400_000;
 	const at = Date.parse('2026-09-28T09:00:00Z');

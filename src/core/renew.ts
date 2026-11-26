@@ -1,6 +1,7 @@
 import { ServiceError } from './errors.ts';
 import { acquireLock, type Lock } from './fs.ts';
 import { heldByOpenSession } from './hold.ts';
+import { logEvent } from './log.ts';
 import { hotseatHome } from './paths.ts';
 import { loadRegistry, updateRegistry } from './registry.ts';
 import { sessionRunning } from './session.ts';
@@ -150,6 +151,39 @@ export async function renewInstalled(
 		} finally {
 			await lock.release();
 		}
+	} finally {
+		await held.release();
+	}
+}
+
+/**
+ * Puts `owner`'s saved login back in place of `ended`, a login the agent
+ * cleared because the service would no longer renew it, and only while that is
+ * still the one installed. A saved login whose own sign-in has ended too is not
+ * used, and one due for renewal is renewed first. Returns the login installed
+ * afterwards, or null when the saved one cannot replace it.
+ */
+export async function replaceEnded(
+	provider: Provider,
+	owner: Pick<AccountRecord, 'id' | 'email'>,
+	ended: Credential,
+	now: number,
+): Promise<Credential | null> {
+	const held = await holdSwitch(provider.id);
+	try {
+		const installed = await provider.readAgentCredential();
+		if (!installed || fingerprint(installed) !== fingerprint(ended)) return installed;
+		const saved = await loadCredential(owner);
+		if (!saved) return null;
+		const ends = provider.signInEndsAt?.(saved);
+		if (ends !== undefined && ends <= now) return null;
+		const renewed = await renewSaved(provider, owner);
+		if (!renewed) return null;
+		const back = await putInUse(provider, owner, renewed, ended, false);
+		if (back && fingerprint(back) === fingerprint(renewed)) {
+			await logEvent('login-restored', { provider: provider.id, account: owner.email }, now);
+		}
+		return back;
 	} finally {
 		await held.release();
 	}

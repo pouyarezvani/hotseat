@@ -11,15 +11,18 @@ import type {
 	Provider,
 	ResetUse,
 	RunningProcess,
+	SignedOut,
 	UsageSnapshot,
 	UsageWindow,
 } from '../../core/types.ts';
 import { listProcesses } from '../process.ts';
 import {
+	accountUuidOf,
 	isolateAccountKeys,
 	mergeAccountKeys,
 	oauthOf,
 	readKeychain,
+	signedOutOf,
 	writeKeychain,
 } from './keychain.ts';
 import { claudeConfigPath, claudeSession, updateOauthAccount } from './session.ts';
@@ -456,6 +459,18 @@ export class ClaudeProvider implements Provider {
 	expiresAt(credential: Credential): number | undefined {
 		const expires = oauthOf(credential)?.expiresAt;
 		return expires !== undefined && expires > 0 ? expires : undefined;
+	}
+
+	signedOut(credential: Credential): SignedOut | undefined {
+		return signedOutOf(credential);
+	}
+
+	signInEndsAt(credential: Credential): number | undefined {
+		return oauthOf(credential)?.refreshTokenExpiresAt;
+	}
+
+	accountOf(credential: Credential): string | undefined {
+		return accountUuidOf(credential);
 	}
 
 	/** Claude Code shows who is signed in from its own config file, which a switch must keep true. */

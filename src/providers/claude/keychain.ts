@@ -1,5 +1,5 @@
 import { userInfo } from 'node:os';
-import type { Credential } from '../../core/types.ts';
+import type { Credential, SignedOut } from '../../core/types.ts';
 
 export const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 export const OAUTH_KEY = 'claudeAiOauth';
@@ -196,6 +196,30 @@ function expiryOf(login: unknown): number {
 	if (typeof login !== 'object' || login === null) return 0;
 	const expiresAt = (login as { expiresAt?: unknown }).expiresAt;
 	return typeof expiresAt === 'number' ? expiresAt : 0;
+}
+
+/**
+ * How an entry holds nothing to sign in with. Claude Code blanks the tokens of
+ * a login the service will no longer renew, and marks one that reached its
+ * time limit; an entry signed out of holds no login at all.
+ */
+export function signedOutOf(credential: Credential): SignedOut | undefined {
+	const value = credential[OAUTH_KEY];
+	if (typeof value !== 'object' || value === null) return { ended: false };
+	const { accessToken, loginEnded } = value as { accessToken?: unknown; loginEnded?: unknown };
+	if (typeof accessToken === 'string' && accessToken.length > 0) return undefined;
+	return {
+		ended: true,
+		...(loginEnded === 'time_limit' ? { reason: 'reached its time limit' } : {}),
+	};
+}
+
+/** The account a login belongs to, which Claude Code keeps on a login it has cleared. */
+export function accountUuidOf(credential: Credential): string | undefined {
+	const value = credential[OAUTH_KEY];
+	if (typeof value !== 'object' || value === null) return undefined;
+	const uuid = (value as { accountUuid?: unknown }).accountUuid;
+	return typeof uuid === 'string' && uuid.length > 0 ? uuid : undefined;
 }
 
 export function oauthOf(credential: Credential): ClaudeOauth | null {

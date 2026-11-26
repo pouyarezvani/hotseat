@@ -128,8 +128,10 @@ export async function activate(
 		const why = error instanceof Error ? error.message : String(error);
 		throw new Error(`could not read the login in use (${why}) - not switching, so nothing is lost`);
 	});
-	const identity = live ? await liveIdentity(provider, live, registry) : undefined;
-	if (live && !identity) {
+	// A login the agent cleared, or one signed out of, holds nothing to keep.
+	const usable = live && !provider.signedOut?.(live) ? live : null;
+	const identity = usable ? await liveIdentity(provider, usable, registry) : undefined;
+	if (usable && !identity) {
 		// An installed login nobody can name would be overwritten unsaved,
 		// and with it any token the agent rotated since it was last saved.
 		throw new Error(
@@ -142,7 +144,7 @@ export async function activate(
 			)
 		: undefined;
 	let savedLogin: SwitchResult['savedLogin'];
-	if (live && identity && !previous) {
+	if (usable && identity && !previous) {
 		previous = await updateRegistry((current) =>
 			upsertAccount(current, {
 				provider: providerId,
@@ -151,7 +153,7 @@ export async function activate(
 			}),
 		);
 		registry = await loadRegistry();
-		await storeCredential(previous, live);
+		await storeCredential(previous, usable);
 		savedLogin = { email: previous.email, slot: previous.slot };
 	}
 
@@ -185,7 +187,7 @@ export async function activate(
 	// An agent that keeps its login until it restarts goes on using the
 	// account left. Without knowing which sessions are open, that login could
 	// be renewed out from under one of them.
-	const keepsLogin = !provider.liveSwap && live !== null && previous !== undefined;
+	const keepsLogin = !provider.liveSwap && usable !== null && previous !== undefined;
 	if (keepsLogin && scanned === null) {
 		throw new Error(
 			`could not tell whether ${provider.displayName} is running - not switching, so nothing is lost; try again`,
@@ -219,7 +221,7 @@ export async function activate(
 	// Save the outgoing login before overwriting it, so a token the agent
 	// refreshed while that account was in use is not lost. Never over a
 	// newer sign-in already saved for that account.
-	if (live && previous && !savedLogin) await adoptWhileHeld(provider, previous, live);
+	if (usable && previous && !savedLogin) await adoptWhileHeld(provider, previous, usable);
 
 	const installed = await putInUse(provider, target, refreshed, live, false);
 	if (!installed || fingerprint(installed) !== fingerprint(refreshed)) {
